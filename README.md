@@ -14,7 +14,11 @@
 
 - `ios-swift-orchestrator`
   - iOS/Swift 작업의 상위 진입점으로, 협업 워크플로와 Swift 전문성을 라우팅하는 래퍼 스킬
-  - `ios-multi-agent-dev`, `swift-master`, 또는 둘 다 선택해 오케스트레이션
+  - `ios-multi-agent-dev`, `swift-master`, `claude-code-bridge` 중 필요한 조합을 선택해 오케스트레이션
+
+- `claude-code-bridge`
+  - Codex를 메인 오케스트레이터로 유지하면서 로컬 Claude Code CLI를 실제 분석/구현/리뷰 워커로 연결하는 브리지 스킬
+  - `analysis → implementation → review → review-incorporation` 단계 분리, 세션 전략, 역할 잠금, Task Brief 기반 구조화 입력 규칙 제공
 
 ## 사용 예시
 
@@ -22,6 +26,7 @@
 $ios-multi-agent-dev 실제 iOS/Swift 작업을 planner, builder, reviewer 역할로 나눠 진행해주세요.
 $swift-master 이 SwiftUI 코드의 상태 관리와 동시성 문제를 리뷰해줘.
 $ios-swift-orchestrator 이 iOS/Swift 작업을 어떤 하위 스킬로 진행할지 결정하고 실행 흐름을 잡아줘.
+$claude-code-bridge 이 저장소를 Claude CLI로 분석하게 하고 결과를 내가 다시 검증할 수 있게 정리해줘.
 ```
 
 ## 검증 원칙
