@@ -4,6 +4,8 @@
 
 이 문서는 원본의 GPT-5.4 / Claude Opus 역할 분리를, Codex의 planner/reviewer / builder / main agent 협업에 맞게 재구성한 템플릿이다.
 
+실제 Claude Code CLI를 사용할 때는 이 Task Brief와 단계별 프롬프트를 `../claude-code-bridge/`를 통해 구조화 입력으로 넘기는 것을 우선하기.
+
 ## 역할 매핑
 
 - Planner/Reviewer 에이전트: 문제 정의, 대안 비교, 비판적 리뷰

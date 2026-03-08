@@ -1,0 +1,4 @@
+interface:
+  display_name: "Claude Code Bridge"
+  short_description: "Bridge Codex with Claude Code CLI"
+  default_prompt: "Use $claude-code-bridge to run Claude Code CLI for analysis, implementation, or review from Codex."

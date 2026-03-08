@@ -11,6 +11,8 @@
 | 릴리즈 직전 iOS 버그 수정 | `ios-multi-agent-dev` | 검증 루프와 리뷰 게이트가 중요 |
 | 구현 + 테스트 + 리뷰 + handoff가 필요한 기능 추가 | `ios-multi-agent-dev` | 멀티에이전트 흐름이 핵심 |
 | `MainActor` / `Sendable` / cancellation이 얽힌 실제 수정 | 둘 다 | workflow와 strict concurrency 판단이 모두 필요 |
+| 큰 코드베이스에서 Claude 2차 분석이 필요한 작업 | `swift-master` + `claude-code-bridge` | 전문 판단과 실제 Claude 분석을 결합 |
+| 범위가 잠긴 구현을 Claude CLI에 맡기고 싶은 작업 | `ios-multi-agent-dev` + `claude-code-bridge` | 워크플로 통제와 실제 Claude 구현을 결합 |
 | SwiftUI 리팩터링을 여러 단계로 안전하게 진행 | 둘 다 | workflow와 기술 판단이 모두 필요 |
 | DI/Architecture 개편 설계 + 구현 | 둘 다 | 설계 판단과 단계적 실행이 모두 필요 |
 
@@ -30,6 +32,11 @@
 
 - 예 → 둘 다 사용
 - 아니오 → 더 단순한 쪽 하나만 선택
+
+### 4. 실제 Claude CLI 워커가 필요한가?
+
+- 예 → `claude-code-bridge` 추가
+- 아니오 → 기존 선택 유지
 
 ## Recommended Pairing Pattern
 
@@ -59,6 +66,19 @@
 1. `swift-master`로 기술 판단과 reference 선택
 2. 실제 구현/검증이 커지면 `ios-multi-agent-dev`로 승격
 
+### 패턴 C: Claude-assisted
+
+다음에 적합합니다.
+- 2차 분석 의견 필요
+- 특정 파일 구현 초안 필요
+- 외부 비판적 리뷰 필요
+
+순서:
+1. `ios-multi-agent-dev` 또는 `swift-master`로 단계와 기준 잠금
+2. `claude-code-bridge`로 Claude CLI 호출
+3. Codex가 build/test와 diff를 직접 검증
+4. 검증 실패 시 즉시 수정 루프로 복귀
+
 ## Validation Escalation
 
 다음이 보이면 검증 기준을 올리기.
@@ -82,3 +102,4 @@
 - "릴리즈 전에 이 iOS 버그를 안전하게 고쳐줘" → `ios-multi-agent-dev`
 - "Swift 6 마이그레이션을 여러 단계로 안전하게 진행해줘" → 둘 다
 - "SwiftData + Concurrency 이슈를 분석하고 수정까지 해줘" → 둘 다
+- "이 저장소를 Claude CLI로 한번 더 분석해서 Codex 결론과 비교해줘" → `swift-master` + `claude-code-bridge`

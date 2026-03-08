@@ -13,16 +13,17 @@ description: >-
 ## Overview
 
 iOS/Swift 작업의 상위 진입점으로 동작하기.
-작업을 먼저 분류한 뒤, 협업 워크플로가 핵심이면 `ios-multi-agent-dev`, Swift 기술 판단이 핵심이면 `swift-master`, 둘 다 필요하면 두 스킬을 함께 적용하기.
+작업을 먼저 분류한 뒤, 협업 워크플로가 핵심이면 `ios-multi-agent-dev`, Swift 기술 판단이 핵심이면 `swift-master`, 실제 Claude Code CLI 워커가 필요하면 `claude-code-bridge`, 둘 이상이 필요하면 함께 적용하기.
 
 ## Quick Start
 
 1. `references/routing-guide.md`에서 작업 유형과 위험도를 먼저 분류하기.
 2. 협업/검증/릴리즈 리스크가 크면 `../ios-multi-agent-dev/SKILL.md`를 읽기.
 3. SwiftUI, SwiftData, Concurrency, DI, Swift 6, Combine 판단이 필요하면 `../swift-master/SKILL.md`를 읽기.
-4. 둘 다 필요하면 먼저 오케스트레이션 흐름을 정하고, 그 다음 Swift 세부 판단을 붙이기.
-5. `MainActor`, `Sendable`, cancellation, `.task`, SwiftUI lifecycle이 핵심이면 최종 검증 기준을 strict concurrency build/test로 올리기.
-6. 항상 선택한 하위 스킬과 선택 이유를 응답에 명시하기.
+4. 실제 Claude CLI 분석/구현/리뷰 워커가 필요하면 `../claude-code-bridge/SKILL.md`를 읽기.
+5. 둘 이상 필요하면 먼저 오케스트레이션 흐름을 정하고, 그 다음 Swift 세부 판단과 Claude 호출 단계를 붙이기.
+6. `MainActor`, `Sendable`, cancellation, `.task`, SwiftUI lifecycle이 핵심이면 최종 검증 기준을 strict concurrency build/test로 올리기.
+7. 항상 선택한 하위 스킬과 선택 이유를 응답에 명시하기.
 
 ## Routing Rules
 
@@ -51,6 +52,14 @@ iOS/Swift 작업의 상위 진입점으로 동작하기.
 - Swift 6 마이그레이션을 단계적으로 안전하게 진행하기
 - 아키텍처/DI 개편을 여러 단계로 설계하고 구현하기
 
+### `claude-code-bridge`를 함께 적용하기
+
+다음에 우선 검토하기.
+- 큰 코드베이스에서 Claude의 2차 분석 의견이 필요할 때
+- 구현 범위가 명확하고 Claude CLI에 특정 파일 수정 초안을 맡기고 싶을 때
+- Codex 구현 뒤 독립적인 외부 리뷰를 받고 싶을 때
+- Codex와 Claude의 결론을 비교해 더 안전한 쪽을 고르고 싶을 때
+
 ## Wrapper Workflow
 
 ### 1) 작업 분류하기
@@ -62,13 +71,15 @@ iOS/Swift 작업의 상위 진입점으로 동작하기.
 
 - workflow가 핵심이면 `ios-multi-agent-dev`
 - 기술 판단이 핵심이면 `swift-master`
-- 둘 다면 오케스트레이션 → 기술 판단 순으로 사용하기
+- 실제 Claude 워커가 필요하면 `claude-code-bridge`
+- 둘 이상이면 오케스트레이션 → 기술 판단 → Claude 호출 순으로 사용하기
 
 ### 3) 결과 통합하기
 
 - `ios-multi-agent-dev`를 쓸 때는 단계, 역할, 검증 상태를 유지하기.
 - `swift-master`를 쓸 때는 도메인, 근거, 최소 수정 방향을 유지하기.
-- 둘 다 쓸 때는 workflow 출력 형식 안에 Swift 판단 근거를 녹여 넣기.
+- `claude-code-bridge`를 쓸 때는 호출 목적, 세션 전략, Codex 검증 결과를 남기기.
+- 둘 이상 쓸 때는 workflow 출력 형식 안에 Swift 판단 근거와 Claude 결과 검증을 녹여 넣기.
 
 ### 4) 검증 기준 올리기
 
@@ -81,12 +92,13 @@ iOS/Swift 작업의 상위 진입점으로 동작하기.
 - 이 스킬은 세부 구현 규칙을 모두 복제하지 않기.
 - 협업 흐름은 `../ios-multi-agent-dev/SKILL.md`에 위임하기.
 - Swift 기술 세부사항은 `../swift-master/SKILL.md`와 그 references에 위임하기.
+- 실제 Claude CLI 호출 규칙은 `../claude-code-bridge/SKILL.md`와 그 references에 위임하기.
 - companion skill이 없으면 현재 SKILL.md의 라우팅 규칙만으로 최소 판단을 수행하고, 부족한 세부 지식은 직접 코드에서 확인하기.
 
 ## Output Contract
 
 항상 다음을 포함해 응답하기.
-- 선택한 하위 스킬: `ios-multi-agent-dev`, `swift-master`, 또는 둘 다
+- 선택한 하위 스킬: `ios-multi-agent-dev`, `swift-master`, `claude-code-bridge`, 또는 조합
 - 선택 이유
 - 현재 단계 또는 작업 모드
 - 검증 기준
