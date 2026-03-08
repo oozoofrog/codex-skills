@@ -1,0 +1,4 @@
+interface:
+  display_name: "iOS Multi-Agent Dev"
+  short_description: "Role-split iOS/Swift dev workflow"
+  default_prompt: "Use $ios-multi-agent-dev to coordinate planner, builder, and reviewer agents for this iOS/Swift task."
