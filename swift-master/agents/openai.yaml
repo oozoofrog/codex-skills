@@ -1,0 +1,4 @@
+interface:
+  display_name: "Swift Master"
+  short_description: "Swift 6·SwiftUI·Concurrency expert"
+  default_prompt: "Use $swift-master to review, migrate, optimize, or generate Swift/iOS code with the right domain focus."
