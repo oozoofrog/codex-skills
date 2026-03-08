@@ -20,6 +20,23 @@
   - Codex를 메인 오케스트레이터로 유지하면서 로컬 Claude Code CLI를 실제 분석/구현/리뷰 워커로 연결하는 브리지 스킬
   - `analysis → implementation → review → review-incorporation` 단계 분리, 세션 전략, 역할 잠금, Task Brief 기반 구조화 입력 규칙 제공
 
+- `ghostty-setup`
+  - Ghostty 터미널 설정을 안전하게 조정·검증하는 스킬
+  - 테마, 프로필, 가독성, include 체인 변경 작업에 사용
+
+- `ios-app-store-release`
+  - iOS/watchOS 앱의 TestFlight 및 App Store 출시 준비를 지원하는 스킬
+  - 스크린샷, 메타데이터, 버전/빌드, fastlane 기반 릴리스 검증 흐름 제공
+
+## 시스템 스킬 미러링
+
+현재 이 저장소는 아래 기본 시스템 스킬도 함께 추적합니다.
+
+- `.system/skill-creator`
+- `.system/skill-installer`
+- `.system/slides`
+- `.system/spreadsheets`
+
 ## 사용 예시
 
 ```text

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ghostty Setup"
+  short_description: "Configure Ghostty settings, themes, and profiles safely"
+  default_prompt: "Use $ghostty-setup to configure Ghostty settings, themes, and accessibility with safe validation steps."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "iOS App Store Release"
+  short_description: "Refresh screenshots, metadata, and release uploads"
+  default_prompt: "Prepare this iOS app for release: refresh screenshots, update metadata and release notes, validate versions, and build or upload the binary."
