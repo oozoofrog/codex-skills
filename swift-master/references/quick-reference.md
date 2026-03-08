@@ -39,6 +39,7 @@
 - `Task.detached`
 - continuation resume 안전성
 - cancellation
+- actor-isolated 타입이 non-Sendable 서비스/protocol existential을 보관한 채 async 호출하는지
 
 ### SwiftData 리뷰
 
@@ -108,10 +109,27 @@
 2. `transformation-examples.md`
 3. `swift-practices-reference.md`
 
+## 검증 기준 올리기
+
+다음이 보이면 `typecheck`만으로 끝내지 말기.
+- `@MainActor`
+- `Sendable`
+- actor/service 경계
+- `.task`와 lifecycle 연동
+- cancellation
+
+우선 검토할 명령:
+- `swift test`
+- `swift build`
+- `xcodebuild test`
+- strict concurrency 옵션이 포함된 build/test
+
+문제를 찾았으면 진단으로 끝내지 말고 바로 다음 수정안을 함께 쓰기.
+
 ## 자주 쓰는 검색어
 
 - SwiftUI: `@StateObject`, `ObservableObject`, `NavigationView`, `.task`, `@Bindable`
-- Concurrency: `Task.detached`, `DispatchQueue.main.sync`, `withCheckedContinuation`, `@unchecked Sendable`
+- Concurrency: `Task.detached`, `DispatchQueue.main.sync`, `withCheckedContinuation`, `@unchecked Sendable`, `@MainActor`, `Sendable`
 - SwiftData: `@Model`, `ModelContext`, `@Relationship`, `FetchDescriptor`
 - DI: `Factory`, `Injected`, `Container`, `protocol`
 - Combine: `AnyCancellable`, `sink`, `Publisher`, `PassthroughSubject`

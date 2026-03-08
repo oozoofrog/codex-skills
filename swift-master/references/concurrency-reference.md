@@ -379,6 +379,31 @@ final class ThreadSafeCache: @unchecked Sendable {
 }
 ```
 
+### Actor-isolated dependency contract 점검
+
+다음 패턴을 우선 의심하기.
+
+```swift
+@MainActor
+final class ViewModel {
+    private let service: ArticleService
+
+    func load() async throws {
+        _ = try await service.fetch()
+    }
+}
+```
+
+위 구조는 `service`가 non-Sendable이거나 protocol existential의 격리 계약이 불명확하면 Swift 6 strict concurrency에서 깨질 수 있습니다.
+
+우선 검토하기.
+- protocol에 `Sendable` 부여
+- 저장 프로퍼티를 `any ServiceProtocol & Sendable`로 명시
+- 서비스 구현을 actor 또는 안전한 value type으로 설계
+- 서비스가 실제로 main actor에 묶여야 하면 protocol 또는 메서드에 `@MainActor` 부여
+
+리뷰에서 이 패턴을 찾으면 진단만 하지 말고 위 네 방향 중 최소 하나를 즉시 수정안으로 제시하기.
+
 ---
 
 ## Actor 재진입 패턴

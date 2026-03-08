@@ -10,6 +10,7 @@
 | Swift 6 / `@Observable` / AsyncSequence 마이그레이션 | `swift-master` | 마이그레이션 규칙과 예시가 중요 |
 | 릴리즈 직전 iOS 버그 수정 | `ios-multi-agent-dev` | 검증 루프와 리뷰 게이트가 중요 |
 | 구현 + 테스트 + 리뷰 + handoff가 필요한 기능 추가 | `ios-multi-agent-dev` | 멀티에이전트 흐름이 핵심 |
+| `MainActor` / `Sendable` / cancellation이 얽힌 실제 수정 | 둘 다 | workflow와 strict concurrency 판단이 모두 필요 |
 | SwiftUI 리팩터링을 여러 단계로 안전하게 진행 | 둘 다 | workflow와 기술 판단이 모두 필요 |
 | DI/Architecture 개편 설계 + 구현 | 둘 다 | 설계 판단과 단계적 실행이 모두 필요 |
 
@@ -43,7 +44,8 @@
 순서:
 1. `ios-multi-agent-dev`로 Task Brief와 단계 고정
 2. 필요한 단계에서 `swift-master`로 기술 판단 보강
-3. 메인 에이전트가 검증 루프 수행
+3. concurrency 민감 작업이면 strict concurrency build/test를 검증 기준으로 설정
+4. 메인 에이전트가 검증 루프 수행
 
 ### 패턴 B: Expertise-first
 
@@ -56,6 +58,23 @@
 순서:
 1. `swift-master`로 기술 판단과 reference 선택
 2. 실제 구현/검증이 커지면 `ios-multi-agent-dev`로 승격
+
+## Validation Escalation
+
+다음이 보이면 검증 기준을 올리기.
+- `@MainActor`
+- `Sendable`
+- actor/service 경계
+- `.task` 또는 SwiftUI lifecycle
+- cancellation
+
+이 경우 우선 검토하기.
+- `swift test`
+- `swift build`
+- `xcodebuild test`
+- strict concurrency 옵션이 포함된 build/test
+
+검증 실패 시에는 “성공”으로 종료하지 말고 즉시 수정 루프 또는 구체적인 다음 수정안을 제시하기.
 
 ## Example Requests
 

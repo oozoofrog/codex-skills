@@ -21,7 +21,8 @@ iOS/Swift 작업의 상위 진입점으로 동작하기.
 2. 협업/검증/릴리즈 리스크가 크면 `../ios-multi-agent-dev/SKILL.md`를 읽기.
 3. SwiftUI, SwiftData, Concurrency, DI, Swift 6, Combine 판단이 필요하면 `../swift-master/SKILL.md`를 읽기.
 4. 둘 다 필요하면 먼저 오케스트레이션 흐름을 정하고, 그 다음 Swift 세부 판단을 붙이기.
-5. 항상 선택한 하위 스킬과 선택 이유를 응답에 명시하기.
+5. `MainActor`, `Sendable`, cancellation, `.task`, SwiftUI lifecycle이 핵심이면 최종 검증 기준을 strict concurrency build/test로 올리기.
+6. 항상 선택한 하위 스킬과 선택 이유를 응답에 명시하기.
 
 ## Routing Rules
 
@@ -69,6 +70,12 @@ iOS/Swift 작업의 상위 진입점으로 동작하기.
 - `swift-master`를 쓸 때는 도메인, 근거, 최소 수정 방향을 유지하기.
 - 둘 다 쓸 때는 workflow 출력 형식 안에 Swift 판단 근거를 녹여 넣기.
 
+### 4) 검증 기준 올리기
+
+- SwiftUI lifecycle + concurrency 문제가 섞이면 `typecheck`만으로 끝내지 말기.
+- 가능하면 `swift test`, `swift build`, `xcodebuild test`, strict concurrency build를 검증 기준으로 삼기.
+- 검증이 실패하면 성공처럼 보고하지 말고, 즉시 수정 루프 또는 구체적인 다음 수정안을 제시하기.
+
 ## Companion Skill Contract
 
 - 이 스킬은 세부 구현 규칙을 모두 복제하지 않기.
@@ -82,5 +89,6 @@ iOS/Swift 작업의 상위 진입점으로 동작하기.
 - 선택한 하위 스킬: `ios-multi-agent-dev`, `swift-master`, 또는 둘 다
 - 선택 이유
 - 현재 단계 또는 작업 모드
+- 검증 기준
 - 핵심 위험 또는 핵심 기술 판단
 - 다음 단계
