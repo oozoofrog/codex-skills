@@ -53,6 +53,7 @@ Rules:
 - Search common local paths and env vars for App Store Connect credentials before declaring them missing.
 - If a required credential or asset is truly missing, stop the irreversible step and report the exact missing file, expected path, and the next action needed from the user.
 - If the user provides the missing file path and the repo expects a fixed location, copy or wire it in with the smallest safe change instead of asking the user to redo the whole process manually.
+- For App Store Connect API keys, explain where the user can create or download the key in App Store Connect, which access role is typically needed, that the `.p8` private key is only downloadable once, and where the file should be placed locally before retrying.
 
 ### 3. Lock the release target
 
@@ -184,4 +185,5 @@ Never fabricate credentials, reviewer data, or store assets. Only automate setup
 
 - Read `references/release-checklist.md` when you need the detailed step-by-step checklist, repo-signal examples, or output template.
 - Read `references/missing-inputs.md` when credentials, screenshots, version info, or metadata sources are missing and you need the exact recovery pattern.
+- Read `references/app-store-connect-api-key.md` when App Store Connect API key setup is missing and you need exact user guidance or local file wiring steps.
 - Read `references/fastlane-screenshots.md` when a repo lacks screenshot automation and you need to add or update a fastlane screenshot lane.
