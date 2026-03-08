@@ -1,0 +1,4 @@
+interface:
+  display_name: "iOS Swift Orchestrator"
+  short_description: "Routes iOS work across workflow and expertise"
+  default_prompt: "Use $ios-swift-orchestrator to route this iOS/Swift task across collaboration workflow and Swift domain expertise."
