@@ -4,6 +4,16 @@
 
 ---
 
+## Quick Index
+
+- ObservableObject → `@Observable`
+- `NavigationView` → `NavigationStack`
+- Singleton Cache → Actor
+- Core Data Background → SwiftData `@ModelActor`
+- Combine Publisher → `AsyncSequence`
+- Delegate Pattern → async/await
+- Quick Transformation Cheat Sheet
+
 ## 1. ObservableObject → @Observable 전체 예시
 
 ### Before

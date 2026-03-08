@@ -1,10 +1,39 @@
 # Swift Coding Conventions Reference
 
-Swift/SwiftUI 프로젝트에서 일관된 코드 품질을 유지하기 위한 코딩 컨벤션 레퍼런스입니다.
+Swift/SwiftUI 프로젝트에서 일관된 코드 품질을 유지하기 위한 짧은 규칙 중심 레퍼런스입니다.
 
 > 이 문서는 기존 `swift-conventions` 플러그인의 핵심 규칙을 통합한 것입니다.
 
 ---
+
+## 이 문서의 역할
+
+- 빠르게 확인하는 팀 기본 규칙과 체크리스트를 제공하기
+- 답변, 리뷰, 패치에서 바로 적용할 짧은 정책을 모아두기
+- 자세한 예시와 실전 패턴은 `swift-practices-reference.md`에서 확인하기
+
+## Quick Index
+
+- Target Versions
+- Formatting & Naming
+- Architecture
+- Dependency Injection
+- Concurrency
+- Testing
+
+## Formatting & Naming
+
+- 들여쓰기: 4-space, 탭 사용 금지
+- 줄 끝 공백 제거
+- 타입 이름: `UpperCamelCase`
+- 멤버/함수/변수: `camelCase`
+- 열거형 케이스: `camelCase`
+- Protocol 이름:
+  - 동작/능력: `-able`
+  - 책임/역할: `-er`
+  - 특성: 형용사
+- Magic number는 상수로 이름 붙이기
+- 복잡한 로직은 “무엇”보다 “왜”를 설명하는 주석을 우선하기
 
 ## Target Versions
 

@@ -1,24 +1,21 @@
 # Swift Practices Reference Guide
 
-Swift 코드 품질을 높이기 위한 실전 가이드입니다. 코딩 표준, 문서화, 에러 처리, 타입 설계, 테스트 패턴을 코드 예시와 함께 다룹니다.
+Swift 코드 품질을 높이기 위한 예시 중심 실전 가이드입니다. 짧은 규칙보다 실제 적용 패턴, 문서화, 에러 처리, 타입 설계, 테스트 패턴을 코드 예시와 함께 다룹니다.
 
 ---
 
-## Formatting & Naming Conventions
+## 이 문서의 역할
 
-### Indentation & Whitespace
-- **들여쓰기**: 4-space (탭 사용 금지)
-- **줄 끝**: 공백 제거
+- `swift-conventions-reference.md`의 규칙을 실제 코드에 적용하는 예시를 제공하기
+- 문서화, 에러 처리, 타입 설계, 테스트 전략처럼 설명이 필요한 주제를 다루기
+- 짧은 규칙 확인이 목적이면 `swift-conventions-reference.md`를 먼저 읽기
 
-### Naming Rules
-- **타입 이름**: UpperCamelCase (예: `UserProfile`, `WorkoutSession`)
-- **멤버/함수**: camelCase (예: `userName`, `fetchWorkouts()`)
-- **상수/변수**: camelCase (예: `let maxRetryCount = 3`)
-- **열거형 케이스**: camelCase (예: `.loading`, `.failed(error)`)
-- **Protocol**: Naming 접미사 규칙
-  - 동작/능력: `-able` (예: `Sendable`, `Codable`)
-  - 책임/역할: `-er` (예: `DataProvider`, `NetworkManager`)
-  - 특성: 형용사 (예: `Observable`)
+## Quick Index
+
+- Documentation Standards
+- Error Handling Patterns
+- Type Design Principles
+- Testing Considerations
 
 ---
 
