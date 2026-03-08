@@ -23,7 +23,8 @@ iOS/Swift 작업의 상위 진입점으로 동작하기.
 4. 실제 Claude CLI 분석/구현/리뷰 워커가 필요하면 `../claude-code-bridge/SKILL.md`를 읽기.
 5. 둘 이상 필요하면 먼저 오케스트레이션 흐름을 정하고, 그 다음 Swift 세부 판단과 Claude 호출 단계를 붙이기.
 6. `MainActor`, `Sendable`, cancellation, `.task`, SwiftUI lifecycle이 핵심이면 최종 검증 기준을 strict concurrency build/test로 올리기.
-7. 항상 선택한 하위 스킬과 선택 이유를 응답에 명시하기.
+7. SPM → framework 전환, 중복 모듈 링크 제거, `xcodegen`/`xcodeproj` 재생성이 걸리면 구조 마이그레이션 작업으로 취급하기.
+8. 항상 선택한 하위 스킬과 선택 이유를 응답에 명시하기.
 
 ## Routing Rules
 
@@ -51,6 +52,7 @@ iOS/Swift 작업의 상위 진입점으로 동작하기.
 - SwiftUI 화면 리팩터링 + 멀티에이전트 검증 루프
 - Swift 6 마이그레이션을 단계적으로 안전하게 진행하기
 - 아키텍처/DI 개편을 여러 단계로 설계하고 구현하기
+- SPM → framework source-of-truth 전환, duplicate module linkage 제거, project generator 재생성 작업
 
 ### `claude-code-bridge`를 함께 적용하기
 
@@ -73,6 +75,7 @@ iOS/Swift 작업의 상위 진입점으로 동작하기.
 - 기술 판단이 핵심이면 `swift-master`
 - 실제 Claude 워커가 필요하면 `claude-code-bridge`
 - 둘 이상이면 오케스트레이션 → 기술 판단 → Claude 호출 순으로 사용하기
+- 구조 마이그레이션이면 source of truth(package/framework)를 먼저 잠그고, 그 다음 의존성 그래프와 검증 순서를 확정하기
 
 ### 3) 결과 통합하기
 
@@ -85,6 +88,7 @@ iOS/Swift 작업의 상위 진입점으로 동작하기.
 
 - SwiftUI lifecycle + concurrency 문제가 섞이면 `typecheck`만으로 끝내지 말기.
 - 가능하면 `swift test`, `swift build`, `xcodebuild test`, strict concurrency build를 검증 기준으로 삼기.
+- 구조 마이그레이션이면 가능하면 `framework build → dependent framework build → app build → app test` 순서로 검증하기.
 - 검증이 실패하면 성공처럼 보고하지 말고, 즉시 수정 루프 또는 구체적인 다음 수정안을 제시하기.
 
 ## Companion Skill Contract

@@ -406,6 +406,41 @@ final class ViewModel {
 
 ---
 
+## Async semantic mismatch와 최신 요청 보호
+
+다음 패턴을 위험 신호로 보기.
+
+```swift
+@MainActor
+final class ViewModel {
+    func generate() async {
+        Task {
+            self.result = try await service.generate()
+        }
+    }
+}
+```
+
+위 코드는 함수 시그니처는 `async`지만, 호출자는 실제 생성 완료를 기다리지 못합니다. 테스트는 `await viewModel.generate()` 뒤 최종 상태를 기대하지만, 구현은 사실상 `startGenerate()`처럼 동작해 실패하기 쉽습니다.
+
+추가 위험:
+- 이전 task 취소가 최신 요청의 `isLoading = false`를 덮어씀
+- 오래된 task가 늦게 끝나며 최신 `result`/`error`를 덮어씀
+
+우선 검토하기.
+- 반환된 `Task`를 실제로 `await value`하는지
+- API 이름과 실제 의미가 일치하는지 (`generate` vs `startGenerate`)
+- 최신 요청만 상태를 반영하는 `requestID`/token gate가 있는지
+- 취소 후 `Task.checkCancellation()`로 stale 결과 반영을 막는지
+
+자주 쓰는 수정 방향:
+- `async func`라면 내부 spawned task를 `await`해 실제 완료까지 기다리기
+- fire-and-forget 의도라면 메서드 이름을 `start...`로 바꾸고 호출부/테스트 기대를 맞추기
+- `requestID` 또는 token을 두고 최신 요청만 `result`/`error`/`isLoading` 반영하기
+- 취소된 이전 task가 최신 상태를 덮어쓰지 않도록 guard 추가
+
+---
+
 ## Actor 재진입 패턴
 
 ### 문제

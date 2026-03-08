@@ -16,17 +16,23 @@ Typical navigation path:
 5. Create a new API key if one does not already exist
 6. Download the `.p8` private key file
 
+Direct signed-in page for API keys:
+- `https://appstoreconnect.apple.com/access/integrations/api`
+
+If the user is already signed in and has the right permissions, this direct URL is usually the fastest path and should be given before generic help documentation.
+
 Important:
 - The `.p8` private key can usually be downloaded **only once** at creation time.
 - If the original `.p8` file was lost, the user normally needs to create a **new key** and use that new file.
 - The repo may also require the matching **Key ID** and **Issuer ID** already configured in `Fastfile` or CI secrets.
+- Some accounts first show **Request Access** on the API page. If that appears, the Account Holder may need to request or enable App Store Connect API access before a key can be generated.
 
 ## What to tell the user
 
 When the key is missing, do not just say “file not found.” Explain:
 - the exact missing filename
 - the exact local path expected by the repo
-- where in App Store Connect to create or retrieve the key
+- the direct App Store Connect URL where they can create the key: `https://appstoreconnect.apple.com/access/integrations/api`
 - that the `.p8` file is one-time-download
 - that if they already have the file elsewhere on disk, Codex can copy it into place automatically
 
@@ -85,6 +91,7 @@ then tell the user:
 Use a message shaped like this:
 - Missing item: `~/.appstoreconnect/AuthKey_XXXX.p8`
 - Why needed: required by `fastlane ios beta` / `app_store_connect_api_key`
-- Where to get it: App Store Connect → Users and Access → Integrations → App Store Connect API
+- Direct page: `https://appstoreconnect.apple.com/access/integrations/api`
+- Fallback navigation: App Store Connect → Users and Access → Integrations → App Store Connect API
 - Important note: `.p8` downloads once; if lost, create a new key
 - What Codex can do next: copy the file into place and immediately rerun the upload command

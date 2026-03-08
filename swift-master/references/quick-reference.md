@@ -40,6 +40,9 @@
 - continuation resume 안전성
 - cancellation
 - actor-isolated 타입이 non-Sendable 서비스/protocol existential을 보관한 채 async 호출하는지
+- `async func`가 실제 완료를 기다리지 않고 내부 `Task`만 시작하는지
+- 취소된 이전 요청이 최신 `loading/error/result` 상태를 덮어쓰는지
+- 최신 요청만 상태를 반영하는 `requestID`/token gate가 필요한지
 
 ### SwiftData 리뷰
 
@@ -126,10 +129,29 @@
 
 문제를 찾았으면 진단으로 끝내지 말고 바로 다음 수정안을 함께 쓰기.
 
+## 비동기 의미 불일치
+
+다음을 위험 신호로 보기.
+- `async func generate()`가 내부에서 `Task { ... }`만 만들고 바로 반환
+- 메서드 이름은 `load()/generate()/save()`인데 실제 의미는 `startLoad()/startGenerate()/startSave()`
+- 이전 task의 취소/실패가 최신 요청의 `isLoading` / `error` / `result`를 덮어씀
+
+우선 읽기:
+- `concurrency-reference.md`
+
+우선 검색:
+- `Task {`
+- `currentTask`
+- `isLoading`
+- `errorMessage`
+- `requestID`
+- `token`
+
 ## 자주 쓰는 검색어
 
 - SwiftUI: `@StateObject`, `ObservableObject`, `NavigationView`, `.task`, `@Bindable`
 - Concurrency: `Task.detached`, `DispatchQueue.main.sync`, `withCheckedContinuation`, `@unchecked Sendable`, `@MainActor`, `Sendable`
+- Async semantics: `Task {`, `currentTask`, `requestID`, `generationID`, `isLoading`, `errorMessage`
 - SwiftData: `@Model`, `ModelContext`, `@Relationship`, `FetchDescriptor`
 - DI: `Factory`, `Injected`, `Container`, `protocol`
 - Combine: `AnyCancellable`, `sink`, `Publisher`, `PassthroughSubject`

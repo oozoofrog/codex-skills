@@ -15,6 +15,9 @@
 | 범위가 잠긴 구현을 Claude CLI에 맡기고 싶은 작업 | `ios-multi-agent-dev` + `claude-code-bridge` | 워크플로 통제와 실제 Claude 구현을 결합 |
 | SwiftUI 리팩터링을 여러 단계로 안전하게 진행 | 둘 다 | workflow와 기술 판단이 모두 필요 |
 | DI/Architecture 개편 설계 + 구현 | 둘 다 | 설계 판단과 단계적 실행이 모두 필요 |
+| SPM → framework 전환, source-of-truth 통합 | 둘 다 | 구조 변경과 모듈 경계 판단이 모두 필요 |
+| package product + framework product 중복 링크 제거 | 둘 다 | 빌드 그래프 정리와 모듈/링크 판단이 모두 필요 |
+| `xcodegen`/`xcodeproj` 재생성이 포함된 구조 마이그레이션 | 둘 다 | 설정 재생성과 단계별 검증 루프가 필요 |
 
 ## Decision Tree
 
@@ -79,6 +82,21 @@
 3. Codex가 build/test와 diff를 직접 검증
 4. 검증 실패 시 즉시 수정 루프로 복귀
 
+### 패턴 D: Structure Migration
+
+다음에 적합합니다.
+- package → framework 전환
+- 모듈 source-of-truth 통합
+- duplicate linkage 제거
+- `xcodegen` / `xcodeproj` 재생성 포함 작업
+
+순서:
+1. 현재 source of truth가 package인지 framework인지 먼저 결정
+2. 앱이 package product와 framework product를 동시에 링크하는지 확인
+3. generator 설정(`project.yml`, `xcodeproj`)을 한쪽 기준으로 정리
+4. `framework build → dependent framework build → app build → app test`
+5. 문서와 기본 검증 명령을 새 구조에 맞게 갱신
+
 ## Validation Escalation
 
 다음이 보이면 검증 기준을 올리기.
@@ -95,6 +113,12 @@
 - strict concurrency 옵션이 포함된 build/test
 
 검증 실패 시에는 “성공”으로 종료하지 말고 즉시 수정 루프 또는 구체적인 다음 수정안을 제시하기.
+
+구조 마이그레이션이면 추가 확인하기.
+- app target이 package product와 framework product를 동시에 링크하는지
+- source-of-truth 경로가 하나로 정리됐는지
+- dependent framework가 필요한 framework를 명시적으로 링크하는지
+- generator(`xcodegen`, `tuist`) 설정과 실제 프로젝트 파일이 일치하는지
 
 ## Example Requests
 
