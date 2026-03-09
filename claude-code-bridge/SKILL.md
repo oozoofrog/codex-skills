@@ -14,29 +14,41 @@ description: >-
 
 Codex가 메인 오케스트레이터로 남으면서, 필요할 때 로컬 `claude` CLI를 직접 호출해 분석, 구현, 리뷰를 보조하게 하기.
 이 스킬은 Claude를 대체하지 않고, **Codex가 검증 책임을 유지한 채 Claude Code를 외부 워커처럼 활용**하는 절차를 제공한다.
+기본값은 **비활성**이며, 사용자가 명시적으로 `Claude CLI` 사용을 요청했을 때만 opt-in으로 활성화하기.
 
 ## Quick Start
 
-1. 먼저 `claude auth status`로 인증 상태를 확인하기.
-2. 작업 디렉터리가 신뢰 가능한 로컬 저장소인지 확인하기.
-3. iOS/Swift 작업이면 먼저 `../ios-multi-agent-dev/references/master-template.md`의 Task Brief를 채우기.
-4. 요청을 `analysis`, `implementation`, `review`, `review-incorporation`, `second-opinion` 중 하나로 분류하기.
-5. 명령 템플릿은 `references/cli-recipes.md`를 읽기.
-6. 프롬프트 골격은 `references/prompt-templates.md`를 읽기.
-7. 상황별 강화 문구는 `references/prompt-boosters.md`를 읽기.
-8. 세션 재사용/분리 규칙은 `references/session-strategy.md`를 읽기.
-9. 인증/권한/실패 대응은 `references/auth-and-safety.md`를 읽기.
-10. Claude 출력은 그대로 완료 처리하지 말고, Codex가 파일/테스트/리스크를 직접 검증하기.
+1. 사용자가 `Claude CLI`, `claude`, `Claude로 비교`, `Claude 리뷰`, `2차 의견`처럼 **명시적으로 opt-in 했는지 먼저 확인하기**.
+2. opt-in이 없으면 이 스킬을 활성화하지 말고 Codex 단독 흐름을 유지하기.
+3. `claude auth status`로 인증 상태를 확인하기.
+4. 작업 디렉터리가 신뢰 가능한 로컬 저장소인지 확인하기.
+5. iOS/Swift 작업이면 먼저 `../ios-multi-agent-dev/references/master-template.md`의 Task Brief를 채우기.
+6. 요청을 `analysis`, `implementation`, `review`, `review-incorporation`, `second-opinion` 중 하나로 분류하기.
+7. 명령 템플릿은 `references/cli-recipes.md`를 읽기.
+8. 프롬프트 골격은 `references/prompt-templates.md`를 읽기.
+9. 상황별 강화 문구는 `references/prompt-boosters.md`를 읽기.
+10. 세션 재사용/분리 규칙은 `references/session-strategy.md`를 읽기.
+11. 인증/권한/실패 대응은 `references/auth-and-safety.md`를 읽기.
+12. Claude 출력은 그대로 완료 처리하지 말고, Codex가 파일/테스트/리스크를 직접 검증하기.
+
+## Activation Gate
+
+- 사용자가 명시적으로 opt-in 하지 않았다면 이 스킬을 사용하지 말기.
+- “큰 코드베이스니까 Claude도 같이 쓰자” 같은 추측만으로 활성화하지 말기.
+- `ios-swift-orchestrator`에서도 자동 첨부하지 말고, 사용자 opt-in 이후에만 승격하기.
+- opt-in 근거가 없으면 `claude-code-bridge` 대신 Codex 단독 분석/구현/리뷰 흐름으로 유지하기.
 
 ## When to Use Claude Code CLI
 
 다음에 특히 적합하다.
+- 사용자가 Claude CLI 사용을 명시적으로 요청했을 때
 - 큰 코드베이스에서 2차 분석 의견이 필요할 때
 - 구현 범위가 명확하고 Claude에게 특정 파일 수정을 맡기고 싶을 때
 - Codex 구현 뒤 독립적인 비판적 리뷰가 필요할 때
 - Codex와 Claude의 관점을 비교해 더 안전한 수정을 고를 때
 
 다음에는 우선순위가 낮다.
+- 사용자가 Claude 사용을 명시적으로 요청하지 않았을 때
 - 매우 단순한 단일 파일 수정
 - 현재 로컬 환경에서 `claude` 인증이 안 되어 있을 때
 - CLI 호출보다 내가 바로 수정하는 것이 더 빠른 blocking 작업
@@ -44,6 +56,7 @@ Codex가 메인 오케스트레이터로 남으면서, 필요할 때 로컬 `cla
 ## Core Principles
 
 - Codex가 최종 판단과 검증을 맡기.
+- 기본값은 비활성으로 두고, 명시 opt-in 없이는 사용하지 않기.
 - Claude 출력은 초안 또는 2차 의견으로 취급하기.
 - 신뢰 가능한 로컬 디렉터리에서만 `claude -p`를 사용하기.
 - 요청 범위, 수정 파일, 검증 기준을 먼저 잠그기.
@@ -58,6 +71,8 @@ Codex가 메인 오케스트레이터로 남으면서, 필요할 때 로컬 `cla
 
 ### 1) 사전 확인하기
 
+- 사용자 opt-in 여부 먼저 확인하기.
+- opt-in이 없으면 여기서 종료하고 Codex 단독 흐름 유지하기.
 - `claude` 명령 존재 여부 확인하기.
 - `claude auth status`로 로그인 상태 확인하기.
 - 작업 디렉터리와 허용 범위를 명확히 하기.
@@ -126,11 +141,11 @@ Codex와 Claude 결론이 다르면 다음 순서로 판단하기.
 ## Recommended Pairing
 
 - `ios-multi-agent-dev` + `claude-code-bridge`
-  - 멀티에이전트 워크플로 안에서 Claude를 분석/구현/리뷰 워커로 사용하기
+  - 명시 opt-in 이후, 멀티에이전트 워크플로 안에서 Claude를 분석/구현/리뷰 워커로 사용하기
 - `swift-master` + `claude-code-bridge`
-  - Swift 전문 판단과 함께 Claude의 코드베이스 분석/구현력을 보조적으로 사용하기
+  - 명시 opt-in 이후, Swift 전문 판단과 함께 Claude의 코드베이스 분석/구현력을 보조적으로 사용하기
 - `ios-swift-orchestrator` + `claude-code-bridge`
-  - 어떤 단계에서 Claude CLI를 호출할지 상위 라우팅에서 결정하기
+  - 상위 라우팅에서 opt-in 근거와 호출 목적이 확인된 뒤에만 어떤 단계에서 Claude CLI를 호출할지 결정하기
 
 ## iOS/Swift Mapping
 
@@ -151,6 +166,7 @@ Codex와 Claude 결론이 다르면 다음 순서로 판단하기.
 
 항상 다음을 포함해 응답하기.
 - Claude CLI 사용 여부
+- 사용자 opt-in 근거
 - 호출 목적 (`analysis` / `implementation` / `review` / `review-incorporation` / `second-opinion`)
 - 실행한 명령 또는 명령 골격
 - Claude 결과 요약

@@ -14,17 +14,28 @@ description: >-
 
 iOS/Swift 작업의 상위 진입점으로 동작하기.
 작업을 먼저 분류한 뒤, 협업 워크플로가 핵심이면 `ios-multi-agent-dev`, Swift 기술 판단이 핵심이면 `swift-master`, 실제 Claude Code CLI 워커가 필요하면 `claude-code-bridge`, 둘 이상이 필요하면 함께 적용하기.
+기본값은 **직렬 실행**이며, 한 번에 하나의 하위 스킬만 주 경로로 활성화하고 필요가 검증될 때만 다음 스킬로 승격하기.
 
 ## Quick Start
 
 1. `references/routing-guide.md`에서 작업 유형과 위험도를 먼저 분류하기.
-2. 협업/검증/릴리즈 리스크가 크면 `../ios-multi-agent-dev/SKILL.md`를 읽기.
-3. SwiftUI, SwiftData, Concurrency, DI, Swift 6, Combine 판단이 필요하면 `../swift-master/SKILL.md`를 읽기.
-4. 실제 Claude CLI 분석/구현/리뷰 워커가 필요하면 `../claude-code-bridge/SKILL.md`를 읽기.
-5. 둘 이상 필요하면 먼저 오케스트레이션 흐름을 정하고, 그 다음 Swift 세부 판단과 Claude 호출 단계를 붙이기.
-6. `MainActor`, `Sendable`, cancellation, `.task`, SwiftUI lifecycle이 핵심이면 최종 검증 기준을 strict concurrency build/test로 올리기.
-7. SPM → framework 전환, 중복 모듈 링크 제거, `xcodegen`/`xcodeproj` 재생성이 걸리면 구조 마이그레이션 작업으로 취급하기.
-8. 항상 선택한 하위 스킬과 선택 이유를 응답에 명시하기.
+2. 첫 단계에서는 주 하위 스킬을 **하나만** 고르기.
+3. 협업/검증/릴리즈 리스크가 크면 `../ios-multi-agent-dev/SKILL.md`를 읽기.
+4. SwiftUI, SwiftData, Concurrency, DI, Swift 6, Combine 판단이 필요하면 `../swift-master/SKILL.md`를 읽기.
+5. 첫 단계 결과만으로 부족하다고 검증된 경우에만 두 번째 스킬로 승격하기.
+6. 사용자가 `Claude CLI`, `claude`, `Claude로 비교`, `Claude 리뷰`, `2차 의견`처럼 명시적으로 opt-in 했을 때만 `../claude-code-bridge/SKILL.md`를 읽기.
+7. `MainActor`, `Sendable`, cancellation, `.task`, SwiftUI lifecycle이 핵심이면 최종 검증 기준을 strict concurrency build/test로 올리기.
+8. SPM → framework 전환, 중복 모듈 링크 제거, `xcodegen`/`xcodeproj` 재생성이 걸리면 구조 마이그레이션 작업으로 취급하기.
+9. 항상 선택한 하위 스킬, 선택 이유, 직렬 실행 순서를 응답에 명시하기.
+
+## Default Safety Mode
+
+- 기본값은 **직렬 실행**으로 두기.
+- 한 단계에서 주 하위 스킬은 하나만 활성화하기.
+- 첫 스킬 결과를 메인 에이전트가 요약하고 범위를 잠근 뒤 다음 스킬로 넘어가기.
+- `ios-multi-agent-dev`와 `swift-master`를 같은 단계의 동시 구현 경로로 붙이지 말기.
+- `claude-code-bridge`는 기본값 비활성으로 두고, 명시 opt-in일 때만 추가하기.
+- 로컬 검증 없이 “둘 다 필요할 것 같다”는 추측만으로 스킬을 겹쳐 붙이지 말기.
 
 ## Routing Rules
 
@@ -48,6 +59,7 @@ iOS/Swift 작업의 상위 진입점으로 동작하기.
 ### 둘 다 함께 적용하기
 
 다음처럼 “실제 변경 + Swift 전문 판단”이 동시에 필요하면 둘 다 적용하기.
+단, **동시에 시작하지 말고 직렬로 적용하기.**
 - 릴리즈 민감 iOS 버그 수정 + Concurrency 위험 분석
 - SwiftUI 화면 리팩터링 + 멀티에이전트 검증 루프
 - Swift 6 마이그레이션을 단계적으로 안전하게 진행하기
@@ -56,7 +68,10 @@ iOS/Swift 작업의 상위 진입점으로 동작하기.
 
 ### `claude-code-bridge`를 함께 적용하기
 
-다음에 우선 검토하기.
+다음 조건이 충족될 때만 우선 검토하기.
+- 사용자가 `Claude CLI`, `claude`, `2차 의견`, `비교 리뷰`처럼 명시적으로 opt-in 했기
+
+그 다음에만 적용 검토하기.
 - 큰 코드베이스에서 Claude의 2차 분석 의견이 필요할 때
 - 구현 범위가 명확하고 Claude CLI에 특정 파일 수정 초안을 맡기고 싶을 때
 - Codex 구현 뒤 독립적인 외부 리뷰를 받고 싶을 때
@@ -71,10 +86,10 @@ iOS/Swift 작업의 상위 진입점으로 동작하기.
 
 ### 2) 하위 스킬 선택하기
 
-- workflow가 핵심이면 `ios-multi-agent-dev`
-- 기술 판단이 핵심이면 `swift-master`
-- 실제 Claude 워커가 필요하면 `claude-code-bridge`
-- 둘 이상이면 오케스트레이션 → 기술 판단 → Claude 호출 순으로 사용하기
+- workflow가 핵심이면 먼저 `ios-multi-agent-dev`
+- 기술 판단이 핵심이면 먼저 `swift-master`
+- 실제 Claude 워커가 필요하면 마지막에 `claude-code-bridge`
+- 둘 이상이면 항상 `주 스킬 1개 선택 → 메인 에이전트 요약/범위 잠금 → 다음 스킬 승격` 순으로 사용하기
 - 구조 마이그레이션이면 source of truth(package/framework)를 먼저 잠그고, 그 다음 의존성 그래프와 검증 순서를 확정하기
 
 ### 3) 결과 통합하기
@@ -82,7 +97,8 @@ iOS/Swift 작업의 상위 진입점으로 동작하기.
 - `ios-multi-agent-dev`를 쓸 때는 단계, 역할, 검증 상태를 유지하기.
 - `swift-master`를 쓸 때는 도메인, 근거, 최소 수정 방향을 유지하기.
 - `claude-code-bridge`를 쓸 때는 호출 목적, 세션 전략, Codex 검증 결과를 남기기.
-- 둘 이상 쓸 때는 workflow 출력 형식 안에 Swift 판단 근거와 Claude 결과 검증을 녹여 넣기.
+- 둘 이상 쓸 때는 각 스킬을 어떤 순서로 직렬 적용했는지와, 왜 다음 단계로 승격했는지를 남기기.
+- workflow 출력 형식 안에 Swift 판단 근거와 Claude 결과 검증을 녹여 넣기.
 
 ### 4) 검증 기준 올리기
 
@@ -104,6 +120,7 @@ iOS/Swift 작업의 상위 진입점으로 동작하기.
 항상 다음을 포함해 응답하기.
 - 선택한 하위 스킬: `ios-multi-agent-dev`, `swift-master`, `claude-code-bridge`, 또는 조합
 - 선택 이유
+- 직렬 실행 순서 또는 승격 여부
 - 현재 단계 또는 작업 모드
 - 검증 기준
 - 핵심 위험 또는 핵심 기술 판단

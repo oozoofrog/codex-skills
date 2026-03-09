@@ -25,6 +25,7 @@ Ghostty 설정을 안전하게 변경하고 검증하는 표준 절차를 제공
 
 상세 절차는 `references/workflow.md`를 읽기.
 옵션별 의미와 주의점은 `references/options-map.md`를 읽기.
+성능/메모리 분리 진단은 `references/performance-ab-checklist.md`를 읽기.
 
 ## Workflow
 
@@ -84,6 +85,7 @@ Ghostty 설정을 안전하게 변경하고 검증하는 표준 절차를 제공
 
 - "변경이 안 먹는다" 요청 시 include 순서와 동일 키 중복을 먼저 점검하기.
 - "눈이 피로하다" 요청 시 contrast/size/cursor/selection을 우선 조정하기.
+- "메모리/성능이 튄다" 요청 시 `background-blur`와 대량 출력 영향을 A/B로 분리하기.
 
 ## Output Contract
 
