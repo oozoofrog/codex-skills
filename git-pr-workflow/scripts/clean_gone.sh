@@ -18,7 +18,10 @@ fi
 
 ROOT=$(git rev-parse --show-toplevel)
 CURRENT=$(git branch --show-current)
-mapfile -t GONE_BRANCHES < <(git branch -vv | awk '/\[gone\]/{sub(/^[*+ ]+/, "", $1); print $1}')
+GONE_BRANCHES=()
+while IFS= read -r branch; do
+  [[ -n "$branch" ]] && GONE_BRANCHES+=("$branch")
+done < <(git branch -vv | awk '/gone]/{line=$0; sub(/^[*+ ]+/, "", line); sub(/ .*/, "", line); print line}')
 
 if [[ ${#GONE_BRANCHES[@]} -eq 0 ]]; then
   echo "No [gone] branches found."
