@@ -4,58 +4,38 @@
 
 ## 포함된 스킬
 
-### 범용 워크플로 / 도구 스킬
+| Skill | Category | Best for | Notes |
+|---|---|---|---|
+| `claude-code-bridge` | Workflow | Codex와 로컬 Claude CLI를 함께 쓰는 분석/구현/리뷰 handoff | 사용자가 Claude 사용을 명시적으로 원할 때만 활성화 |
+| `git-pr-workflow` | Workflow | commit, branch, push, PR 생성, stale branch cleanup, PR review | `commit-commands` + `pr-review-toolkit` 계열 흐름을 Codex-native로 통합 |
+| `ralph-loop` | Workflow | bounded iterative Codex loop 설계와 반복 실행 가이드 | 자동 hook 대신 안전한 수동 loop 패턴 사용 |
+| `ghostty-setup` | Tooling | Ghostty 테마/프로필/가독성 설정 변경과 검증 | include chain과 rollback 관점까지 포함 |
+| `frontend-design` | Design | 개성 있는 웹 UI/UX 설계와 구현 | aesthetic direction을 먼저 고정하는 방식 |
+| `ios-multi-agent-dev` | Apple | iOS/Swift 기능 개발을 planner/builder/reviewer로 분리 | 구현과 검증이 큰 작업에 적합 |
+| `swift-master` | Apple | SwiftUI, Concurrency, SwiftData, Swift 6, SourceKit-LSP 진단 | Swift 전문 판단과 코드 리뷰/생성 중심 |
+| `ios-swift-orchestrator` | Apple | iOS/Swift 작업을 어떤 하위 skill로 진행할지 라우팅 | `ios-multi-agent-dev`, `swift-master`, `claude-code-bridge` 조합 선택 |
+| `ios-app-store-release` | Release | TestFlight / App Store 준비, 스크린샷, 메타데이터, 빌드 업로드 | 기존 fastlane / Xcode release flow 재사용 우선 |
+| `macos-release` | Release | macOS GUI 앱/CLI 릴리즈, DMG/ZIP, Homebrew, GitHub Actions | Cask/Formula 및 shared tap 운영 reference 포함 |
 
-- `claude-code-bridge`
-  - Codex를 메인 오케스트레이터로 유지하면서 로컬 Claude Code CLI를 실제 분석/구현/리뷰 워커로 연결하는 브리지 스킬
-  - `analysis → implementation → review → review-incorporation` 단계 분리, 세션 전략, 역할 잠금, Task Brief 기반 구조화 입력 규칙 제공
+## 빠른 선택 가이드
 
-- `git-pr-workflow`
-  - Git commit / branch / push / PR / stale branch cleanup / structured PR review를 다루는 통합 스킬
-  - `commit-commands`와 `pr-review-toolkit` 계열 흐름을 Codex-native 방식으로 재구성
-
-- `ralph-loop`
-  - Codex에서 안전하게 bounded iterative loop를 설계·운영하는 스킬
-  - `codex exec` 기반 수동 반복, completion condition, max iteration, safety rail 제공
-
-- `ghostty-setup`
-  - Ghostty 터미널 설정을 안전하게 조정·검증하는 스킬
-  - 테마, 프로필, 가독성, include 체인 변경 작업에 사용
-
-### 디자인 / 프론트엔드
-
-- `frontend-design`
-  - 개성 있고 완성도 높은 웹 UI/UX를 설계·구현하기 위한 스킬
-  - aesthetic direction, typography, color, motion, layout 기준을 먼저 고정하는 워크플로 제공
-
-### Apple 플랫폼 / 릴리즈
-
-- `ios-multi-agent-dev`
-  - iOS/Swift 작업을 여러 에이전트에 역할 분리해 진행하는 협업 개발 스킬
-  - 정의 → 분석 → 구현 → 메인 검증 → 비판적 리뷰 → 반영 흐름 제공
-
-- `swift-master`
-  - Swift 6, SwiftUI, Swift Concurrency, SwiftData, Architecture, Pure DI, Combine 마이그레이션을 다루는 통합 Swift/iOS 스킬
-  - 리뷰, 최적화, 마이그레이션, 가이드, 코드 생성 워크플로 제공
-  - SourceKit-LSP / Swift code intelligence 진단 reference 포함
-
-- `ios-swift-orchestrator`
-  - iOS/Swift 작업의 상위 진입점으로, 협업 워크플로와 Swift 전문성을 라우팅하는 래퍼 스킬
-  - `ios-multi-agent-dev`, `swift-master`, `claude-code-bridge` 중 필요한 조합을 선택해 오케스트레이션
-
-- `ios-app-store-release`
-  - iOS/watchOS 앱의 TestFlight 및 App Store 출시 준비를 지원하는 스킬
-  - 스크린샷, 메타데이터, 버전/빌드, fastlane 기반 릴리스 검증 흐름 제공
-
-- `macos-release`
-  - macOS GUI 앱과 CLI의 릴리스 준비, 패키징, GitHub Release, Homebrew, GitHub Actions를 다루는 스킬
-  - DMG/ZIP, local install verification, Cask/Formula, shared Homebrew tap 운영 reference 포함
-
+- **Codex와 Claude를 함께 쓰고 싶다** → `claude-code-bridge`
+- **커밋/PR/리뷰 흐름을 정리하고 싶다** → `git-pr-workflow`
+- **반복 실행되는 bounded loop를 설계하고 싶다** → `ralph-loop`
+- **개성 있는 웹 UI/UX를 만들고 싶다** → `frontend-design`
+- **Swift/iOS 기술 판단이 필요하다** → `swift-master`
+- **iOS/Swift 작업을 어떤 skill로 풀지 먼저 결정하고 싶다** → `ios-swift-orchestrator`
+- **iOS/watchOS 앱 릴리즈 준비를 하고 싶다** → `ios-app-store-release`
+- **macOS 앱/CLI 릴리즈와 Homebrew 반영이 필요하다** → `macos-release`
 
 ## 릴리즈 태그
 
 이 저장소는 의미 있는 skill 묶음 변경이 있을 때 annotated tag를 남깁니다.
-첫 정리 태그는 `v0.1.0`이며, 다음 변경부터는 신규 skill 추가나 큰 구조 변경 시 태그를 갱신합니다.
+현재 태그:
+- `v0.1.0`
+- `v0.1.1`
+
+다음 변경부터도 신규 skill 추가나 큰 구조 변경 시 태그를 갱신합니다.
 
 ## 시스템 스킬 미러링
 
@@ -97,8 +77,9 @@ $macos-release macOS 앱 릴리즈를 dry-run부터 Homebrew 반영까지 정리
 
 ## 릴리즈 운영 파일
 
-- `CHANGELOG.md`: 태그 기준 변경 이력
-- `docs/release-notes-template.md`: GitHub Release 작성용 템플릿
+- [`CHANGELOG.md`](./CHANGELOG.md): 태그 기준 변경 이력
+- [`docs/release-notes-template.md`](./docs/release-notes-template.md): GitHub Release 작성용 템플릿
+- [`docs/release-checklist.md`](./docs/release-checklist.md): 실제 릴리즈 절차 체크리스트
 
 ## 검증 원칙
 

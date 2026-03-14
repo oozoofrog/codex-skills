@@ -3,6 +3,12 @@
 이 저장소의 의미 있는 skill 묶음 변경을 기록합니다.
 
 ## [Unreleased]
+### Updated
+- README skill catalog를 표 형태와 빠른 선택 가이드 중심으로 재구성
+- 릴리즈 운영 파일 섹션에 `docs/release-checklist.md` 링크 추가
+
+### Added
+- `docs/release-checklist.md` 추가
 
 ## [0.1.1] - 2026-03-14
 ### Added
