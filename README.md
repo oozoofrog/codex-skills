@@ -68,12 +68,37 @@
 
 ## 사용 예시
 
+### 범용 워크플로 / 도구
+
+```text
+$git-pr-workflow 이 변경을 저장소 스타일에 맞게 커밋하고, 필요하면 PR까지 만들어줘.
+$git-pr-workflow 이 PR diff를 code/tests/errors/comments/types 관점으로 리뷰해줘.
+$ralph-loop 이 작업을 최대 8번 반복하는 bounded Codex loop로 설계해줘.
+$claude-code-bridge 이 저장소를 Claude CLI로 분석하게 하고 결과를 내가 다시 검증할 수 있게 정리해줘.
+```
+
+### 디자인 / 프론트엔드
+
+```text
+$frontend-design 음악 스트리밍 앱용 대시보드를 강한 aesthetic direction으로 구현해줘.
+$frontend-design 이 랜딩 페이지를 generic AI 느낌 없이 더 기억에 남게 다시 설계해줘.
+```
+
+### Apple 플랫폼 / 릴리즈
+
 ```text
 $ios-multi-agent-dev 실제 iOS/Swift 작업을 planner, builder, reviewer 역할로 나눠 진행해주세요.
 $swift-master 이 SwiftUI 코드의 상태 관리와 동시성 문제를 리뷰해줘.
+$swift-master sourcekit-lsp 가 안 잡히는 원인을 진단해줘.
 $ios-swift-orchestrator 이 iOS/Swift 작업을 어떤 하위 스킬로 진행할지 결정하고 실행 흐름을 잡아줘.
-$claude-code-bridge 이 저장소를 Claude CLI로 분석하게 하고 결과를 내가 다시 검증할 수 있게 정리해줘.
+$ios-app-store-release 이번 버전의 TestFlight 준비를 스크린샷, 메타데이터, 빌드 업로드까지 기준으로 점검해줘.
+$macos-release macOS 앱 릴리즈를 dry-run부터 Homebrew 반영까지 정리해줘.
 ```
+
+## 릴리즈 운영 파일
+
+- `CHANGELOG.md`: 태그 기준 변경 이력
+- `docs/release-notes-template.md`: GitHub Release 작성용 템플릿
 
 ## 검증 원칙
 
