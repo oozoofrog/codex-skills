@@ -1,0 +1,4 @@
+interface:
+  display_name: "macOS Release"
+  short_description: "Automate macOS release, packaging, GitHub, and Homebrew"
+  default_prompt: "Use $macos-release to plan or automate a macOS release, including versioning, packaging, GitHub Releases, and Homebrew updates."
