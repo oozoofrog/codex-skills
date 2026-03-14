@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ralph Loop"
+  short_description: "Run safe, bounded iterative Codex loops for well-scoped tasks"
+  default_prompt: "Use $ralph-loop to design a safe bounded Codex loop with a clear completion condition and stop criteria."

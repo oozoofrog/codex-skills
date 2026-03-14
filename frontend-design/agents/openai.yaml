@@ -1,0 +1,4 @@
+interface:
+  display_name: "Frontend Design"
+  short_description: "Create distinctive, production-grade web UI and UX"
+  default_prompt: "Use $frontend-design to design and implement a distinctive production-grade frontend interface with a clear aesthetic direction."

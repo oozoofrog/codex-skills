@@ -12,6 +12,7 @@
 - 설계/가이드 시작: `architecture-reference.md`, `pure-di-reference.md`
 - 팀 규칙 확인: `swift-conventions-reference.md`
 - 예시/실전 패턴 확인: `swift-practices-reference.md`
+- Swift code intelligence / LSP 문제: `sourcekit-lsp.md`
 
 ## 작업 유형별 첫 진입점
 
@@ -81,6 +82,19 @@
 - `sink` → `for await`
 - `AnyCancellable` → `Task`
 - callback/delegate → continuation / `AsyncStream`
+
+
+### SourceKit-LSP / Swift code intelligence
+
+먼저 읽기:
+- `sourcekit-lsp.md`
+- 필요 시 `concurrency-reference.md` 또는 `swiftui-reference.md`
+
+주요 확인 항목:
+- `sourcekit-lsp` 존재 여부
+- `xcode-select` 경로
+- toolchain/PATH 충돌
+- build 문제와 editor/LSP 문제 분리
 
 ## Mode별 읽기 순서
 

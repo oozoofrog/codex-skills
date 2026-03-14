@@ -8,6 +8,7 @@
 |------|-----------|------|
 | 단순 SwiftUI/Concurrency 코드 리뷰 | `swift-master` | 기술 판단이 핵심 |
 | Swift 6 / `@Observable` / AsyncSequence 마이그레이션 | `swift-master` | 마이그레이션 규칙과 예시가 중요 |
+| `sourcekit-lsp` / Swift code intelligence 문제 | `swift-master` | toolchain, project root, build/LSP 분리가 핵심 |
 | 릴리즈 직전 iOS 버그 수정 | `ios-multi-agent-dev` | 검증 루프와 리뷰 게이트가 중요 |
 | 구현 + 테스트 + 리뷰 + handoff가 필요한 기능 추가 | `ios-multi-agent-dev` | 멀티에이전트 흐름이 핵심 |
 | `MainActor` / `Sendable` / cancellation이 얽힌 실제 수정 | 둘 다 | workflow와 strict concurrency 판단이 모두 필요 |
@@ -127,3 +128,5 @@
 - "Swift 6 마이그레이션을 여러 단계로 안전하게 진행해줘" → 둘 다
 - "SwiftData + Concurrency 이슈를 분석하고 수정까지 해줘" → 둘 다
 - "이 저장소를 Claude CLI로 한번 더 분석해서 Codex 결론과 비교해줘" → `swift-master` + `claude-code-bridge`
+- "sourcekit-lsp 가 안 잡혀요" → `swift-master`
+- "Swift code completion/diagnostics가 깨졌어요" → `swift-master`

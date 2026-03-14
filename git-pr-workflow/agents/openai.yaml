@@ -1,0 +1,4 @@
+interface:
+  display_name: "Git PR Workflow"
+  short_description: "Guide commit, PR, cleanup, and structured code review"
+  default_prompt: "Use $git-pr-workflow to help me commit changes, create a PR, clean stale branches, or review a pull request."

@@ -21,7 +21,7 @@ iOS/Swift 작업의 상위 진입점으로 동작하기.
 1. `references/routing-guide.md`에서 작업 유형과 위험도를 먼저 분류하기.
 2. 첫 단계에서는 주 하위 스킬을 **하나만** 고르기.
 3. 협업/검증/릴리즈 리스크가 크면 `../ios-multi-agent-dev/SKILL.md`를 읽기.
-4. SwiftUI, SwiftData, Concurrency, DI, Swift 6, Combine 판단이 필요하면 `../swift-master/SKILL.md`를 읽기.
+4. SwiftUI, SwiftData, Concurrency, DI, Swift 6, Combine, SourceKit-LSP/code intelligence 판단이 필요하면 `../swift-master/SKILL.md`를 읽기.
 5. 첫 단계 결과만으로 부족하다고 검증된 경우에만 두 번째 스킬로 승격하기.
 6. 사용자가 `Claude CLI`, `claude`, `Claude로 비교`, `Claude 리뷰`, `2차 의견`처럼 명시적으로 opt-in 했을 때만 `../claude-code-bridge/SKILL.md`를 읽기.
 7. `MainActor`, `Sendable`, cancellation, `.task`, SwiftUI lifecycle이 핵심이면 최종 검증 기준을 strict concurrency build/test로 올리기.
@@ -55,6 +55,7 @@ iOS/Swift 작업의 상위 진입점으로 동작하기.
 - Swift 6 마이그레이션, `@Observable`, `NavigationStack`, AsyncSequence 전환이 필요하기
 - MVVM/TCA, Pure DI, Composition Root 같은 설계 판단이 핵심이기
 - repo-wide Swift 리뷰나 코드 생성이 목적이기
+- Swift toolchain, `sourcekit-lsp`, code intelligence 문제이기
 
 ### 둘 다 함께 적용하기
 
