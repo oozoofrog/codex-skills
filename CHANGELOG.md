@@ -3,9 +3,15 @@
 이 저장소의 의미 있는 skill 묶음 변경을 기록합니다.
 
 ## [Unreleased]
+
+## [0.1.1] - 2026-03-14
 ### Added
 - README에 skill별 사용 예시 섹션 추가
 - `docs/release-notes-template.md` 추가
+- `CHANGELOG.md` 추가
+
+### Updated
+- README에 신규 skill 설명과 릴리즈 운영 파일 섹션 추가
 
 ## [0.1.0] - 2026-03-14
 ### Added
