@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hierarchical Context Architecture"
+  short_description: "CLAUDE·CONTEXT·AGENTS repo design"
+  default_prompt: "Use $hierarchical-context-architecture to create or audit a layered CLAUDE.md/CONTEXT.md/AGENTS.md context tree for this repository."

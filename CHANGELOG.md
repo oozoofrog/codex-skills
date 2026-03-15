@@ -6,8 +6,11 @@
 ### Updated
 - README skill catalog를 표 형태와 빠른 선택 가이드 중심으로 재구성
 - 릴리즈 운영 파일 섹션에 `docs/release-checklist.md` 링크 추가
+- README에 `hierarchical-context-architecture` 사용 예시와 선택 가이드 추가
 
 ### Added
+- `hierarchical-context-architecture` skill 추가
+- 루트 `CLAUDE.md`, `AGENTS.md` 및 `docs/`, `scripts/`, `.system/`, `hierarchical-context-architecture/`용 `CONTEXT.md` 초안 추가
 - `docs/release-checklist.md` 추가
 
 ## [0.1.1] - 2026-03-14
