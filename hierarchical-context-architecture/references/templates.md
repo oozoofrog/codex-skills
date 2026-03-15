@@ -6,6 +6,7 @@
 3. Portable `AGENTS.md` 템플릿
 4. XML 분리 패턴
 5. 정기 검증 체크리스트
+6. `.context-audit.yml` 예시
 
 ## 1. Root `CLAUDE.md` 템플릿
 
@@ -133,3 +134,38 @@
 - 루트 `CLAUDE.md`가 비대해지지 않았는가?
 - 새로운 하위 디렉토리에 `CONTEXT.md`가 필요한데 빠져 있지 않은가?
 - 같은 실수가 반복되는데 규칙 문서는 그대로 남아 있지 않은가?
+
+## 6. `.context-audit.yml` 예시
+
+```yaml
+strict: true
+
+ignore_dirs:
+  - vendor
+  - tmp
+
+exclude_globs:
+  - docs/generated/**
+
+checks:
+  require_root_claude: true
+  allow_nested_claude: false
+
+line_limits:
+  CLAUDE.md:
+    hint: 150
+    error: 200
+  CONTEXT.md:
+    hint: 140
+  AGENTS.md:
+    hint: 120
+
+max_code_block_lines: 80
+```
+
+### 사용 규칙
+
+- 파일 이름은 저장소 루트 기준 `.context-audit.yml`을 권장한다.
+- `ignore_dirs`는 기본 무시 디렉토리에 추가된다.
+- `exclude_globs`는 생성 문서나 외부 복사본처럼 감사 대상에서 제외할 경로 패턴에 사용한다.
+- `strict: true`면 warning도 종료 코드 1로 승격된다.

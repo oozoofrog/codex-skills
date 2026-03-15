@@ -24,6 +24,7 @@ description: >-
 4. 상위 문서는 짧게 유지하고, 긴 예시·템플릿·세부 설명은 `references/`로 분리하기.
 5. 긴 로그나 도구 출력은 XML 스타일 블록으로 격리하거나 별도 참조 파일로 빼기.
 6. 변경 후 `scripts/verify_context_tree.py --root <repo-root>`로 링크와 구조를 점검하기.
+7. CI나 주기 점검에서는 `--strict`를 사용하고, 저장소별 예외나 임계치는 `.context-audit.yml`로 조정하기.
 
 ## Core Rules
 
@@ -78,8 +79,9 @@ description: >-
 - `<instructions>`, `<context>`, `<data>`처럼 역할이 분명한 태그나 별도 파일로 분리하기.
 
 ### 6) 검증하고 보수하기
-- 링크 무결성, 파일 경로 정확성, 문서 길이, 고립된 컨텍스트 후보를 점검하기.
+- 링크 무결성, 파일 경로 정확성, 문서 길이, TODO, 과대 코드 블록, 고립된 컨텍스트 후보를 점검하기.
 - 검증에서 걸린 항목은 문서 구조 자체를 다시 다듬기.
+- 운영 단계에서는 `.context-audit.yml`로 ignore 디렉토리, line limit, strict 모드를 저장소별로 고정하기.
 
 ## File Contracts
 
@@ -100,9 +102,10 @@ description: >-
 ## Resources
 
 - 상세 설계 원칙과 운영 지침은 `references/architecture-guide.md`를 읽기.
-- 바로 복사해 쓸 수 있는 문서 골격과 XML 분리 예시는 `references/templates.md`를 읽기.
+- 바로 복사해 쓸 수 있는 문서 골격, XML 분리 예시, `.context-audit.yml` 예시는 `references/templates.md`를 읽기.
 - 저장소 검증은 `scripts/verify_context_tree.py`를 사용하기.
 - 검증 결과의 `Content Accuracy Hints` 섹션으로 수동 리뷰가 필요한 문서 후보를 추리기.
+- 운영 배포 전에는 `scripts/verify_context_tree.py --root <repo-root> --strict`를 기준 명령으로 사용하기.
 
 ## Output Contract
 

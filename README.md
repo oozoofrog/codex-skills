@@ -9,7 +9,7 @@
 | `claude-code-bridge` | Workflow | Codex와 로컬 Claude CLI를 함께 쓰는 분석/구현/리뷰 handoff | 사용자가 Claude 사용을 명시적으로 원할 때만 활성화 |
 | `git-pr-workflow` | Workflow | commit, branch, push, PR 생성, stale branch cleanup, PR review | `commit-commands` + `pr-review-toolkit` 계열 흐름을 Codex-native로 통합 |
 | `ralph-loop` | Workflow | bounded iterative Codex loop 설계와 반복 실행 가이드 | 자동 hook 대신 안전한 수동 loop 패턴 사용 |
-| `hierarchical-context-architecture` | Architecture | 대규모 저장소의 `CLAUDE.md` / `CONTEXT.md` / `AGENTS.md` 구조 설계와 감사 | 컨텍스트 부패를 줄이기 위한 계층형 문서 배치와 검증 스크립트 포함 |
+| `hierarchical-context-architecture` | Architecture | 대규모 저장소의 `CLAUDE.md` / `CONTEXT.md` / `AGENTS.md` 구조 설계와 감사 | `--strict`, `.context-audit.yml`, 운영형 검증 스크립트 제공 |
 | `ghostty-setup` | Tooling | Ghostty 테마/프로필/가독성 설정 변경과 검증 | include chain과 rollback 관점까지 포함 |
 | `frontend-design` | Design | 개성 있는 웹 UI/UX 설계와 구현 | aesthetic direction을 먼저 고정하는 방식 |
 | `ios-multi-agent-dev` | Apple | iOS/Swift 기능 개발을 planner/builder/reviewer로 분리 | 구현과 검증이 큰 작업에 적합 |
@@ -57,7 +57,7 @@ $git-pr-workflow 이 변경을 저장소 스타일에 맞게 커밋하고, 필�
 $git-pr-workflow 이 PR diff를 code/tests/errors/comments/types 관점으로 리뷰해줘.
 $ralph-loop 이 작업을 최대 8번 반복하는 bounded Codex loop로 설계해줘.
 $claude-code-bridge 이 저장소를 Claude CLI로 분석하게 하고 결과를 내가 다시 검증할 수 있게 정리해줘.
-$hierarchical-context-architecture 이 저장소에 맞는 CLAUDE.md/CONTEXT.md/AGENTS.md 계층을 설계하고 검증해줘.
+$hierarchical-context-architecture 이 저장소에 맞는 CLAUDE.md/CONTEXT.md/AGENTS.md 계층을 설계하고 `.context-audit.yml`까지 포함해 운영 가능하게 검증해줘.
 ```
 
 ### 디자인 / 프론트엔드
