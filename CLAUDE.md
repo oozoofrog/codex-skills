@@ -3,6 +3,7 @@
 ## Repository Commands
 - Validate one skill: `python3 /Users/oozoofrog/.codex/skills/.system/skill-creator/scripts/quick_validate.py <skill-dir>`
 - Audit the repository context tree: `python3 hierarchical-context-architecture/scripts/verify_context_tree.py --root .`
+- Strict audit for CI/ops: `python3 hierarchical-context-architecture/scripts/verify_context_tree.py --root . --strict`
 - Syntax-check repo shell scripts: `bash -n scripts/*.sh`
 - Syntax-check repo Python scripts: `python3 -m py_compile scripts/*.py hierarchical-context-architecture/scripts/verify_context_tree.py`
 
