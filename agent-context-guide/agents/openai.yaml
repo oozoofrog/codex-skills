@@ -1,0 +1,6 @@
+interface:
+  display_name: "Agent Context Guide"
+  short_description: "Design layered AGENTS.md instructions for Codex"
+  default_prompt: "Design or refactor a Codex instruction architecture using root AGENTS.md, nested AGENTS.md, optional AGENTS.override.md, and lightweight supporting docs."
+policy:
+  allow_implicit_invocation: true

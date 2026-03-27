@@ -1,0 +1,6 @@
+interface:
+  display_name: "Plugin Doctor"
+  short_description: "Audit Codex plugin and skill repositories"
+  default_prompt: "Audit a Codex plugin or skill repository for official structure, legacy Claude artifacts, plugin manifests, custom agents, and repo-local skill hygiene."
+policy:
+  allow_implicit_invocation: true

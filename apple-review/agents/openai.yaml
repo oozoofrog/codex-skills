@@ -1,0 +1,6 @@
+interface:
+  display_name: "Apple Review"
+  short_description: "Review Apple platform code and PRs with ecosystem context"
+  default_prompt: "Review Swift and Apple platform code using Apple-specific correctness, API usage, and framework guidance rather than generic style-only comments."
+policy:
+  allow_implicit_invocation: true

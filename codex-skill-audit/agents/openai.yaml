@@ -1,0 +1,6 @@
+interface:
+  display_name: "Codex Skill Audit"
+  short_description: "Audit a Codex skill repo for structure and discovery readiness"
+  default_prompt: "Audit this Codex skill repository for official structure, frontmatter quality, openai.yaml alignment, and progressive-disclosure hygiene."
+policy:
+  allow_implicit_invocation: true

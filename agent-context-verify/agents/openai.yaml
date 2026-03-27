@@ -1,0 +1,6 @@
+interface:
+  display_name: "Agent Context Verify"
+  short_description: "Verify AGENTS.md and context docs against the repo"
+  default_prompt: "Verify AGENTS.md, AGENTS.override.md, CONTEXT.md, and linked docs against the current repository and report broken references, stale commands, or inaccurate claims."
+policy:
+  allow_implicit_invocation: true

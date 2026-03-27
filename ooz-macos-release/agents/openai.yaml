@@ -1,0 +1,6 @@
+interface:
+  display_name: "macOS Release"
+  short_description: "Automate macOS release prep, packaging, and publishing"
+  default_prompt: "Guide or automate macOS release work: version bump, build, DMG/ZIP packaging, local install verification, GitHub release, and Homebrew publishing."
+policy:
+  allow_implicit_invocation: true

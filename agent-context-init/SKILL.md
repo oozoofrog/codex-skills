@@ -1,0 +1,31 @@
+---
+name: agent-context-init
+description: 저장소를 분석해 Codex용 instruction 구조를 초기화합니다. 루트 AGENTS.md, 필요 시 하위 AGENTS.md/AGENTS.override.md, 보조 CONTEXT.md를 생성·보강할 때 사용합니다.
+---
+
+# Agent Context Init
+
+이 스킬은 원본 `ctx-init`를 Codex용으로 바꾼 버전입니다. 목표는 **짧은 루트 지침 + 가까운 하위 지침 + 선택적 보조 문서**입니다.
+
+## Use references
+- `../agent-context-guide/references/file-standards.md`
+- `../agent-context-guide/references/token-optimization.md`
+
+## Workflow
+1. 루트에서 빌드 도구와 주요 디렉토리 구조를 파악한다.
+2. 기존 instruction 문서를 찾는다: `AGENTS.md`, `AGENTS.override.md`, fallback 파일, `CONTEXT.md`, `README.md`.
+3. 루트 `AGENTS.md` 초안을 작성하거나 기존 파일을 정리한다.
+4. 도메인 경계가 분명한 하위 디렉토리에는 `AGENTS.md`를 추가한다.
+5. 일시적이거나 더 강한 예외 규칙이 필요하면 `AGENTS.override.md`를 쓴다.
+6. 긴 배경 설명은 `CONTEXT.md` 또는 `docs/`로 옮기고, 루트/하위 지침에서는 링크만 남긴다.
+7. 생성 후 `agent-context-verify`와 `agent-context-audit`로 검증 계획을 제안한다.
+
+## Guardrails
+- 루트 문서에 변동성이 큰 정보나 장문 예시를 넣지 않는다.
+- 동일 명령을 여러 instruction 파일에 반복하지 않는다.
+- 사용자/팀 고유 규칙은 코드 구조와 가장 가까운 위치에 둔다.
+
+## Output expectation
+- 생성/보강한 instruction 파일 목록
+- 각 파일의 책임
+- 다음 검증 단계 제안

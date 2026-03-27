@@ -1,0 +1,6 @@
+interface:
+  display_name: "Agent Context Audit"
+  short_description: "Audit instruction density, depth, and duplication"
+  default_prompt: "Audit this Codex instruction architecture for AGENTS.md length, nesting depth, duplicated guidance, and missing domain coverage."
+policy:
+  allow_implicit_invocation: true

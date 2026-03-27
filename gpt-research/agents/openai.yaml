@@ -1,0 +1,6 @@
+interface:
+  display_name: "GPT Research"
+  short_description: "Prepare structured prompts for external GPT research"
+  default_prompt: "Extract the right repository context and format a structured prompt for external GPT or deep research workflows."
+policy:
+  allow_implicit_invocation: true
