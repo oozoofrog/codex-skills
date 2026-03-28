@@ -1,6 +1,6 @@
 interface:
   display_name: "Agent Context Init"
-  short_description: "Scaffold a Codex instruction architecture"
-  default_prompt: "Analyze this repository and scaffold a minimal Codex instruction architecture with AGENTS.md, nested AGENTS.md where useful, and optional CONTEXT.md for deep docs."
+  short_description: "Scaffold and prepare a Codex instruction architecture for verification"
+  default_prompt: "Analyze this repository, scaffold a minimal Codex instruction architecture with AGENTS.md, nested AGENTS.md where useful, and optional CONTEXT.md, then leave it ready for follow-up verify/audit checks."
 policy:
   allow_implicit_invocation: true

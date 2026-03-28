@@ -6,6 +6,14 @@ from pathlib import Path
 
 KEBAB = re.compile(r'^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$')
 MAX_SKILL_LINES = 500
+VALID_REVIEW_MODES = {'none', 'optional', 'required'}
+EXPLICIT_ONLY_MARKERS = (
+    '명시적으로 요청했을 때만',
+    '명시 호출만',
+    'explicitly asks',
+    'explicitly asked',
+    'explicit invocation only',
+)
 
 
 def parse_frontmatter(text: str):
@@ -33,6 +41,28 @@ def load_text(path: Path):
 
 def find_skills(root: Path):
     return sorted(root.glob('.agents/skills/**/SKILL.md'))
+
+
+def extract_markdown_section(body: str, title: str):
+    pattern = rf'(?ms)^## {re.escape(title)}\s*\n(.*?)(?=^## \S|\Z)'
+    match = re.search(pattern, body)
+    return match.group(1).strip() if match else None
+
+
+def parse_review_harness(section: str):
+    items = {}
+    for line in section.splitlines():
+        match = re.match(r'-\s*([^:]+):\s*(.+?)\s*$', line.strip())
+        if match:
+            items[match.group(1).strip()] = match.group(2).strip()
+    return items
+
+
+def parse_allow_implicit_invocation(yaml_text: str):
+    match = re.search(r'(?m)^\s*allow_implicit_invocation:\s*(true|false)\s*$', yaml_text)
+    if not match:
+        return None
+    return match.group(1) == 'true'
 
 
 def main():
@@ -83,6 +113,31 @@ def main():
         if (skill_dir / 'README.md').exists():
             findings.append(('warning', str(rel), 'skill directory contains README.md; keep auxiliary docs out of skill dir'))
 
+        review_section = extract_markdown_section(body, 'Review Harness')
+        if review_section is None:
+            findings.append(('warning', str(rel), 'missing Review Harness section'))
+            review_items = {}
+        else:
+            review_items = parse_review_harness(review_section)
+            mode = review_items.get('mode')
+            if not mode:
+                findings.append(('warning', str(rel), 'Review Harness section is missing mode'))
+            elif mode not in VALID_REVIEW_MODES:
+                findings.append(('warning', str(rel), f'invalid Review Harness mode: {mode}'))
+            else:
+                strengths.append(f'{rel} declares Review Harness mode `{mode}`')
+
+            standard_ref = review_items.get('공통 기준', '')
+            if 'docs/review-harness.md' not in standard_ref:
+                findings.append(('warning', str(rel), 'Review Harness section should reference docs/review-harness.md'))
+
+            if not (review_items.get('planner') or review_items.get('generator')):
+                findings.append(('warning', str(rel), 'Review Harness section should declare planner or generator'))
+
+            for field in ('evaluator', 'artifacts/evidence', 'pass condition'):
+                if field not in review_items:
+                    findings.append(('warning', str(rel), f'Review Harness section is missing `{field}`'))
+
         openai_yaml = skill_dir / 'agents' / 'openai.yaml'
         if openai_yaml.exists():
             yaml_text = load_text(openai_yaml)
@@ -90,6 +145,15 @@ def main():
                 findings.append(('warning', str(openai_yaml.relative_to(target)), 'openai.yaml exists but interface metadata looks incomplete'))
             else:
                 strengths.append(f'{rel} has agents/openai.yaml')
+
+            allow_implicit = parse_allow_implicit_invocation(yaml_text)
+            if allow_implicit is None:
+                findings.append(('warning', str(openai_yaml.relative_to(target)), 'allow_implicit_invocation is missing or malformed'))
+
+            lowered_body = body.lower()
+            explicit_only = any(marker in body for marker in EXPLICIT_ONLY_MARKERS) or any(marker in lowered_body for marker in EXPLICIT_ONLY_MARKERS)
+            if explicit_only and allow_implicit is True:
+                findings.append(('warning', str(openai_yaml.relative_to(target)), 'skill body says explicit-only but allow_implicit_invocation is true'))
         else:
             findings.append(('info', str(rel), 'agents/openai.yaml is optional but absent'))
 

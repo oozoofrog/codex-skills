@@ -1,6 +1,6 @@
 interface:
   display_name: "Codex Skill Bootstrap"
-  short_description: "Create or modernize a Codex skill workspace"
-  default_prompt: "Create a new repo-local Codex skill with clean frontmatter, optional openai.yaml metadata, and progressive-disclosure references."
+  short_description: "Create or modernize a Codex skill workspace with audit-ready structure"
+  default_prompt: "Create or modernize a repo-local Codex skill with clean frontmatter, optional openai.yaml metadata, a right-sized Review Harness declaration when needed, and audit-ready progressive-disclosure references."
 policy:
   allow_implicit_invocation: true

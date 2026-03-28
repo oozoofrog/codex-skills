@@ -26,6 +26,16 @@ description: 외부 GPT 또는 deep research 워크플로우로 넘길 구조화
 4. 템플릿에 맞춘 최종 프롬프트를 만든다.
 5. 가능하면 `pbcopy`로 클립보드에 복사하고, 응답에도 프롬프트 본문을 남긴다.
 
+## Review Harness
+- mode: optional
+- 공통 기준: `../../../docs/review-harness.md`
+- generator: research prompt와 컨텍스트 패키지를 구성한다
+- evaluator: source coverage, chunking, 민감정보 포함 여부를 read-only checklist로 재검토한다
+- 평가축: 소스 커버리지, chunking 적절성, 민감정보 누락, prompt 사용 가능성
+- artifacts/evidence: 포함 파일 목록, chunking 결과, 최종 프롬프트 본문
+- pass condition: 누락·중복·과잉맥락 없이 바로 붙여넣어 쓸 수 있어야 한다
+- 자동 다음 행동: `pass`면 prompt 반환, `refine`이면 맥락 추가/제거, `pivot`이면 mode 변경, `escalate`면 사람이 범위를 다시 지정한다
+
 ## Output expectation
 - 선택한 모드
 - 포함한 파일/문서 목록

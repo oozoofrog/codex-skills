@@ -1,6 +1,6 @@
 interface:
   display_name: "App Automation"
   short_description: "Automate iOS Simulator and macOS apps with baepsae"
-  default_prompt: "Use baepsae to inspect UI trees, interact with iOS Simulator or macOS apps, capture screenshots, and run repeatable multi-step automation flows."
+  default_prompt: "Use baepsae to inspect UI trees, interact with iOS Simulator or macOS apps, and capture screenshots or recordings as evidence for repeatable multi-step automation flows."
 policy:
   allow_implicit_invocation: true

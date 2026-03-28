@@ -31,6 +31,16 @@ description: Apple 플랫폼 개발을 돕습니다. Swift, SwiftUI, UIKit, AppK
 - `scripts/preflight.sh` — 참조 문서 존재 확인
 - `scripts/sync-docs.sh` — Xcode 번들 문서를 로컬 reference로 동기화
 
+## Review Harness
+- mode: optional
+- 공통 기준: `../../../docs/review-harness.md`
+- generator: 구현·수정·설명 작업을 수행한다
+- evaluator: `apple-review`와 `BuildProject` / `RenderPreview` / diagnostics 결과로 skeptical pass를 수행한다
+- 평가축: buildability, API 사용 정확성, lifecycle/concurrency 안정성, UI 검증 가능성
+- artifacts/evidence: build log, preview screenshot, issue navigator, 수정 파일 목록
+- pass condition: 관련 Apple API/수명주기/동시성 리스크가 설명 가능하고, 가능하면 빌드·프리뷰 증거가 확보돼야 한다
+- 자동 다음 행동: `pass`면 종료, `refine`이면 최소 수정 후 재빌드, `pivot`이면 구현 전략 변경, `escalate`면 `apple-review` 또는 장기 작업이면 `apple-harness`로 넘긴다
+
 ## Output expectation
 - 읽은 reference 문서
 - 적용/수정 내용

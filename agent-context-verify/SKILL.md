@@ -25,6 +25,16 @@ description: AGENTS.md 기반 instruction 구조의 정합성을 검증합니다
 4. 결과를 `critical / warning / info / strength`로 정리한다.
 5. 필요 시 `context-validator` custom agent 또는 일반 read-only subagent에 검증 일부를 위임한다.
 
+## Review Harness
+- mode: none
+- 공통 기준: `../../../docs/review-harness.md`
+- generator: 상위 스킬이 만든 instruction 파일 및 링크
+- evaluator: 이 스킬 자체가 evaluator-native verification 역할을 수행한다
+- 평가축: 링크 무결성, 명령/파일 경로 정확성, 문서 주장과 저장소 상태 일치성
+- artifacts/evidence: 링크 무결성, 파일 경로, 실행 명령, 코드와 문서 주장 일치 여부
+- pass condition: 모든 `critical` 항목이 해소되거나 명시적으로 남아 있어야 한다
+- 자동 다음 행동: `pass`면 종료, `warning`이면 수정 후보 제시, `critical`이면 해당 문서를 block 처리하고 상위 스킬에 재작성 요청
+
 ## Output expectation
 - 단계별 검증 결과
 - 깨진 링크 / 오래된 명령 / 잘못된 주장 목록

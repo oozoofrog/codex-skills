@@ -23,6 +23,7 @@ Codex 공식 스킬 구조에 맞춰 새 스킬을 만들거나 기존 스킬을
 
 - `references/codex-skill-authoring.md` — Codex 공식 스킬 구조, discovery, progressive disclosure 요약
 - `references/openai-yaml-guide.md` — `agents/openai.yaml` 작성 가이드
+- `../../../docs/review-harness.md` — repo-wide review harness 선언 규칙
 
 ## Workflow
 
@@ -81,6 +82,8 @@ SKILL.md 본문에는 아래만 둡니다.
 
 자세한 규칙/예시는 `references/`로 이동합니다.
 
+review loop가 중요한 스킬이면 `Review Harness` 섹션을 짧게 추가하고, 긴 평가 루브릭은 `docs/` 또는 `references/`로 분리합니다.
+
 ### 5. Add `agents/openai.yaml` if helpful
 
 선택 사항이지만, UI 메타데이터와 invocation policy를 더 명확하게 만들 수 있습니다.
@@ -101,8 +104,20 @@ SKILL.md 본문에는 아래만 둡니다.
 - 스킬 이름이 중복되지 않는지
 - 너무 긴 본문을 `references/`로 나눴는지
 - `agents/openai.yaml`가 SKILL.md와 어긋나지 않는지
+- 필요한 경우 `Review Harness`의 `mode`와 evaluator가 선언됐는지
 
 가능하면 `$codex-skill-audit`로 마무리 점검합니다.
+
+## Review Harness
+- mode: required
+- 공통 기준: `../../../docs/review-harness.md`
+- planner: 스킬 범위, 트리거 문구, metadata, optional scripts 필요성을 먼저 정한다
+- generator: `.agents/skills/<skill-name>/` 구조와 `SKILL.md`를 생성·정리한다
+- evaluator: `codex-skill-audit`로 구조/metadata/discovery를 검증한다
+- 평가축: skill 구조 적합성, frontmatter 정확성, progressive disclosure, review harness 선언 적절성
+- artifacts/evidence: 생성 파일 목록, frontmatter, references 분리 여부, optional metadata 정합성
+- pass condition: audit 관점에서 discovery와 구조 품질이 설명 가능해야 한다
+- 자동 다음 행동: `pass`면 완료, `refine`이면 구조/메타데이터 수정, `rescope`면 스킬 범위를 축소, `critical`이면 audit findings 기준으로 재생성한다
 
 ## Output expectation
 

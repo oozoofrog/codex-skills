@@ -1,6 +1,6 @@
 interface:
   display_name: "Apple Craft"
   short_description: "Swift, SwiftUI, UIKit, AppKit, and Xcode development"
-  default_prompt: "Help with Apple platform development using Xcode tools, official docs, and bundled Apple references for Swift, SwiftUI, UIKit, AppKit, and related frameworks."
+  default_prompt: "Help with Apple platform development using Xcode tools, official docs, and bundled Apple references, and verify changes with build, preview, or diagnostics evidence when possible."
 policy:
   allow_implicit_invocation: true

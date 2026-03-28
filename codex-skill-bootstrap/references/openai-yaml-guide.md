@@ -2,6 +2,8 @@
 
 공식 Codex skills 문서 기준 선택적 메타데이터 파일입니다.
 
+더 엄격한 이 저장소 규약은 `docs/openai-yaml-conventions.md`를 우선 참고합니다.
+
 ## 최소 예시
 
 ```yaml

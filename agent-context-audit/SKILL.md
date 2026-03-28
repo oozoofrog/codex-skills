@@ -23,6 +23,16 @@ description: Codex instruction 구조의 밀도와 건강도를 감사합니다.
 4. 커버리지 빈 구역이 있으면 하위 `AGENTS.md` 또는 `CONTEXT.md` 추가를 권한다.
 5. 결과를 우선순위순 개선안으로 정리한다.
 
+## Review Harness
+- mode: none
+- 공통 기준: `../../../docs/review-harness.md`
+- generator: 상위 스킬이나 사용자가 제공한 instruction 구조
+- evaluator: 이 스킬 자체가 evaluator-native audit 역할을 수행한다
+- 평가축: instruction 밀도, 책임 분리, 중복 규칙, 커버리지 공백
+- artifacts/evidence: instruction tree, 책임 분리 근거, 중복 규칙, 커버리지 공백
+- pass condition: `critical / warning / info` 분류와 구체적 분리 제안이 남아야 한다
+- 자동 다음 행동: `warning`이면 분리/정리 제안, `critical`이면 상위 스킬에 구조 재설계 또는 `agent-context-init` 실행을 권한다
+
 ## Output expectation
 - 현재 구조의 장점
 - 위험 신호 (`critical / warning / info`)
