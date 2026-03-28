@@ -1,0 +1,6 @@
+interface:
+  display_name: "Goal Research Loop"
+  short_description: "Run a goal-directed iterative research loop with explicit keep/revert rules"
+  default_prompt: "Given a concrete objective, set up and run a bounded or autonomous research loop with a baseline, evaluation contract, experiment ledger, and evidence-based keep/revert decisions."
+policy:
+  allow_implicit_invocation: false
