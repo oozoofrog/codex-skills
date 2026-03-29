@@ -7,6 +7,22 @@ description: Apple 플랫폼 관점의 코드·PR 리뷰를 수행합니다. Swi
 
 원본 `apple-review`의 Codex 버전입니다. 일반적인 스타일 리뷰가 아니라 **Apple 생태계 특화 검토**에 초점을 둡니다.
 
+## When to use
+- Swift/SwiftUI/UIKit/AppKit 코드나 PR을 Apple 플랫폼 관점으로 검토할 때
+- lifecycle, concurrency, state management, test/accessibility 누락을 잡고 싶을 때
+- 구현보다 근거 있는 findings와 수정 방향이 필요한 작업
+
+## Do not use when
+- 직접 구현·수정이 주목적인 작업 → `apple-craft` 또는 `apple-harness`
+- Apple 플랫폼과 무관한 일반 코드 리뷰
+- 단순 스타일 재작성만 원하고 위험 분석은 필요 없는 작업
+
+## Quick start
+1. 리뷰 범위를 현재 diff, 특정 파일, PR 중 하나로 고정한다.
+2. 관련 Swift 파일과 diagnostics/build evidence를 모은다.
+3. correctness, lifecycle, concurrency, accessibility 축으로 검토한다.
+4. `critical / warning / info`와 근거 파일을 함께 보고한다.
+
 ## Use references
 - `../apple-craft/references/common-mistakes.md`
 - `../apple-craft/references/code-style.md`
@@ -35,3 +51,9 @@ description: Apple 플랫폼 관점의 코드·PR 리뷰를 수행합니다. Swi
 - artifacts/evidence: 파일 경로, diagnostics, build 결과, concurrency/lifecycle/accessibility 근거
 - pass condition: 모든 finding이 실제 증거와 연결되고 severity가 과장되지 않아야 한다
 - 자동 다음 행동: `pass`면 findings 없음으로 종료, `warning`이면 수정 제안, `critical`이면 block finding으로 반환하고 구현 스킬에 수정을 요구한다
+
+## Output expectation
+- 검토 범위
+- `critical / warning / info` findings
+- 근거 파일/진단 결과
+- 최소 수정 방향 또는 남은 리스크

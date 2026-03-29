@@ -16,6 +16,10 @@
 
 ## Progressive disclosure checks
 
+- [ ] `When to use` 또는 `When it fits`가 있다
+- [ ] `Do not use when`이 있다
+- [ ] `Quick start`가 있다
+- [ ] `Output expectation`이 있다
 - [ ] SKILL.md 본문이 핵심 절차 중심이다
 - [ ] 긴 예시/세부 규칙은 `references/`로 분리됐다
 - [ ] 결정적 반복 작업만 `scripts/`로 분리됐다

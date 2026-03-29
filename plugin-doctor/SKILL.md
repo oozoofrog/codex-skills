@@ -7,6 +7,21 @@ description: Codex 플러그인/스킬 저장소를 감사하고 개선합니다
 
 원본 `fixer` 스킬을 Codex 기준으로 옮긴 버전입니다.
 
+## When to use
+- Codex 플러그인/스킬 저장소의 packaging 구조를 감사하고 개선할 때
+- `.codex-plugin/plugin.json`, marketplace manifest, custom agents, legacy Claude 흔적을 점검할 때
+- repo-local skill과 optional plugin 배포 레이어의 정합성을 함께 봐야 할 때
+
+## Do not use when
+- 개별 skill authoring/discovery 개선이 주목적인 작업 → `codex-skill-audit`, `codex-skill-bootstrap`
+- `AGENTS.md` 계층 설계·검증이 주목적인 작업 → `agent-context-*`
+- 일반 코드 구현/리팩터링만 필요한 작업
+
+## Quick start
+1. 감사 대상 루트를 정하고 plugin audit script를 먼저 실행한다.
+2. legacy Claude residue와 manifest 정합성을 수동 점검한다.
+3. `critical / warning / info / strength`와 안전한 자동 수정 후보를 분리한다.
+
 ## Use resources
 - `references/official-spec.md`
 - `scripts/audit_codex_plugin_repo.py`
@@ -36,3 +51,9 @@ description: Codex 플러그인/스킬 저장소를 감사하고 개선합니다
 - artifacts/evidence: manifest 구조, audit script output, legacy residue, custom agent 정합성
 - pass condition: plugin/skill/custom agent 레이어의 구조 문제를 severity와 근거와 함께 설명할 수 있어야 한다
 - 자동 다음 행동: `pass`면 종료, `warning`이면 metadata 정리, `critical`이면 packaging 또는 manifest를 재생성하고 필요 시 `sync_packaged_plugins.py`를 재실행한다
+
+## Output expectation
+- 감사 범위
+- `critical / warning / info / strength` 결과
+- 안전한 자동 수정 후보
+- 사람이 직접 판단해야 할 packaging 리스크

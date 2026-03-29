@@ -12,6 +12,16 @@ description: Codex용 계층형 컨텍스트 아키텍처를 설계하고 설명
 - 대규모 저장소를 디렉토리별 규칙로 나누고 싶을 때
 - 기존 `CLAUDE.md` / `.claude/rules/` 체계를 Codex용으로 옮길 때
 
+## Do not use when
+- instruction 파일을 실제로 생성·정리해야 하는 작업 → `agent-context-init`
+- 기존 문서의 링크·명령·주장 정합성을 검증하는 작업 → `agent-context-verify`
+- 현재 구조의 건강도 진단과 감사가 주목적인 작업 → `agent-context-audit`
+
+## Quick start
+1. 루트 `AGENTS.md`와 대표 하위 instruction 파일을 모은다.
+2. 루트에 남길 공통 규칙과 하위로 내릴 규칙을 분리한다.
+3. 장문 배경은 `CONTEXT.md`/`docs/`로 보내고 링크 구조를 제안한다.
+
 ## Read references as needed
 - `references/file-standards.md`
 - `references/token-optimization.md`

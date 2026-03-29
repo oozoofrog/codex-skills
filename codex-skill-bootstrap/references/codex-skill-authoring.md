@@ -62,6 +62,13 @@ Codex는 스킬을 두 가지 방식으로 씁니다.
 - references/: 상세 규칙, 스키마, 예시, 벤더 문서 요약
 - scripts/: 반복 감사, 코드 생성, 변환
 
+실무에서는 아래 operator-facing 섹션을 두면 discovery와 실제 사용성이 좋아집니다.
+
+- `When to use` 또는 `When it fits`
+- `Do not use when`
+- `Quick start`
+- `Output expectation`
+
 ## 5. Optional `agents/openai.yaml`
 
 공식 문서상 선택 사항이지만, UI와 invocation policy를 더 명확하게 만들 수 있습니다.

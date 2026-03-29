@@ -14,6 +14,12 @@ EXPLICIT_ONLY_MARKERS = (
     'explicitly asked',
     'explicit invocation only',
 )
+OPERATOR_SECTION_PATTERNS = {
+    'When to use/When it fits': re.compile(r'(?m)^##\s+(When to use|When it fits)\b'),
+    'Do not use when': re.compile(r'(?m)^##\s+Do not use when\b'),
+    'Quick start': re.compile(r'(?m)^##\s+Quick start\b'),
+    'Output expectation': re.compile(r'(?m)^##\s+Output expectation\b'),
+}
 
 
 def parse_frontmatter(text: str):
@@ -112,6 +118,10 @@ def main():
 
         if (skill_dir / 'README.md').exists():
             findings.append(('warning', str(rel), 'skill directory contains README.md; keep auxiliary docs out of skill dir'))
+
+        for section_name, pattern in OPERATOR_SECTION_PATTERNS.items():
+            if not pattern.search(body):
+                findings.append(('warning', str(rel), f'missing operator section `{section_name}`'))
 
         review_section = extract_markdown_section(body, 'Review Harness')
         if review_section is None:

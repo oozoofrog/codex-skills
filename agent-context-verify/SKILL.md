@@ -7,6 +7,21 @@ description: AGENTS.md 기반 instruction 구조의 정합성을 검증합니다
 
 원본 `ctx-verify`의 Codex 버전입니다. `AGENTS.md` 계층 구조와 보조 문서가 실제 저장소 상태와 맞는지 검사합니다.
 
+## When to use
+- `AGENTS.md` 계층과 보조 문서가 실제 저장소 상태와 맞는지 검증할 때
+- 링크 무결성, 실행 명령, 파일 경로, 문서 주장의 사실 여부를 점검할 때
+- `agent-context-init`/`guide` 결과를 skeptical하게 확인할 때
+
+## Do not use when
+- 새 instruction 구조를 설계하거나 생성해야 하는 작업 → `agent-context-guide`, `agent-context-init`
+- 구조 건강도와 중복 부채를 감사하는 작업 → `agent-context-audit`
+- 일반 코드 구현/디버깅처럼 instruction 문서가 주대상이 아닌 작업
+
+## Quick start
+1. 대상 instruction 문서와 연결된 `docs/`, `CONTEXT.md`를 모은다.
+2. 링크 무결성 → 명령/경로 → 내용 정확성 순으로 검증한다.
+3. 결과를 `critical / warning / info / strength`로 정리한다.
+
 ## Use references
 - `../agent-context-guide/references/verification-guide.md`
 

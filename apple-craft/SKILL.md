@@ -7,6 +7,22 @@ description: Apple 플랫폼 개발을 돕습니다. Swift, SwiftUI, UIKit, AppK
 
 원본 `apple-craft` 플러그인의 Codex 버전입니다. Xcode 도구와 번들 reference docs를 함께 사용합니다.
 
+## When to use
+- Swift/SwiftUI/UIKit/AppKit의 소규모~중간 규모 구현·수정·트러블슈팅이 필요할 때
+- Xcode 빌드/프리뷰/진단과 Apple API 참조를 함께 봐야 할 때
+- 장기 오케스트레이션 없이 한 세션 또는 짧은 루프로 해결할 수 있을 때
+
+## Do not use when
+- 처음부터 끝까지 여러 라운드로 기능을 밀어야 하는 장기 작업 → `apple-harness`
+- 구현보다 코드/PR 리뷰가 주목적인 작업 → `apple-review`
+- Apple 플랫폼과 무관한 일반 개발 작업
+
+## Quick start
+1. 작업을 `implement / explore / troubleshoot`로 구분한다.
+2. 프로젝트 구조와 현재 문제 범위를 먼저 확인한다.
+3. 필요한 Apple 문서와 reference를 최소량만 읽는다.
+4. 수정 후 가능하면 빌드·프리뷰·diagnostics로 검증한다.
+
 ## Knowledge priority
 1. `DocumentationSearch` 같은 공식 도구 결과
 2. `references/`에 있는 번들 Apple 문서
