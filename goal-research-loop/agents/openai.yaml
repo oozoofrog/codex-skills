@@ -1,6 +1,6 @@
 interface:
   display_name: "Goal Research Loop"
   short_description: "Run a bounded research loop with contract, ledger, handoff, and explicit decision layers"
-  default_prompt: "Given a concrete objective, define a measurable evaluation contract, separate hard gates, experiment status, and control action, and when the user wants a repeatable executable loop prefer the installed runner scripts (`~/.codex/skills/goal-research-loop/scripts/goal-research-loop.sh` or `codex_goal_research_loop.py`) to initialize, inspect, and run the loop with a ledger and state snapshot."
+  default_prompt: "Given a concrete objective, first choose both the operating mode (`design`, `guided-loop`, `autonomous-loop`) and the execution substrate (`agent-first` vs `script-first`). Use `agent-first` when the contract is incomplete, scope/policy judgment is still needed, or the main output is a recommendation/design. Use `script-first` when the loop should be repeatable and executable with persistent state, and prefer the installed runner scripts (`~/.codex/skills/goal-research-loop/scripts/goal-research-loop.sh` or `codex_goal_research_loop.py`) only after the contract is sufficiently executable. Always separate hard gates, experiment status, and control action."
 policy:
   allow_implicit_invocation: false

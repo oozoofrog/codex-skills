@@ -11,6 +11,29 @@
 
 하나라도 비어 있으면 곧바로 루프를 돌리지 말고 `design` 또는 `rescope`부터 시작합니다.
 
+## Separate mode from execution substrate
+
+`goal-research-loop`에서는 아래 2개를 분리해서 판단합니다.
+
+1. **mode**
+   - `design`
+   - `guided-loop`
+   - `autonomous-loop`
+2. **execution substrate**
+   - `agent-first`
+   - `script-first`
+
+`mode`는 **연구를 어떤 운영 방식으로 진행할지**를 말하고,
+`execution substrate`는 **현재 세션의 에이전트가 직접 운영할지, runner script가 host-managed loop를 맡을지**를 말합니다.
+
+이 둘을 섞어 쓰면,
+
+- `design`인데도 무리하게 script-first로 가거나
+- `guided-loop`인데도 반복 실행 니즈를 놓치거나
+- `autonomous-loop`인데도 runner 없이 설명만 길어지는
+
+문제가 생기기 쉽습니다.
+
 ## Adjacent skill boundaries
 
 | 상황 | 사용할 스킬 | 이유 |
@@ -47,6 +70,59 @@
 - write surface와 budget이 작고 경계가 명확함
 - stop condition이 deterministic하거나 매우 분명함
 - 고비용/고위험/파괴적 작업이 포함되지 않음
+
+## Execution substrate routing
+
+### `agent-first`
+
+아래면 먼저 `agent-first`로 갑니다.
+
+- contract가 비어 있거나 모호함
+- hard gate / metric / budget / stop rule 중 하나라도 아직 설계 단계임
+- objective를 더 압축하거나 mutable surface를 다시 잘라야 함
+- 정책 판단, 설명, 범위 협상, 사용자 의도 해석이 실행보다 중요함
+- 이번 작업의 핵심 산출물이 실행 로그보다 **판단 기준 / 계약 / 추천안**에 가까움
+
+권장 기본값:
+
+- `design` → 보통 `agent-first`
+- `guided-loop` → contract가 비어 있으면 먼저 `agent-first`
+
+### `script-first`
+
+아래면 `script-first`가 더 잘 맞습니다.
+
+- 사용자가 repeatable / autonomous / overnight loop를 원함
+- 같은 objective를 여러 세션에 걸쳐 이어받아야 함
+- contract가 채점 가능하고 비어 있지 않음
+- mutable surface / budget / stop rule이 좁고 명확함
+- `program / contract / snapshot / ledger / rounds` 아티팩트를 파일로 유지하는 편이 유리함
+- 사람이 매 라운드 프롬프트를 다시 조립하는 비용이 큼
+
+권장 기본값:
+
+- `autonomous-loop` → 사실상 `script-first`
+- `guided-loop` → contract가 실행 가능하고 반복성이 중요하면 `script-first`
+
+## Transition rules
+
+- **agent-first → script-first**
+  - contract가 채워졌고
+  - baseline이 확보됐고
+  - round artifacts 유지가 중요해졌고
+  - 반복 실행 이득이 명확해질 때
+
+- **script-first → agent-first**
+  - `rescope` 또는 `escalate`가 필요하고
+  - 새 mutable surface를 열어야 하거나
+  - policy 판단 / conflicting evidence / operator 설명이 먼저일 때
+
+## Default mapping
+
+- `design + agent-first` — 기본 시작점
+- `guided-loop + agent-first` — 계약 설계 또는 사용자 공유가 중요할 때
+- `guided-loop + script-first` — 계약이 실행 가능하고 반복성/아티팩트 유지가 중요할 때
+- `autonomous-loop + script-first` — 명시 opt-in일 때만
 
 ## Escalation triggers
 

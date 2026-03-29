@@ -2,6 +2,8 @@
 
 - objective: ${objective}
 - mode: guided-loop
+- execution substrate: agent-first
+- routing rationale: TODO
 - mutable surface: TODO
 - immutable constraints: TODO
 - hard gates: TODO

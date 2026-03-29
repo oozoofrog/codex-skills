@@ -2,6 +2,7 @@
 
 - objective: ${objective}
 - mode: guided-loop
+- execution substrate: TODO
 - baseline: TODO
 - best-known state: TODO
 - current active hypothesis: TODO

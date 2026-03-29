@@ -8,6 +8,7 @@
 
 - objective: `goal-research-loop` 스킬의 operator confusion을 줄인다
 - mode: `guided-loop`
+- execution substrate: `agent-first`
 - mutable surface: `SKILL.md`, `references/*.md`, `agents/openai.yaml`
 - immutable constraints: explicit-only 유지, progressive disclosure 유지, copy 설치 구조 유지
 
@@ -17,6 +18,8 @@
 ## Research Contract
 - objective: goal-research-loop 스킬의 operator confusion을 줄인다
 - mode: guided-loop
+- execution substrate: agent-first
+- routing rationale: 이번 라운드는 실행 자동화보다 용어 구조와 설명 개선이 목적이므로 agent-first
 - mutable surface: SKILL.md, references/*.md, agents/openai.yaml
 - immutable constraints: explicit-only 유지, progressive disclosure 유지, copy install 구조 유지
 - hard gates: audit 통과, install dry-run 통과, copy install 통과
@@ -47,6 +50,7 @@
 ## State Snapshot
 - objective: goal-research-loop 스킬의 operator confusion을 줄인다
 - mode: guided-loop
+- execution substrate: agent-first
 - baseline: decision vocabulary가 암묵적으로만 구분됨
 - best-known state: decision layers와 예시가 함께 제공됨
 - current active hypothesis: README discoverability를 보강하면 invocation 연결이 더 쉬워질 수 있음

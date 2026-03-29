@@ -26,6 +26,22 @@
 차이점은 `goal-research-loop`의 핵심 규칙인
 `hard gates / experiment status / control action` 분리를 구조적으로 강제한다는 점입니다.
 
+## Runner는 script-first substrate입니다
+
+이 runner는 `goal-research-loop`의 **execution substrate** 중 `script-first`에 해당합니다.
+
+- `mode`는 `design / guided-loop / autonomous-loop`
+- `execution substrate`는 `agent-first / script-first`
+
+즉, runner는 **mode의 대체물**이 아니라,
+반복 실행과 상태 유지가 중요할 때 쓰는 **host-managed 실행 레이어**입니다.
+
+아래면 바로 runner로 가지 말고 먼저 `agent-first`가 더 적합합니다.
+
+- contract가 아직 비어 있거나 metric / hard gate가 미완성일 때
+- objective 압축, scope 재절단, policy 판단이 먼저일 때
+- 이번 요청의 산출물이 실행 로그보다 판단 기준 / 설계안일 때
+
 ## 스킬이 runner를 우선 선택해야 하는 때
 
 아래면 `goal-research-loop`는 **runner 사용을 우선**하는 편이 좋습니다.
@@ -40,6 +56,12 @@
 - 아직 `design` 단계라 metric과 hard gate가 비어 있을 때
 - 사용자가 실제 실행보다 전략 설계/초안만 원할 때
 - 루프를 돌리기보다 adjacent skill 경계 정리가 먼저일 때
+
+기본 매핑:
+
+- `design` → 대체로 `agent-first`
+- `guided-loop` → contract 완성도와 반복 실행 필요성에 따라 선택
+- `autonomous-loop` → 대체로 `script-first`
 
 ## 권장 명령 선택
 
@@ -57,6 +79,24 @@
 2. 이어받기 전 점검이면 `status`
 3. bounded execution이면 `run --max-rounds`
 4. explicit autonomous opt-in일 때만 Python runner의 `--loop-forever`
+
+## Validation note
+
+install smoke check를 함께 할 때는 기본 전역 목적지보다 **임시 목적지**를 쓰는 편이 안전합니다.
+
+예:
+
+```bash
+python3 scripts/install_global_skills.py --dest /tmp/codex-skills-check --dry-run
+python3 scripts/install_global_skills.py --dest /tmp/codex-skills-check --mode copy --overwrite
+```
+
+이유:
+
+- 기본 `python3 scripts/install_global_skills.py --dry-run`은
+  현재 전역 설치 경로에 같은 스킬이 이미 있으면 non-zero로 끝날 수 있습니다.
+- skill 구조 검증이나 runner smoke check 목적이면,
+  전역 목적지를 직접 건드리기보다 `/tmp/...` 목적지에서 dry-run / copy-install을 확인하는 편이 재현 가능하고 안전합니다.
 
 ## 기본 흐름
 

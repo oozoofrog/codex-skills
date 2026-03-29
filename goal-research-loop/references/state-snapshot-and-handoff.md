@@ -16,6 +16,7 @@
 ## State Snapshot
 - objective:
 - mode:
+- execution substrate:
 - baseline:
 - best-known state:
 - current active hypothesis:
@@ -31,10 +32,11 @@
 매 라운드가 끝날 때 최소 아래를 갱신합니다.
 
 1. 현재 **best-known state**
-2. 직전 라운드의 **experiment status**와 **control action**
-3. 지금 열려 있는 **가설 1개**
-4. 다음 후보 **1~3개**
-5. 즉시 중단해야 하는 **리스크**
+2. 다음 세션이 이어받을 **execution substrate**
+3. 직전 라운드의 **experiment status**와 **control action**
+4. 지금 열려 있는 **가설 1개**
+5. 다음 후보 **1~3개**
+6. 즉시 중단해야 하는 **리스크**
 
 ## Handoff discipline
 

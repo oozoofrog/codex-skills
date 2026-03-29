@@ -25,10 +25,12 @@ description: Use this skill when the user explicitly wants a goal-directed resea
 - 이 스킬은 **explicit-only**입니다.
 - 시작 전에 반드시 **objective, mutable surface, evaluation contract, budget, stop condition**을 먼저 정합니다.
 - 측정 가능한 신호가 없으면 바로 루프를 돌리지 말고, **hard gate + proxy metric**을 먼저 정의하거나 범위를 다시 잡습니다.
+- `mode`와 `execution substrate`를 같은 축으로 취급하지 않습니다. `mode`는 `design / guided-loop / autonomous-loop`, `execution substrate`는 `agent-first / script-first`입니다.
 - 사용자가 **실제로 반복 실행 가능한 Codex 연구 루프를 원하면** ad-hoc 수동 운영보다 `scripts/goal-research-loop.sh` 또는 `scripts/codex_goal_research_loop.py`를 우선 사용합니다.
 - 스크립트 경로를 제안할 때는 전역 설치 기준으로 `~/.codex/skills/goal-research-loop/scripts/...` 경로를 우선 안내합니다.
 - 명시 요청이 없으면 기본은 **bounded loop (예: 3~5회)** 입니다. 무기한 루프는 explicit-only입니다.
 - `autonomous-loop`는 사용자 opt-in, bounded surface, 명확한 stop rule이 모두 있을 때만 사용합니다.
+- 기본 매핑은 `design → agent-first`, `autonomous-loop → script-first`, `guided-loop → contract 완성도와 반복 실행 필요성에 따라 선택`입니다.
 - 같은 실패 패턴이 2회 이상 반복되면 `refine` 대신 `pivot`, `rescope`, `escalate`를 우선 검토합니다.
 - 반복 세션이나 `autonomous-loop`에서는 **baseline / best-known state / active hypothesis / next candidates**를 담은 state snapshot을 유지합니다.
 - **hard gate 결과**, **실험 결과 상태**, **루프 제어 상태**를 한 칸에 섞어 쓰지 않습니다.
@@ -43,6 +45,7 @@ description: Use this skill when the user explicitly wants a goal-directed resea
 ## Use references
 
 - `references/fit-and-mode-routing.md`
+- `references/agent-vs-script-routing.md`
 - `references/loop-contract.md`
 - `references/decision-layers-and-status-mapping.md`
 - `references/iteration-heuristics.md`
@@ -61,7 +64,7 @@ description: Use this skill when the user explicitly wants a goal-directed resea
 
 ## Quick start
 
-1. `fit-and-mode-routing.md`로 **이 스킬이 맞는지**와 mode를 먼저 고릅니다.
+1. `fit-and-mode-routing.md`와 `agent-vs-script-routing.md`로 **이 스킬이 맞는지**, mode, execution substrate를 먼저 고릅니다.
 2. `loop-contract.md` 템플릿으로 계약을 쓰고 baseline을 확보합니다.
 3. `decision-layers-and-status-mapping.md`로 **gate / experiment status / control action** 층위를 먼저 맞춥니다.
 4. metric이 정량이 아니면 `proxy-metric-patterns.md`로 rubric을 먼저 고릅니다.
@@ -95,20 +98,37 @@ python3 ~/.codex/skills/goal-research-loop/scripts/codex_goal_research_loop.py \
 
 세부 동작은 `references/codex-cli-runner.md`를 참고하세요.
 
-### Script-first routing
+### Agent-first vs script-first routing
 
-아래 조건이면 **script-first**로 운영합니다.
+이 스킬은 **mode**와 별도로 **execution substrate**를 고릅니다.
+
+기본값:
+
+- `design` → **agent-first**
+- `guided-loop` → 둘 다 가능. contract 완성도와 반복 실행 필요성으로 고릅니다.
+- `autonomous-loop` → **script-first**
+
+아래면 **agent-first**로 시작합니다.
+
+- contract가 비어 있거나 hard gate / metric / budget / stop rule이 모호할 때
+- objective를 더 압축하거나 mutable surface를 다시 잘라야 할 때
+- 정책 판단, 사용자 의도 해석, 설명 가능한 설계가 실행보다 더 중요할 때
+- 이번 작업의 핵심이 “실험 실행”보다 “루프 계약과 라우팅 기준 설계”일 때
+
+아래면 **script-first**로 운영합니다.
 
 - 사용자가 “계속 돌려”, “반복 연구”, “overnight”, “자동으로 이어서”처럼 **반복 실행 자체**를 원할 때
 - 같은 objective로 여러 세션에 걸쳐 `program / contract / snapshot / ledger`를 유지해야 할 때
+- contract가 이미 채점 가능하고, mutable surface / budget / stop rule이 충분히 좁고 명확할 때
 - 사람이 직접 매 라운드 프롬프트를 다시 조립하는 것보다, **재현 가능한 host-managed loop**가 더 적합할 때
 
 권장 우선순위:
 
-1. 새 루프 시작 → `goal-research-loop.sh init`
-2. 현재 상태 확인 → `goal-research-loop.sh status`
-3. bounded 연구 실행 → `goal-research-loop.sh run --max-rounds N`
-4. 사용자가 명시적으로 원할 때만 → `codex_goal_research_loop.py run --loop-forever`
+1. contract가 비어 있거나 scope가 흔들리면 → **agent-first**로 `design` 또는 bounded `guided-loop`
+2. 반복 가능한 실행 계약이 준비되면 → `goal-research-loop.sh init`
+3. 현재 상태 확인 → `goal-research-loop.sh status`
+4. bounded 연구 실행 → `goal-research-loop.sh run --max-rounds N`
+5. 사용자가 명시적으로 원할 때만 → `codex_goal_research_loop.py run --loop-forever`
 
 반대로 아래는 수동 설계만 먼저 해도 됩니다.
 
@@ -121,17 +141,19 @@ python3 ~/.codex/skills/goal-research-loop/scripts/codex_goal_research_loop.py \
 1. **Frame the objective**
    - 사용자의 목적을 한 문장 목표와 1~3개의 성공 기준으로 압축합니다.
    - 연구 대상, 변경 가능 범위, 변경 금지 범위를 분리합니다.
-2. **Choose the operating mode**
-   - `design / guided-loop / autonomous-loop` 중 하나를 고릅니다.
-   - 사용자 요청이 없으면 보수적으로 `guided-loop` 또는 bounded `design`으로 시작합니다.
+2. **Choose the operating mode and execution substrate**
+   - `mode`: `design / guided-loop / autonomous-loop`
+   - `execution substrate`: `agent-first / script-first`
+   - 사용자 요청이 없으면 보수적으로 `design + agent-first` 또는 `guided-loop + agent-first`에서 시작하고, contract가 실행 가능해진 뒤 script-first로 넘길지 판단합니다.
 3. **Write the contract**
-   - `loop-contract.md` 템플릿으로 hard gates, primary metric, tie-breaker, budget, stop condition을 명시합니다.
+   - `loop-contract.md` 템플릿으로 hard gates, primary metric, tie-breaker, budget, stop condition, execution substrate를 명시합니다.
    - 가능하면 baseline을 먼저 확보합니다.
    - 반복 세션이면 state snapshot과 ledger 위치도 같이 정합니다.
-   - 실행 가능한 반복 루프가 목적이면, 이 단계에서 `goal-research-loop.sh init`으로 템플릿 파일을 먼저 생성하는 편을 우선 검토합니다.
+   - 실행 가능한 반복 루프가 목적이고 contract가 이미 충분히 좁으면, 이 단계에서 `goal-research-loop.sh init`으로 템플릿 파일을 먼저 생성하는 편을 우선 검토합니다.
 4. **Run one hypothesis at a time**
    - 한 라운드에는 가설 하나만 검증합니다.
    - 변경 → 실행/조사 → 평가 → 기록 → keep/revert를 한 덩어리로 끝냅니다.
+   - agent-first 상황이면 현재 세션에서 명시적으로 가설·근거·판정을 공유하며 진행합니다.
    - script-first 상황이면 수동 운영보다 `goal-research-loop.sh run`으로 round artifacts를 남기며 진행하는 편을 우선합니다.
 5. **Decide with evidence**
    - hard gate 실패면 metric 개선이 있어도 기본적으로 reject합니다.
@@ -174,7 +196,8 @@ python3 ~/.codex/skills/goal-research-loop/scripts/codex_goal_research_loop.py \
 ## Output expectation
 
 - 선택한 mode
-- script-first 여부와 사용할 명령
+- 선택한 execution substrate (`agent-first` | `script-first`) 와 그 이유
+- script-first라면 사용할 명령
 - objective와 evaluation contract
 - 현재 baseline / best-known state
 - 최근 라운드의 hard gate 결과 / experiment status / control action
