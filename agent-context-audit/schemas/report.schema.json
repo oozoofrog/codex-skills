@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "report_type",
+    "schema_version",
+    "scope",
+    "summary",
+    "findings_count",
+    "findings_by_severity",
+    "findings",
+    "strengths",
+    "priority_fixes"
+  ],
+  "properties": {
+    "report_type": {"const": "agent-context-audit"},
+    "schema_version": {"type": "integer", "const": 1},
+    "scope": {"type": "string"},
+    "summary": {"type": "string"},
+    "findings_count": {"type": "integer", "minimum": 0},
+    "findings_by_severity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["critical", "warning", "info", "strength"],
+      "properties": {
+        "critical": {"type": "integer", "minimum": 0},
+        "warning": {"type": "integer", "minimum": 0},
+        "info": {"type": "integer", "minimum": 0},
+        "strength": {"type": "integer", "minimum": 0}
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "title", "where", "why", "fix"],
+        "properties": {
+          "severity": {"type": "string", "enum": ["critical", "warning", "info", "strength"]},
+          "title": {"type": "string"},
+          "where": {"type": "string"},
+          "why": {"type": "string"},
+          "fix": {"type": "string"},
+          "evidence": {"type": "string"}
+        }
+      }
+    },
+    "strengths": {"type": "array", "items": {"type": "string"}},
+    "priority_fixes": {"type": "array", "items": {"type": "string"}}
+  }
+}

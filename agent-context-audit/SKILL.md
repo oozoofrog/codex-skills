@@ -21,6 +21,7 @@ description: Codex instruction 구조의 밀도와 건강도를 감사합니다.
 1. 빠르면 `scripts/check_agents_md.sh [target]`로 표면 신호를 본다.
 2. instruction tree와 루트/하위 책임을 수집한다.
 3. 중복·장문·커버리지 공백을 `critical / warning / info / strength`로 정리한다.
+4. deterministic formatter가 필요하면 `scripts/format_agent_context_audit.py`를 사용한다.
 
 ## Optional quick check
 빠른 점검이 필요하면 `scripts/check_agents_md.sh [target]`를 먼저 실행한다.
@@ -49,6 +50,15 @@ description: Codex instruction 구조의 밀도와 건강도를 감사합니다.
 - 자동 다음 행동: `warning`이면 분리/정리 제안, `critical`이면 상위 스킬에 구조 재설계 또는 `agent-context-init` 실행을 권한다
 
 ## Output expectation
-- 현재 구조의 장점
-- 위험 신호 (`critical / warning / info`)
-- 우선순위별 분리/정리 제안
+- `# Agent Context Audit Report`
+- `## Summary`
+- `## Findings`
+  - `[CRITICAL]`, `[WARNING]`, `[INFO]`, `[STRENGTH]`
+- `## Strengths`
+- `## Priority fixes`
+- `## Machine summary`
+
+관련 artifact:
+
+- `scripts/format_agent_context_audit.py`
+- `schemas/report.schema.json`

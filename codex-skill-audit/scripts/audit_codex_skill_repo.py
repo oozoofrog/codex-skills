@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import json
 import re
 import sys
@@ -10,10 +11,75 @@ VALID_REVIEW_MODES = {'none', 'optional', 'required'}
 EXPLICIT_ONLY_MARKERS = (
     '명시적으로 요청했을 때만',
     '명시 호출만',
+    '명시적으로 사용할 때만',
+    'explicit-only',
     'explicitly asks',
     'explicitly asked',
     'explicit invocation only',
 )
+EVALUATOR_NATIVE_MARKERS = (
+    'evaluator-native',
+    'audit',
+    'auditor',
+    'verify',
+    'verification',
+    'review',
+    'reviewer',
+    'validation',
+    'validator',
+    'doctor',
+    '감사',
+    '검증',
+    '리뷰',
+    '점검',
+)
+GENERATOR_CLAIM_MARKERS = (
+    'create',
+    'scaffold',
+    'bootstrap',
+    'generate',
+    'build',
+    'implement',
+    'release',
+    'publish',
+    'write',
+    'ship',
+    'construct',
+    'author',
+    '생성',
+    '구현',
+    '릴리스',
+    '배포',
+    '작성',
+    '구축',
+    '초기화',
+)
+REQUIRED_MODE_MARKERS = GENERATOR_CLAIM_MARKERS + (
+    'workflow',
+    'orchestr',
+    'loop',
+    'plan',
+    'design',
+    'long-running',
+    'automation',
+    '연구',
+    '반복',
+    '오케스트레이션',
+    '워크플로',
+    '자동화',
+    '설계',
+)
+ACTION_STATUS_TOKENS = {
+    'pass',
+    'refine',
+    'pivot',
+    'rescope',
+    'escalate',
+    'stop',
+    'warning',
+    'critical',
+    'info',
+}
 OPERATOR_SECTION_PATTERNS = {
     'When to use/When it fits': re.compile(r'(?m)^##\s+(When to use|When it fits)\b'),
     'Do not use when': re.compile(r'(?m)^##\s+Do not use when\b'),
@@ -71,8 +137,101 @@ def parse_allow_implicit_invocation(yaml_text: str):
     return match.group(1) == 'true'
 
 
+def parse_openai_interface_field(yaml_text: str, field: str):
+    match = re.search(rf'(?m)^\s*{re.escape(field)}:\s*(.+?)\s*$', yaml_text)
+    if not match:
+        return ''
+    return match.group(1).strip().strip('"').strip("'")
+
+
+def collect_status_tokens(text: str):
+    return set(re.findall(r'`([^`]+)`', text))
+
+
+def split_review_axes(text: str):
+    normalized = (
+        text.replace(' 또는 ', ',')
+        .replace(' and ', ',')
+        .replace(' / ', ',')
+        .replace('·', ',')
+        .replace('|', ',')
+    )
+    parts = [part.strip() for part in re.split(r'[,/]', normalized) if part.strip()]
+    return parts
+
+
+def has_any_marker(text: str, markers):
+    lowered = text.lower()
+    return any(marker in text or marker in lowered for marker in markers)
+
+
+def grouped_findings(findings):
+    groups = {
+        'frontmatter': [],
+        'operator_sections': [],
+        'review_harness': [],
+        'openai_yaml': [],
+        'hygiene': [],
+        'other': [],
+    }
+    for severity, where, message in findings:
+        lowered = message.lower()
+        bucket = 'other'
+        if 'frontmatter' in lowered or 'description' in lowered or 'kebab-case' in lowered:
+            bucket = 'frontmatter'
+        elif 'operator section' in lowered or 'quick start' in lowered or 'output expectation' in lowered:
+            bucket = 'operator_sections'
+        elif 'review harness' in lowered or '평가축' in lowered or '자동 다음 행동' in lowered or 'mode `' in lowered:
+            bucket = 'review_harness'
+        elif 'openai.yaml' in lowered or 'allow_implicit_invocation' in lowered:
+            bucket = 'openai_yaml'
+        elif 'readme.md' in lowered or 'references/' in lowered or 'long (' in lowered:
+            bucket = 'hygiene'
+        groups[bucket].append({'severity': severity, 'where': where, 'message': message})
+    return groups
+
+
+def recommended_fixes(findings):
+    fixes: list[str] = []
+    grouped = grouped_findings(findings)
+    if grouped['frontmatter']:
+        fixes.append('frontmatter name/description과 kebab-case 규칙부터 정리합니다.')
+    if grouped['operator_sections']:
+        fixes.append('When to use / Do not use when / Quick start / Output expectation 섹션을 보강합니다.')
+    if grouped['review_harness']:
+        fixes.append('Review Harness mode, 평가축, 자동 다음 행동을 실제 스킬 위험도와 맞게 수정합니다.')
+    if grouped['openai_yaml']:
+        fixes.append('openai.yaml 메타데이터와 explicit-only / implicit invocation 정책을 정렬합니다.')
+    if grouped['hygiene']:
+        fixes.append('불필요한 README, 과도한 본문 길이, references 분리 상태를 정리합니다.')
+    if not fixes and findings:
+        fixes.append('warning / critical finding을 우선순위 순으로 수정합니다.')
+    return fixes
+
+
+def build_summary(target: Path, skills: list[Path], findings, strengths):
+    unique_strengths = sorted(dict.fromkeys(strengths))
+    return {
+        'report_type': 'codex-skill-audit',
+        'schema_version': 1,
+        'target': str(target),
+        'skills_found': len(skills),
+        'findings_count': len(findings),
+        'strengths_count': len(unique_strengths),
+        'findings': [{'severity': s, 'where': w, 'message': m} for s, w, m in findings],
+        'grouped_findings': grouped_findings(findings),
+        'recommended_fixes': recommended_fixes(findings),
+        'strengths': unique_strengths,
+    }
+
+
 def main():
-    target = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd().resolve()
+    parser = argparse.ArgumentParser(description='Audit a Codex skill repository.')
+    parser.add_argument('target', nargs='?', default='.', help='감사 대상 루트 (기본값: 현재 디렉터리)')
+    parser.add_argument('--json-out', help='machine summary JSON을 저장할 파일 경로')
+    args = parser.parse_args()
+
+    target = Path(args.target).resolve()
     findings = []
     strengths = []
 
@@ -149,6 +308,9 @@ def main():
                     findings.append(('warning', str(rel), f'Review Harness section is missing `{field}`'))
 
         openai_yaml = skill_dir / 'agents' / 'openai.yaml'
+        interface_short_description = ''
+        interface_default_prompt = ''
+        allow_implicit = None
         if openai_yaml.exists():
             yaml_text = load_text(openai_yaml)
             if 'display_name:' not in yaml_text or 'short_description:' not in yaml_text:
@@ -156,6 +318,8 @@ def main():
             else:
                 strengths.append(f'{rel} has agents/openai.yaml')
 
+            interface_short_description = parse_openai_interface_field(yaml_text, 'short_description')
+            interface_default_prompt = parse_openai_interface_field(yaml_text, 'default_prompt')
             allow_implicit = parse_allow_implicit_invocation(yaml_text)
             if allow_implicit is None:
                 findings.append(('warning', str(openai_yaml.relative_to(target)), 'allow_implicit_invocation is missing or malformed'))
@@ -164,8 +328,19 @@ def main():
             explicit_only = any(marker in body for marker in EXPLICIT_ONLY_MARKERS) or any(marker in lowered_body for marker in EXPLICIT_ONLY_MARKERS)
             if explicit_only and allow_implicit is True:
                 findings.append(('warning', str(openai_yaml.relative_to(target)), 'skill body says explicit-only but allow_implicit_invocation is true'))
+            if allow_implicit is False and not explicit_only:
+                findings.append(('warning', str(openai_yaml.relative_to(target)), 'allow_implicit_invocation is false but SKILL.md does not clearly declare explicit-only usage'))
         else:
             findings.append(('info', str(rel), 'agents/openai.yaml is optional but absent'))
+
+        skill_summary_text = ' '.join(
+            part for part in (
+                desc,
+                interface_short_description,
+                interface_default_prompt,
+                extract_markdown_section(body, 'When to use') or extract_markdown_section(body, 'When it fits') or '',
+            ) if part
+        )
 
         references_dir = skill_dir / 'references'
         if references_dir.exists():
@@ -176,6 +351,37 @@ def main():
             for script in sorted(scripts_dir.glob('*')):
                 if script.is_file() and script.suffix in {'.py', '.sh'}:
                     strengths.append(f'{script.relative_to(target)} present')
+
+        if review_section is not None:
+            axes_value = review_items.get('평가축')
+            if not axes_value:
+                findings.append(('warning', str(rel), 'Review Harness section is missing `평가축`'))
+            else:
+                axes = split_review_axes(axes_value)
+                if len(axes) < 2:
+                    findings.append(('warning', str(rel), 'Review Harness `평가축` should list at least two evaluation axes'))
+
+            auto_actions = review_items.get('자동 다음 행동')
+            if not auto_actions:
+                findings.append(('warning', str(rel), 'Review Harness section is missing `자동 다음 행동`'))
+            else:
+                tokens = collect_status_tokens(auto_actions)
+                status_tokens = {token for token in tokens if token in ACTION_STATUS_TOKENS}
+                if not status_tokens:
+                    findings.append(('warning', str(rel), 'Review Harness `자동 다음 행동` should reference at least one backticked status token'))
+                elif review_items.get('mode') in {'optional', 'required'} and 'pass' not in status_tokens:
+                    findings.append(('warning', str(rel), 'Review Harness `자동 다음 행동` should include `pass` for optional/required skills'))
+
+            mode = review_items.get('mode')
+            if mode == 'none':
+                evaluator_native = has_any_marker(skill_summary_text, EVALUATOR_NATIVE_MARKERS) or has_any_marker(review_items.get('evaluator', ''), EVALUATOR_NATIVE_MARKERS)
+                if not evaluator_native:
+                    findings.append(('warning', str(rel), 'Review Harness mode `none` looks mismatched with the skill summary; evaluator-native/review language is not clear'))
+                if has_any_marker(skill_summary_text, GENERATOR_CLAIM_MARKERS) and not has_any_marker(skill_summary_text, EVALUATOR_NATIVE_MARKERS):
+                    findings.append(('warning', str(rel), 'evaluator-native skill summary overclaims generator/build behavior for mode `none`'))
+            elif mode == 'required':
+                if not has_any_marker(skill_summary_text, REQUIRED_MODE_MARKERS):
+                    findings.append(('warning', str(rel), 'Review Harness mode `required` looks mismatched with the surrounding skill description'))
 
     for name, paths in names.items():
         if len(paths) > 1:
@@ -199,23 +405,41 @@ def main():
         for severity, where, message in findings:
             print(f'- [{severity}] `{where}` — {message}')
     print()
-
-    print('## Strengths')
-    if not strengths:
+    print('## Grouped summary')
+    grouped = grouped_findings(findings)
+    if not any(grouped.values()):
         print('- None')
     else:
-        for item in sorted(dict.fromkeys(strengths)):
+        for key, items in grouped.items():
+            if items:
+                print(f'- `{key}`: {len(items)}')
+    print()
+    print('## Recommended fixes')
+    fixes = recommended_fixes(findings)
+    if not fixes:
+        print('1. 현재 구조를 유지합니다.')
+    else:
+        for idx, item in enumerate(fixes, start=1):
+            print(f'{idx}. {item}')
+    print()
+
+    print('## Strengths')
+    unique_strengths = sorted(dict.fromkeys(strengths))
+    if not unique_strengths:
+        print('- None')
+    else:
+        for item in unique_strengths:
             print(f'- {item}')
     print()
 
     print('## Machine summary')
-    summary = {
-        'target': str(target),
-        'skills_found': len(skills),
-        'findings': [{'severity': s, 'where': w, 'message': m} for s, w, m in findings],
-        'strengths': sorted(dict.fromkeys(strengths)),
-    }
+    summary = build_summary(target, skills, findings, strengths)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+    if args.json_out:
+        out_path = Path(args.json_out).expanduser().resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
 
 if __name__ == '__main__':

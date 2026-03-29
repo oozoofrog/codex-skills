@@ -24,6 +24,9 @@ description: AGENTS.md 기반 instruction 구조의 정합성을 검증합니다
 
 ## Use references
 - `../agent-context-guide/references/verification-guide.md`
+- `../../../docs/evaluator-output-contract.md`
+- `scripts/verify_agent_context.py`
+- `schemas/report.schema.json`
 
 ## Verification stages
 1. **Reference integrity**
@@ -40,6 +43,12 @@ description: AGENTS.md 기반 instruction 구조의 정합성을 검증합니다
 4. 결과를 `critical / warning / info / strength`로 정리한다.
 5. 필요 시 `context-validator` custom agent 또는 일반 read-only subagent에 검증 일부를 위임한다.
 
+가능하면 먼저 아래 deterministic script를 사용합니다.
+
+```bash
+python3 .agents/skills/agent-context-verify/scripts/verify_agent_context.py [target]
+```
+
 ## Review Harness
 - mode: none
 - 공통 기준: `../../../docs/review-harness.md`
@@ -51,6 +60,9 @@ description: AGENTS.md 기반 instruction 구조의 정합성을 검증합니다
 - 자동 다음 행동: `pass`면 종료, `warning`이면 수정 후보 제시, `critical`이면 해당 문서를 block 처리하고 상위 스킬에 재작성 요청
 
 ## Output expectation
-- 단계별 검증 결과
-- 깨진 링크 / 오래된 명령 / 잘못된 주장 목록
-- 바로 수정할 파일 제안
+- `# Agent Context Verification Report`
+- `## Summary`
+- `## Findings`
+  - `critical / warning / info / strength`
+- `## Recommended fixes`
+- 필요 시 `## Machine summary`

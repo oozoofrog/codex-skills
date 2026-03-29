@@ -223,6 +223,124 @@ def read_ledger_rows(ledger_path: Path) -> list[list[str]]:
     return rows
 
 
+def recorded_round_numbers(ledger_path: Path) -> set[int]:
+    numbers: set[int] = set()
+    for row in read_ledger_rows(ledger_path):
+        if not row:
+            continue
+        try:
+            numbers.add(int(row[0]))
+        except Exception:
+            continue
+    return numbers
+
+
+def iter_round_dirs(rounds_dir: Path) -> list[tuple[int, Path]]:
+    items: list[tuple[int, Path]] = []
+    if not rounds_dir.exists():
+        return items
+    for path in sorted(rounds_dir.glob("round-*")):
+        if not path.is_dir():
+            continue
+        try:
+            round_num = int(path.name.split("-", 1)[1])
+        except Exception:
+            continue
+        items.append((round_num, path))
+    return items
+
+
+def next_round_number(ledger_path: Path, rounds_dir: Path) -> int:
+    ledger_based = len(read_ledger_rows(ledger_path))
+    existing = iter_round_dirs(rounds_dir)
+    if not existing:
+        return ledger_based
+    return max(ledger_based, max(round_num for round_num, _ in existing) + 1)
+
+
+def response_artifact_for_round(round_dir: Path) -> Path | None:
+    for candidate in [round_dir / "response.json", round_dir / "last-message.json"]:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def load_round_response(round_dir: Path) -> dict[str, object] | None:
+    artifact = response_artifact_for_round(round_dir)
+    if artifact is None:
+        return None
+    raw = read_text(artifact).strip()
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+def write_runtime_status(
+    state_dir: Path,
+    *,
+    ledger_rows_count: int,
+    recoverable_rounds: list[int],
+    pending_rounds: list[int],
+    next_round: int,
+) -> Path:
+    runtime_dir = state_dir / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    status_path = runtime_dir / "status.json"
+    payload = {
+        "schema_version": 1,
+        "ledger_rows": ledger_rows_count,
+        "recoverable_rounds": recoverable_rounds,
+        "pending_rounds": pending_rounds,
+        "next_round": next_round,
+        "updated_at": now_iso(),
+    }
+    write_text(status_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    return status_path
+
+
+def round_health(ledger_path: Path, rounds_dir: Path) -> tuple[list[int], list[int]]:
+    recorded = recorded_round_numbers(ledger_path)
+    recoverable: list[int] = []
+    pending: list[int] = []
+    for round_num, round_dir in iter_round_dirs(rounds_dir):
+        if round_num in recorded:
+            continue
+        if load_round_response(round_dir) is not None:
+            recoverable.append(round_num)
+        else:
+            pending.append(round_num)
+    return recoverable, pending
+
+
+def reconcile_round_artifacts(ledger_path: Path, rounds_dir: Path) -> list[int]:
+    recorded = recorded_round_numbers(ledger_path)
+    reconciled: list[int] = []
+    for round_num, round_dir in iter_round_dirs(rounds_dir):
+        if round_num in recorded:
+            continue
+        response = load_round_response(round_dir)
+        if response is None:
+            continue
+        response_path = round_dir / "response.json"
+        if not response_path.exists():
+            write_text(response_path, json.dumps(response, ensure_ascii=False, indent=2) + "\n")
+        evidence_path = round_dir / "evidence.md"
+        evidence_ref = str(evidence_path if evidence_path.exists() else response_path)
+        append_ledger_row(
+            ledger_path,
+            round_num=round_num,
+            response=response,
+            evidence_ref=evidence_ref,
+            notes_suffix="(reconciled from round artifact)",
+        )
+        recorded.add(round_num)
+        reconciled.append(round_num)
+    return reconciled
+
+
 def recent_ledger_excerpt(ledger_path: Path, limit: int = 8) -> str:
     if not ledger_path.exists():
         return "(ledger 없음)"
@@ -234,10 +352,6 @@ def recent_ledger_excerpt(ledger_path: Path, limit: int = 8) -> str:
     else:
         excerpt = lines[:1] + lines[-limit:]
     return "\n".join(excerpt)
-
-
-def next_round_number(ledger_path: Path) -> int:
-    return len(read_ledger_rows(ledger_path))
 
 
 def append_ledger_row(
@@ -360,7 +474,7 @@ def build_round_prompt(
 
     baseline_note = (
         "현재 ledger에 완료된 라운드가 없으므로, 이번 라운드는 baseline 확립 또는 contract 보정부터 시작해도 됩니다."
-        if next_round_number(ledger_path) == 0
+        if len(read_ledger_rows(ledger_path)) == 0
         else "이미 이전 라운드가 있으므로, best-known state를 기준으로 다음 가설 하나만 실행하세요."
     )
 
@@ -551,9 +665,17 @@ def cmd_init(args: argparse.Namespace) -> int:
     workspace = resolve_workspace(args.workspace)
     state_dir = resolve_state_dir(workspace, args.state_dir)
     created = maybe_bootstrap_files(workspace, state_dir, args.objective, args.force)
+    status_path = write_runtime_status(
+        state_dir,
+        ledger_rows_count=len(read_ledger_rows(state_dir / "ledger.tsv")),
+        recoverable_rounds=[],
+        pending_rounds=[],
+        next_round=next_round_number(state_dir / "ledger.tsv", state_dir / "rounds"),
+    )
 
     print(f"workspace: {workspace}")
     print(f"state dir: {state_dir}")
+    print(f"runtime status: {status_path}")
     if created:
         print("생성/갱신된 파일:")
         for path in created:
@@ -596,12 +718,27 @@ def should_stop(control_action: str, loop_forever: bool, rounds_done: int, max_r
 def cmd_status(args: argparse.Namespace) -> int:
     workspace = resolve_workspace(args.workspace)
     state_dir = resolve_state_dir(workspace, args.state_dir)
+    ensure_runtime_files(state_dir)
     ledger_path = state_dir / "ledger.tsv"
     snapshot_path = state_dir / "state_snapshot.md"
+    rounds_dir = state_dir / "rounds"
+    recoverable, pending = round_health(ledger_path, rounds_dir)
+    next_round = next_round_number(ledger_path, rounds_dir)
+    status_path = write_runtime_status(
+        state_dir,
+        ledger_rows_count=len(read_ledger_rows(ledger_path)),
+        recoverable_rounds=recoverable,
+        pending_rounds=pending,
+        next_round=next_round,
+    )
 
     print(f"workspace: {workspace}")
     print(f"state dir: {state_dir}")
     print(f"ledger rows: {len(read_ledger_rows(ledger_path))}")
+    print(f"recoverable rounds: {recoverable or '[]'}")
+    print(f"pending rounds: {pending or '[]'}")
+    print(f"next round: {next_round}")
+    print(f"runtime status: {status_path}")
     print()
     if snapshot_path.exists():
         print("state snapshot:")
@@ -615,6 +752,62 @@ def cmd_status(args: argparse.Namespace) -> int:
     else:
         print("ledger.tsv 가 없습니다.")
     return 0
+
+
+def cmd_reconcile(args: argparse.Namespace) -> int:
+    workspace = resolve_workspace(args.workspace)
+    state_dir = resolve_state_dir(workspace, args.state_dir)
+    ensure_runtime_files(state_dir)
+    ledger_path = state_dir / "ledger.tsv"
+    rounds_dir = state_dir / "rounds"
+
+    reconciled = reconcile_round_artifacts(ledger_path, rounds_dir)
+    recoverable, pending = round_health(ledger_path, rounds_dir)
+    next_round = next_round_number(ledger_path, rounds_dir)
+    status_path = write_runtime_status(
+        state_dir,
+        ledger_rows_count=len(read_ledger_rows(ledger_path)),
+        recoverable_rounds=recoverable,
+        pending_rounds=pending,
+        next_round=next_round,
+    )
+
+    print(f"workspace: {workspace}")
+    print(f"state dir: {state_dir}")
+    print(f"reconciled rounds: {reconciled or '[]'}")
+    print(f"recoverable rounds remaining: {recoverable or '[]'}")
+    print(f"pending rounds: {pending or '[]'}")
+    print(f"next round: {next_round}")
+    print(f"runtime status: {status_path}")
+    return 0
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    workspace = resolve_workspace(args.workspace)
+    state_dir = resolve_state_dir(workspace, args.state_dir)
+    ensure_runtime_files(state_dir)
+    ledger_path = state_dir / "ledger.tsv"
+    rounds_dir = state_dir / "rounds"
+
+    reconciled = reconcile_round_artifacts(ledger_path, rounds_dir)
+    recoverable, pending = round_health(ledger_path, rounds_dir)
+    status_path = write_runtime_status(
+        state_dir,
+        ledger_rows_count=len(read_ledger_rows(ledger_path)),
+        recoverable_rounds=recoverable,
+        pending_rounds=pending,
+        next_round=next_round_number(ledger_path, rounds_dir),
+    )
+
+    print(f"workspace: {workspace}")
+    print(f"state dir: {state_dir}")
+    print(f"reconciled rounds before resume: {reconciled or '[]'}")
+    print(f"recoverable rounds remaining: {recoverable or '[]'}")
+    print(f"pending rounds: {pending or '[]'}")
+    print(f"runtime status: {status_path}")
+    print("resume: continuing into run phase")
+
+    return cmd_run(args)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -635,6 +828,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     if git_root and not args.allow_dirty:
         ensure_clean_git_tree(workspace, state_dir_rel)
 
+    reconciled = reconcile_round_artifacts(ledger_path, rounds_dir)
+    if reconciled:
+        print(f"reconciled rounds before run: {reconciled}")
+
     commit_on_keep = args.commit_on_keep
     if commit_on_keep is None:
         commit_on_keep = git_root is not None
@@ -643,7 +840,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     rounds_done = 0
 
     while True:
-        round_num = next_round_number(ledger_path)
+        round_num = next_round_number(ledger_path, rounds_dir)
         round_dir = rounds_dir / f"round-{round_num:03d}"
         round_dir.mkdir(parents=True, exist_ok=True)
 
@@ -776,6 +973,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         if git_root and not args.allow_dirty:
             ensure_clean_git_tree(workspace, state_dir_rel)
 
+    recoverable, pending = round_health(ledger_path, rounds_dir)
+    write_runtime_status(
+        state_dir,
+        ledger_rows_count=len(read_ledger_rows(ledger_path)),
+        recoverable_rounds=recoverable,
+        pending_rounds=pending,
+        next_round=next_round_number(ledger_path, rounds_dir),
+    )
+
     return 0
 
 
@@ -796,6 +1002,43 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--workspace", default=".", help="연구를 수행할 workspace 디렉터리")
     status_parser.add_argument("--state-dir", help="상태 파일 디렉터리")
     status_parser.set_defaults(func=cmd_status)
+
+    reconcile_parser = subparsers.add_parser("reconcile", help="미반영 round artifact를 ledger로 복구")
+    reconcile_parser.add_argument("--workspace", default=".", help="연구를 수행할 workspace 디렉터리")
+    reconcile_parser.add_argument("--state-dir", help="상태 파일 디렉터리")
+    reconcile_parser.set_defaults(func=cmd_reconcile)
+
+    resume_parser = subparsers.add_parser("resume", help="복구 가능한 round를 반영한 뒤 run을 이어서 실행")
+    resume_parser.add_argument("--workspace", default=".", help="연구를 수행할 workspace 디렉터리")
+    resume_parser.add_argument("--state-dir", help="상태 파일 디렉터리")
+    resume_parser.add_argument("--objective", help="state dir가 아직 없을 때만 초기 objective로 사용")
+    resume_parser.add_argument("--codex-bin", default="codex", help="Codex CLI 실행 파일 경로")
+    resume_parser.add_argument("--model", help="codex exec 에 전달할 model")
+    resume_parser.add_argument("--profile", help="codex exec 에 전달할 profile")
+    resume_parser.add_argument("--sandbox", choices=["read-only", "workspace-write", "danger-full-access"], help="codex exec sandbox")
+    resume_parser.add_argument("--search", action="store_true", help="Codex web search 활성화")
+    resume_parser.add_argument("--full-auto", action="store_true", help="codex exec --full-auto 전달")
+    resume_parser.add_argument(
+        "--dangerously-bypass-approvals-and-sandbox",
+        action="store_true",
+        help="codex exec --dangerously-bypass-approvals-and-sandbox 전달",
+    )
+    resume_parser.add_argument("--skip-git-repo-check", action="store_true", help="codex exec --skip-git-repo-check 전달")
+    resume_parser.add_argument("--max-rounds", type=int, default=3, help="최대 라운드 수 (기본: 3)")
+    resume_parser.add_argument("--loop-forever", action="store_true", help="control_action이 종료 신호를 줄 때까지 계속 실행")
+    resume_parser.add_argument("--timeout-seconds", type=int, default=1800, help="라운드별 codex exec 타임아웃 (기본: 1800)")
+    resume_parser.add_argument("--add-dir", action="append", help="codex exec 에 추가 writable directory 전달")
+    resume_parser.add_argument("--extra-instruction", action="append", help="매 라운드 프롬프트에 추가할 짧은 지시")
+    resume_parser.add_argument(
+        "--prompt-profile",
+        choices=["standard", "lightweight"],
+        default="standard",
+        help="라운드 프롬프트 밀도 프로필 (기본: standard)",
+    )
+    resume_parser.add_argument("--allow-dirty", action="store_true", help="git dirty tree에서도 실행 허용")
+    resume_parser.add_argument("--commit-on-keep", dest="commit_on_keep", action="store_true", default=None, help="keep 결과를 자동 commit")
+    resume_parser.add_argument("--no-commit-on-keep", dest="commit_on_keep", action="store_false", help="keep 결과를 자동 commit 하지 않음")
+    resume_parser.set_defaults(func=cmd_resume)
 
     run_parser = subparsers.add_parser("run", help="Codex CLI 연구 루프 실행")
     run_parser.add_argument("--workspace", default=".", help="연구를 수행할 workspace 디렉터리")

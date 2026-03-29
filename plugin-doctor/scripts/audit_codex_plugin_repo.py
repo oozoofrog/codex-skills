@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
+import argparse
 import json
 import re
 import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(ROOT / 'scripts'))
+from packaged_plugin_parity import default_prompt_source_skills, short_description_source_skill
 
 try:
     import tomllib  # Python 3.11+
@@ -34,6 +39,21 @@ def parse_frontmatter(text: str):
     return meta, body
 
 
+def extract_markdown_section(body: str, title: str):
+    pattern = rf'(?ms)^## {re.escape(title)}\s*\n(.*?)(?=^## \S|\Z)'
+    match = re.search(pattern, body)
+    return match.group(1).strip() if match else None
+
+
+def normalize_multiline(text: str):
+    lines = [' '.join(line.split()) for line in text.strip().splitlines() if line.strip()]
+    return '\n'.join(lines)
+
+
+def code_refs_from_bullets(text: str):
+    return re.findall(r'(?m)^-\s*`([^`]+)`', text)
+
+
 def load_text(path: Path):
     return path.read_text(encoding='utf-8', errors='ignore')
 
@@ -42,8 +62,37 @@ def load_json(path: Path):
     return json.loads(load_text(path))
 
 
+def parse_openai_interface_field(yaml_text: str, field: str):
+    match = re.search(rf'(?m)^\s*{re.escape(field)}:\s*(.+?)\s*$', yaml_text)
+    if not match:
+        return ''
+    return match.group(1).strip().strip('"').strip("'")
+
+
 def add(findings, severity, where, message):
     findings.append((severity, where, message))
+
+
+def grouped_findings(findings):
+    groups = {
+        'manifest_and_marketplace': [],
+        'packaged_skill_drift': [],
+        'readme_and_assets': [],
+        'legacy_and_custom_agents': [],
+        'other': [],
+    }
+    for severity, where, message in findings:
+        bucket = 'other'
+        if 'marketplace' in where or 'plugin.json' in where or 'mcp' in where:
+            bucket = 'manifest_and_marketplace'
+        if 'packaged' in message or 'openai.yaml' in where or 'defaultPrompt' in message or 'shortDescription' in message:
+            bucket = 'packaged_skill_drift'
+        if 'README' in message or 'assets' in message or 'screenshots' in message:
+            bucket = 'readme_and_assets'
+        if '.claude-plugin' in where or 'CLAUDE.md' in where or 'custom agent' in message:
+            bucket = 'legacy_and_custom_agents'
+        groups[bucket].append({'severity': severity, 'where': where, 'message': message})
+    return groups
 
 
 def validate_path_ref(plugin_root: Path, rel_path: str, findings, where: str, label: str):
@@ -60,8 +109,30 @@ def validate_path_ref(plugin_root: Path, rel_path: str, findings, where: str, la
     return resolved
 
 
+def build_summary(target: Path, skill_files: list[Path], agent_files: list[Path], plugin_manifests: list[Path], findings, strengths):
+    unique_strengths = sorted(set(strengths))
+    return {
+        'report_type': 'plugin-doctor',
+        'schema_version': 1,
+        'target': str(target),
+        'skills_found': len(skill_files),
+        'custom_agents_found': len(agent_files),
+        'packaged_plugins_found': len(plugin_manifests),
+        'findings_count': len(findings),
+        'strengths_count': len(unique_strengths),
+        'findings': [{'severity': s, 'where': w, 'message': m} for s, w, m in findings],
+        'grouped_findings': grouped_findings(findings),
+        'strengths': unique_strengths,
+    }
+
+
 def main():
-    target = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd().resolve()
+    parser = argparse.ArgumentParser(description='Audit a Codex plugin repository.')
+    parser.add_argument('target', nargs='?', default='.', help='감사 대상 루트 (기본값: 현재 디렉터리)')
+    parser.add_argument('--json-out', help='machine summary JSON을 저장할 파일 경로')
+    args = parser.parse_args()
+
+    target = Path(args.target).resolve()
     findings = []
     strengths = []
 
@@ -228,12 +299,121 @@ def main():
 
         skills_value = data.get('skills')
         skills_dir = validate_path_ref(plugin_root, skills_value, findings, str(rel), 'skills path')
+        packaged_skill_names = []
         if skills_dir is not None:
             packaged_skills = sorted(skills_dir.glob('*/SKILL.md'))
             if not packaged_skills:
                 add(findings, 'critical', str(rel), 'skills path exists but no packaged SKILL.md files found')
             else:
                 strengths.append(f'{plugin_name} packages {len(packaged_skills)} skill(s)')
+                for packaged_skill in packaged_skills:
+                    packaged_rel = packaged_skill.relative_to(target)
+                    source_skill = target / '.agents' / 'skills' / packaged_skill.parent.name / 'SKILL.md'
+                    packaged_skill_names.append(packaged_skill.parent.name)
+                    if not source_skill.exists():
+                        add(findings, 'warning', str(packaged_rel), f'packaged skill has no matching source skill: {source_skill.relative_to(target)}')
+                        continue
+
+                    packaged_text = load_text(packaged_skill)
+                    source_text = load_text(source_skill)
+                    _, packaged_body = parse_frontmatter(packaged_text)
+                    _, source_body = parse_frontmatter(source_text)
+                    packaged_review = extract_markdown_section(packaged_body, 'Review Harness')
+                    source_review = extract_markdown_section(source_body, 'Review Harness')
+
+                    if (packaged_review or source_review) and normalize_multiline(packaged_review or '') != normalize_multiline(source_review or ''):
+                        add(
+                            findings,
+                            'warning',
+                            str(packaged_rel),
+                            'packaged Review Harness section drifted from source skill '
+                            f'`{source_skill.relative_to(target)}`',
+                        )
+
+                    packaged_openai = packaged_skill.parent / 'agents' / 'openai.yaml'
+                    source_openai = source_skill.parent / 'agents' / 'openai.yaml'
+                    if packaged_openai.exists() and source_openai.exists():
+                        packaged_yaml = load_text(packaged_openai)
+                        source_yaml = load_text(source_openai)
+                        field_map = {
+                            'short_description': 'short_description',
+                            'default_prompt': 'default_prompt',
+                            'allow_implicit_invocation': 'allow_implicit_invocation',
+                        }
+                        for label, field in field_map.items():
+                            if field == 'allow_implicit_invocation':
+                                packaged_value = re.search(r'(?m)^\s*allow_implicit_invocation:\s*(true|false)\s*$', packaged_yaml)
+                                source_value = re.search(r'(?m)^\s*allow_implicit_invocation:\s*(true|false)\s*$', source_yaml)
+                                packaged_value = packaged_value.group(1) if packaged_value else ''
+                                source_value = source_value.group(1) if source_value else ''
+                            else:
+                                packaged_value = parse_openai_interface_field(packaged_yaml, field)
+                                source_value = parse_openai_interface_field(source_yaml, field)
+                            if packaged_value != source_value:
+                                add(
+                                    findings,
+                                    'warning',
+                                    str(packaged_openai.relative_to(target)),
+                                    f'packaged openai.yaml `{label}` drifted from source `{source_openai.relative_to(target)}`',
+                                )
+                    elif packaged_openai.exists() != source_openai.exists():
+                        add(
+                            findings,
+                            'warning',
+                            str(packaged_rel),
+                            f'packaged/source openai.yaml presence differs from `{source_openai.relative_to(target)}`',
+                        )
+
+        readme_path = plugin_root / 'README.md'
+        if readme_path.exists():
+            readme_text = load_text(readme_path)
+            included_skills = extract_markdown_section(readme_text, 'Included skills')
+            if not included_skills:
+                add(findings, 'warning', str(readme_path.relative_to(target)), 'README is missing `## Included skills` section')
+            elif packaged_skill_names:
+                readme_skill_refs = sorted(code_refs_from_bullets(included_skills))
+                expected_skill_refs = sorted(packaged_skill_names)
+                if readme_skill_refs != expected_skill_refs:
+                    add(
+                        findings,
+                        'warning',
+                        str(readme_path.relative_to(target)),
+                        f'README Included skills drifted from packaged skills directory: expected {expected_skill_refs}, got {readme_skill_refs}',
+                    )
+
+            asset_section = extract_markdown_section(readme_text, 'Packaged assets')
+            if not asset_section:
+                add(findings, 'warning', str(readme_path.relative_to(target)), 'README is missing `## Packaged assets` section')
+            else:
+                required_assets = [
+                    'assets/icon.svg',
+                    'assets/icon.png',
+                    'assets/logo.svg',
+                    'assets/logo.png',
+                    'assets/screenshot.svg',
+                    'assets/screenshot.png',
+                ]
+                for asset_ref in required_assets:
+                    if asset_ref not in asset_section:
+                        add(findings, 'warning', str(readme_path.relative_to(target)), f'README Packaged assets section is missing `{asset_ref}`')
+
+                optional_assets = {
+                    'assets/browser-capture.png': (plugin_root / 'assets' / 'browser-capture.png').exists(),
+                    'assets/live-capture.png': (plugin_root / 'assets' / 'live-capture.png').exists(),
+                }
+                for asset_ref, exists in optional_assets.items():
+                    listed = asset_ref in asset_section
+                    if exists and not listed:
+                        add(findings, 'warning', str(readme_path.relative_to(target)), f'README Packaged assets section should list `{asset_ref}` because the asset exists')
+                    if not exists and listed:
+                        add(findings, 'warning', str(readme_path.relative_to(target)), f'README Packaged assets section lists `{asset_ref}` but the asset file is absent')
+
+                has_mcp_file = (plugin_root / '.mcp.json').exists()
+                bundled_mcp = extract_markdown_section(readme_text, 'Bundled MCP')
+                if has_mcp_file and not bundled_mcp:
+                    add(findings, 'warning', str(readme_path.relative_to(target)), 'README should include `## Bundled MCP` because .mcp.json exists')
+                if not has_mcp_file and bundled_mcp:
+                    add(findings, 'warning', str(readme_path.relative_to(target)), 'README has `## Bundled MCP` but the plugin has no .mcp.json')
 
         mcp_value = data.get('mcpServers')
         if isinstance(mcp_value, str):
@@ -270,6 +450,53 @@ def main():
                     for idx, shot in enumerate(screenshots, 1):
                         validate_path_ref(plugin_root, shot, findings, str(rel), f'interface.screenshots[{idx}]')
 
+            if isinstance(screenshots, list):
+                optional_screenshot_refs = {
+                    './assets/browser-capture.png': (plugin_root / 'assets' / 'browser-capture.png').exists(),
+                    './assets/live-capture.png': (plugin_root / 'assets' / 'live-capture.png').exists(),
+                }
+                for shot_ref, exists in optional_screenshot_refs.items():
+                    listed = shot_ref in screenshots
+                    if exists and not listed:
+                        add(findings, 'warning', str(rel), f'plugin interface.screenshots should include `{shot_ref}` because the asset exists')
+                    if not exists and listed:
+                        add(findings, 'warning', str(rel), f'plugin interface.screenshots includes `{shot_ref}` but the asset file is absent')
+
+        if packaged_skill_names and isinstance(interface, dict):
+            short_source_skill = short_description_source_skill(plugin_name, packaged_skill_names)
+            if short_source_skill:
+                source_openai = target / '.agents' / 'skills' / short_source_skill / 'agents' / 'openai.yaml'
+                if source_openai.exists():
+                    source_yaml = load_text(source_openai)
+                    source_short = parse_openai_interface_field(source_yaml, 'short_description')
+                    if source_short and interface.get('shortDescription') != source_short:
+                        add(
+                            findings,
+                            'warning',
+                            str(rel),
+                            'plugin interface.shortDescription drifted from source '
+                            f'`{source_openai.relative_to(target)}`',
+                        )
+
+            prompt_sources = default_prompt_source_skills(plugin_name, packaged_skill_names)
+            prompts = interface.get('defaultPrompt')
+            prompts = prompts if isinstance(prompts, list) else []
+            for idx, source_skill in enumerate(prompt_sources):
+                source_openai = target / '.agents' / 'skills' / source_skill / 'agents' / 'openai.yaml'
+                if not source_openai.exists():
+                    continue
+                source_yaml = load_text(source_openai)
+                source_prompt = parse_openai_interface_field(source_yaml, 'default_prompt')
+                actual_prompt = prompts[idx] if idx < len(prompts) else ''
+                if source_prompt and actual_prompt != source_prompt:
+                    add(
+                        findings,
+                        'warning',
+                        str(rel),
+                        f'plugin interface.defaultPrompt[{idx}] drifted from source '
+                        f'`{source_openai.relative_to(target)}`',
+                    )
+
         marketplace_entry = marketplace_plugins.get(plugin_name)
         if marketplace_plugins and marketplace_entry is None:
             add(findings, 'warning', str(rel), f'packaged plugin {plugin_name} missing from marketplace.json')
@@ -302,22 +529,31 @@ def main():
         for severity, where, message in findings:
             print(f'- [{severity}] `{where}` — {message}')
     print()
+    print('## Grouped summary')
+    grouped = grouped_findings(findings)
+    for key, items in grouped.items():
+        if not items:
+            continue
+        print(f'- `{key}`: {len(items)}')
+    if not any(grouped.values()):
+        print('- None')
+    print()
     print('## Strengths')
-    if not strengths:
+    unique_strengths = sorted(set(strengths))
+    if not unique_strengths:
         print('- None')
     else:
-        for item in sorted(set(strengths)):
+        for item in unique_strengths:
             print(f'- {item}')
     print()
     print('## Machine summary')
-    print(json.dumps({
-        'target': str(target),
-        'skills_found': len(skill_files),
-        'custom_agents_found': len(agent_files),
-        'packaged_plugins_found': len(plugin_manifests),
-        'findings': [{'severity': s, 'where': w, 'message': m} for s, w, m in findings],
-        'strengths': sorted(set(strengths)),
-    }, ensure_ascii=False, indent=2))
+    summary = build_summary(target, skill_files, agent_files, plugin_manifests, findings, strengths)
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+    if args.json_out:
+        out_path = Path(args.json_out).expanduser().resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
 
 if __name__ == '__main__':

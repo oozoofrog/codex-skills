@@ -22,12 +22,16 @@ goal-research-loop shell wrapper
 Usage:
   goal-research-loop.sh init [workspace] [objective...]
   goal-research-loop.sh status [workspace]
+  goal-research-loop.sh reconcile [workspace]
+  goal-research-loop.sh resume [workspace] [runner args...]
   goal-research-loop.sh run [workspace] [runner args...]
   goal-research-loop.sh help
 
 Examples:
   goal-research-loop.sh init . "Codex CLI 연구 루프를 개선한다"
   goal-research-loop.sh status .
+  goal-research-loop.sh reconcile .
+  goal-research-loop.sh resume . --max-rounds 2
   goal-research-loop.sh run . --max-rounds 5 --search --full-auto
 
 Notes:
@@ -62,6 +66,23 @@ case "$subcommand" in
     shift
     workspace="${1:-$PWD}"
     exec "$PYTHON_BIN" "$RUNNER" status --workspace "$workspace"
+    ;;
+
+  reconcile)
+    shift
+    workspace="${1:-$PWD}"
+    exec "$PYTHON_BIN" "$RUNNER" reconcile --workspace "$workspace"
+    ;;
+
+  resume)
+    shift
+    workspace="${1:-$PWD}"
+    if [[ $# -gt 0 && "$1" != --* ]]; then
+      shift
+    else
+      workspace="$PWD"
+    fi
+    exec "$PYTHON_BIN" "$RUNNER" resume --workspace "$workspace" "$@"
     ;;
 
   run)

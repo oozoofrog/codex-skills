@@ -25,6 +25,10 @@
 - [ ] 결정적 반복 작업만 `scripts/`로 분리됐다
 - [ ] review loop가 의미 있는 스킬은 `Review Harness` 섹션 또는 동등한 선언을 가진다
 - [ ] `mode: none / optional / required`가 실제 위험도와 맞다
+- [ ] `평가축`이 단일 모호 문구가 아니라 최소 2개 이상의 평가축을 드러낸다
+- [ ] `자동 다음 행동`이 `pass / refine / pivot / rescope / escalate / stop` 또는 evaluator-native status를 backtick token으로 명시한다
+- [ ] `mode: none` 스킬은 evaluator-native / review 성격이 설명과 메타데이터에 드러난다
+- [ ] `mode: required` 스킬은 구현·릴리스·반복 루프처럼 높은 쓰기/운영 리스크가 설명에 드러난다
 
 ## Metadata checks
 
@@ -32,6 +36,7 @@
 - [ ] `display_name`, `short_description`, `default_prompt`가 과장되지 않는다
 - [ ] implicit invocation 정책이 의도와 맞다
 - [ ] explicit-only 스킬은 `allow_implicit_invocation: false`다
+- [ ] `allow_implicit_invocation: false`인 스킬은 본문에서도 explicit-only 사용 조건을 분명히 선언한다
 
 ## Hygiene checks
 

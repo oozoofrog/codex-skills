@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "report_type",
+    "schema_version",
+    "target",
+    "skills_found",
+    "custom_agents_found",
+    "packaged_plugins_found",
+    "findings_count",
+    "strengths_count",
+    "findings",
+    "strengths"
+  ],
+  "properties": {
+    "report_type": {"const": "plugin-doctor"},
+    "schema_version": {"type": "integer", "const": 1},
+    "target": {"type": "string"},
+    "skills_found": {"type": "integer", "minimum": 0},
+    "custom_agents_found": {"type": "integer", "minimum": 0},
+    "packaged_plugins_found": {"type": "integer", "minimum": 0},
+    "findings_count": {"type": "integer", "minimum": 0},
+    "strengths_count": {"type": "integer", "minimum": 0},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "where", "message"],
+        "properties": {
+          "severity": {"type": "string"},
+          "where": {"type": "string"},
+          "message": {"type": "string"}
+        }
+      }
+    },
+    "strengths": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}

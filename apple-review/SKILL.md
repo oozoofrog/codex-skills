@@ -26,6 +26,9 @@ description: Apple 플랫폼 관점의 코드·PR 리뷰를 수행합니다. Swi
 ## Use references
 - `../apple-craft/references/common-mistakes.md`
 - `../apple-craft/references/code-style.md`
+- `../../../docs/evaluator-output-contract.md`
+- `scripts/format_apple_review.py`
+- `schemas/report.schema.json`
 - 대상 코드와 관련된 Apple 문서 몇 개
 
 ## Workflow
@@ -53,7 +56,16 @@ description: Apple 플랫폼 관점의 코드·PR 리뷰를 수행합니다. Swi
 - 자동 다음 행동: `pass`면 findings 없음으로 종료, `warning`이면 수정 제안, `critical`이면 block finding으로 반환하고 구현 스킬에 수정을 요구한다
 
 ## Output expectation
-- 검토 범위
-- `critical / warning / info` findings
-- 근거 파일/진단 결과
-- 최소 수정 방향 또는 남은 리스크
+- `# Apple Review Report`
+- `## Summary`
+- `## Findings`
+  - `[CRITICAL]`, `[WARNING]`, `[INFO]`
+  - 위치 / 이유 / 영향 / 수정 방향 / 필요 시 근거
+- `## Verification / Remaining risks`
+- `## Machine summary`
+
+deterministic formatter를 사용할 때는 아래 형식을 권장합니다.
+
+```bash
+python3 .agents/skills/apple-review/scripts/format_apple_review.py --input findings.json
+```

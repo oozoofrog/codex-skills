@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "report_type",
+    "schema_version",
+    "scope",
+    "summary",
+    "blocking",
+    "findings_count",
+    "findings_by_severity",
+    "findings",
+    "checked",
+    "risks"
+  ],
+  "properties": {
+    "report_type": {"const": "apple-review"},
+    "schema_version": {"type": "integer", "const": 1},
+    "scope": {"type": "string"},
+    "summary": {"type": "string"},
+    "blocking": {"type": "boolean"},
+    "findings_count": {"type": "integer", "minimum": 0},
+    "findings_by_severity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["critical", "warning", "info"],
+      "properties": {
+        "critical": {"type": "integer", "minimum": 0},
+        "warning": {"type": "integer", "minimum": 0},
+        "info": {"type": "integer", "minimum": 0}
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "title", "where", "why", "impact", "fix"],
+        "properties": {
+          "severity": {"type": "string", "enum": ["critical", "warning", "info"]},
+          "title": {"type": "string"},
+          "where": {"type": "string"},
+          "why": {"type": "string"},
+          "impact": {"type": "string"},
+          "fix": {"type": "string"},
+          "evidence": {"type": "string"}
+        }
+      }
+    },
+    "checked": {"type": "array", "items": {"type": "string"}},
+    "risks": {"type": "array", "items": {"type": "string"}}
+  }
+}
