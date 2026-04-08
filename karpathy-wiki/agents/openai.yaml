@@ -1,0 +1,6 @@
+interface:
+  display_name: "Karpathy Wiki"
+  short_description: "Bootstrap a tool-agnostic persistent LLM wiki from raw sources"
+  default_prompt: "Design a Karpathy-style persistent LLM wiki with a markdown/git core, clear raw-vs-wiki separation, AGENTS.md operating rules, and optional adapters such as Obsidian kept outside the core contract."
+policy:
+  allow_implicit_invocation: true
