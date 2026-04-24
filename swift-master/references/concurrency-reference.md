@@ -22,16 +22,16 @@ Swift Concurrency 안티패턴, 변환 규칙, 베스트 프랙티스입니다.
 
 | # | 패턴 | 탐지 규칙 | 수정 방법 |
 |---|------|-----------|-----------|
-| C1 | Blocking in Async | `semaphore.wait()`, `DispatchQueue.sync`, `Thread.sleep` in async | Actor 또는 AsyncSemaphore |
+| C1 | Blocking in Async | `semaphore.wait()`, `DispatchQueue.sync`, `Thread.sleep` in async | Actor, AsyncSequence, structured back-pressure |
 | C2 | Continuation Double Resume | `continuation.resume` 2회 이상 | 한 번만 호출, flag 체크 |
 | C3 | Missing Continuation Resume | 모든 경로에서 resume 없음 | guard + defer 패턴 |
-| C4 | Sendable Violation | non-Sendable을 actor 경계 넘김 | Struct 또는 @unchecked Sendable |
+| C4 | Sendable Violation | non-Sendable을 actor 경계 넘김 | Sendable snapshot/DTO, API isolation 정정, Actor |
 | C5 | Actor Reentrancy Race | await 후 상태 가정 | 트랜잭션 패턴 |
 | C6 | Core Data Thread Violation | viewContext를 Task 내 직접 사용 | perform 또는 @MainActor |
 | C7 | Realm Thread Violation | Realm 객체를 다른 Task에서 접근 | ThreadSafeReference |
-| C8 | Unsafe Task Detachment | Task.detached로 취소 단절 | Task 사용 |
-| C9 | MainActor Blocking | @MainActor에서 무거운 async 작업 | nonisolated로 분리 |
-| C10 | Swift 6 Isolation Crash | Legacy callback executor 불일치 | @preconcurrency, assumeIsolated |
+| C8 | Unsafe Task Detachment | Task.detached로 취소/actor 단절 | async let/TaskGroup 또는 owner-managed Task |
+| C9 | MainActor Blocking | @MainActor에서 무거운 작업 | `@concurrent` helper, background actor, chunking |
+| C10 | Swift 6 Isolation Crash | Legacy callback executor 불일치 | static isolation 정정, MainActor.run, 보장된 경우만 assumeIsolated |
 
 ### WARNING (10개) - 성능/유지보수 문제
 
@@ -45,7 +45,7 @@ Swift Concurrency 안티패턴, 변환 규칙, 베스트 프랙티스입니다.
 | W6 | GlobalActor Overuse | @MainActor 과다 사용 | 필요한 부분만 격리 |
 | W7 | AsyncSequence Retain Cycle | for await에서 self 강한 참조 | [weak self] |
 | W8 | Missing Task Priority | 기본 우선순위만 사용 | Task(priority:) 명시 |
-| W9 | Synchronous Property Access | Actor 동기 프로퍼티 접근 시도 | nonisolated 또는 async |
+| W9 | Synchronous Property Access | Actor 동기 프로퍼티 접근 시도 | 같은 actor에서 접근, async accessor, immutable snapshot |
 | W10 | withTaskGroup Missing throws | 에러 가능한데 non-throwing | withThrowingTaskGroup |
 
 ### INFO (8개) - 베스트 프랙티스
@@ -209,9 +209,12 @@ await withTaskGroup(of: Void.self) { group in
 
 ### 6. Legacy Callback → Continuation
 
+단발성 callback에만 `withCheckedContinuation` / `withCheckedThrowingContinuation`을 사용합니다. 여러 번 호출될 수 있는 delegate/progress/callback은 `AsyncStream`으로 모델링합니다.
+
 ```swift
 // Before
 func legacyAPI(completion: @escaping (String) -> Void)
+func legacyThrowingAPI(completion: @escaping (Result<String, Error>) -> Void)
 
 // After
 func modernAPI() async -> String {
@@ -225,12 +228,8 @@ func modernAPI() async -> String {
 // 에러 가능한 경우
 func modernAPIThrowing() async throws -> String {
     try await withCheckedThrowingContinuation { continuation in
-        legacyAPI { result, error in
-            if let error = error {
-                continuation.resume(throwing: error)
-            } else {
-                continuation.resume(returning: result)
-            }
+        legacyThrowingAPI { result in
+            continuation.resume(with: result)
         }
     }
 }
@@ -238,26 +237,41 @@ func modernAPIThrowing() async throws -> String {
 
 ### 7. 안전한 Continuation 패턴
 
+Continuation 안전성은 로컬 flag로 “막는” 문제가 아니라, upstream API 계약을 확인해 정확히 한 번만 resume되도록 설계하는 문제입니다.
+
 ```swift
-func safeModernAPI() async -> String {
-    await withCheckedContinuation { continuation in
-        var resumed = false
+func modernAPI() async throws -> String {
+    let request = LegacyRequest()
 
-        legacyAPI { result in
-            guard !resumed else { return }
-            resumed = true
-            continuation.resume(returning: result)
+    return try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { continuation in
+            request.start { result in
+                // Result 기반 API면 분기 누락 없이 정확히 한 번 resume
+                continuation.resume(with: result)
+            }
         }
+    } onCancel: {
+        request.cancel()
+    }
+}
 
-        // 타임아웃
-        DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
-            guard !resumed else { return }
-            resumed = true
-            continuation.resume(returning: "timeout")
+func eventStream() -> AsyncStream<Event> {
+    AsyncStream { continuation in
+        let token = legacyObserver.observe { event in
+            continuation.yield(event)
+        }
+        continuation.onTermination = { @Sendable _ in
+            token.cancel()
         }
     }
 }
 ```
+
+체크리스트:
+- 모든 성공/실패 경로에서 resume 또는 finish 되는지
+- cancellation 시 upstream request/observer를 취소하는지
+- callback이 두 번 이상 호출될 수 있으면 continuation이 아니라 `AsyncStream`인지
+- callback이 arbitrary thread에서 오면 MainActor/UI 접근 전에 isolation을 전환하는지
 
 ### 8. NotificationCenter → AsyncSequence
 
@@ -365,19 +379,29 @@ actor DataManager {
 }
 ```
 
-### @unchecked Sendable 최소화
+### Unsafe Sendable opt-out 정책
 
 ```swift
-// 정말 필요한 경우만
-final class ThreadSafeCache: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storage: [String: Any] = [:]
+// 기본값: boundary에서 필요한 값만 분리
+struct CacheSnapshot: Sendable {
+    let entries: [String: Data]
+}
 
-    func get(_ key: String) -> Any? {
-        lock.withLock { storage[key] }
+// 또는 mutable state를 actor가 소유
+actor CacheStore {
+    private var storage: [String: Data] = [:]
+
+    func snapshot() -> CacheSnapshot {
+        CacheSnapshot(entries: storage)
     }
 }
 ```
+
+`@unchecked Sendable`은 컴파일러 검사를 우회하는 계약입니다. 기본 수정안으로 제안하지 말고 다음 순서를 먼저 검토합니다.
+- 값 타입 snapshot/DTO로 boundary 축소
+- type 또는 API의 실제 isolation을 `@MainActor`/actor/protocol requirement에 표현
+- reference type은 `final` + immutable stored properties로 checked `Sendable` 가능 여부 확인
+- repo/user가 `@unchecked Sendable`, lock/semaphore/sync를 금지하면 사용하지 않기
 
 ### Actor-isolated dependency contract 점검
 
@@ -573,9 +597,9 @@ await withTaskGroup(of: Image.self) { group in
 | Actor 상속 | ✅ | ❌ |
 | 우선순위 상속 | ✅ | ❌ |
 | TaskLocal 상속 | ✅ | ❌ |
-| 취소 전파 | ✅ | ❌ |
+| 구조적 취소 전파 | ❌ owner가 handle 저장/취소 | ❌ |
 
-**규칙:** `Task.detached`는 거의 사용하지 마세요.
+**규칙:** 구조적 동시성(`async let`, `TaskGroup`)을 우선하고, `Task {}`는 owner가 `Task` handle을 저장/취소할 때만 사용합니다. `Task.detached`는 actor/context 단절이 의도인 극소수 경우만 사용하세요.
 
 ---
 
@@ -597,55 +621,53 @@ struct EventResult: Sendable {
 }
 ```
 
-### Step 2: Delegate/Callback Proxy 객체 생성
+### Step 2: Delegate/Callback owner 객체 생성
 
-기존 시스템의 이벤트를 수신하여 `AsyncStream.Continuation`으로 전달(yield)하는 중간자(Proxy) 역할의 클래스를 만듭니다.
+기존 시스템의 이벤트를 수신하여 `AsyncStream.Continuation`으로 전달(yield)하는 owner 객체를 둡니다. proxy/delegate를 stream builder의 지역 변수로만 만들면 delegate가 `weak`인 API에서 즉시 해제될 수 있으므로, owner가 강하게 보관해야 합니다.
 
 ```swift
-final class EventStreamProxy: LegacySystemDelegate, @unchecked Sendable {
-    private let continuation: AsyncStream<EventResult>.Continuation
+@MainActor
+final class EventStreamOwner: LegacySystemDelegate {
+    private let system: LegacySystem
+    private var continuation: AsyncStream<EventResult>.Continuation?
 
-    init(continuation: AsyncStream<EventResult>.Continuation) {
-        self.continuation = continuation
+    init(system: LegacySystem) {
+        self.system = system
     }
 
-    // 레거시 델리게이트나 콜백 메서드
-    func system(_ system: LegacySystem, didProduceEvent data: LegacyData) {
-        // 1. 필요한 데이터만 Sendable Struct로 변환
-        let safeData = EventResult(id: data.id, value: data.value)
+    func stream() -> AsyncStream<EventResult> {
+        AsyncStream { continuation in
+            self.continuation = continuation
+            self.system.delegate = self
 
-        // 2. 스트림으로 데이터 방출 (await 없이 동기적으로 호출 가능)
-        continuation.yield(safeData)
+            continuation.onTermination = { [weak self] _ in
+                Task { @MainActor in
+                    self?.stop()
+                }
+            }
+        }
+    }
+
+    func system(_ system: LegacySystem, didProduceEvent data: LegacyData) {
+        let safeData = EventResult(id: data.id, value: data.value)
+        continuation?.yield(safeData)
     }
 
     func systemDidFinish(_ system: LegacySystem) {
-        // 스트림의 끝을 알림
-        continuation.finish()
+        continuation?.finish()
+        stop()
+    }
+
+    private func stop() {
+        system.delegate = nil
+        continuation = nil
     }
 }
 ```
 
 ### Step 3: AsyncStream 생성 및 수명 관리
 
-외부에서 호출할 팩토리 메서드를 만들고, 그 내부에서 `AsyncStream`을 생성합니다. **등록(Register)**과 **해제(Unregister)** 로직이 반드시 포함되어야 합니다.
-
-```swift
-func observeEvents(from system: LegacySystem) -> AsyncStream<EventResult> {
-    return AsyncStream { continuation in
-        // 1. 프록시 객체 생성 및 레거시 시스템에 등록
-        let proxy = EventStreamProxy(continuation: continuation)
-        system.delegate = proxy
-        // 옵저버 패턴이라면 system.addObserver(proxy)
-
-        // 2. 스트림 종료 또는 Task 취소 시 메모리 정리 (Cleanup)
-        continuation.onTermination = { @Sendable _ in
-            // 메모리 누수 방지를 위해 반드시 등록을 해제해야 함
-            system.delegate = nil
-            // 옵저버 패턴이라면 system.removeObserver(proxy)
-        }
-    }
-}
-```
+외부에서 호출할 팩토리/owner를 만들고, 그 내부에서 `AsyncStream`을 생성합니다. **등록(Register)**, **강한 보관**, **해제(Unregister)** 로직이 반드시 포함되어야 합니다.
 
 ### Step 4: 핵심 주의사항
 

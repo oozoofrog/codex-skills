@@ -97,7 +97,7 @@ Build Settings → Swift Compiler → Strict Concurrency Checking
 
 1. Minimal (기본) - 기본 검사만
 2. Targeted - 명시적 async 코드 검사
-3. Complete - 모든 코드 검사 (Swift 6 모드)
+3. Complete - 모든 동시성 검사 (Swift 5에서는 warning, Swift 6에서는 error)
 ```
 
 권장 마이그레이션 순서:
@@ -281,6 +281,12 @@ class ViewModel: ObservableObject {
 @MainActor
 class ViewModel: ObservableObject {
     @Published var items: [Item] = []
+    @Published private(set) var thumbnails: [Thumbnail] = []
+    private let service: ItemService
+
+    init(service: ItemService) {
+        self.service = service
+    }
 
     func loadItems() async throws {
         let data = try await service.fetchItems()
@@ -423,22 +429,24 @@ func fetchUser() throws(UserFetchError) -> User {
 ### Phase 1: 준비
 
 - [ ] Xcode 16+ 업그레이드
-- [ ] Strict Concurrency = Minimal 설정
+- [ ] 대상 모듈의 Swift version/build settings 확인
 - [ ] 빌드 성공 확인
 
 ### Phase 2: 점진적 마이그레이션
 
-- [ ] Strict Concurrency = Targeted 설정
+- [ ] Swift 5 language mode에서 Strict Concurrency = Complete 설정
 - [ ] 경고 수정
-  - [ ] Sendable 준수 추가
-  - [ ] @MainActor 격리
-  - [ ] 전역 상태 Actor로 변환
+  - [ ] UI 상태와 화면 컴포넌트 `@MainActor` 격리
+  - [ ] boundary를 넘는 값은 `Sendable` snapshot/DTO로 축소
+  - [ ] 전역 상태는 immutable, global actor, actor owner 중 하나로 정리
+  - [ ] `@unchecked Sendable` / `nonisolated(unsafe)`는 repo/user가 명시 허용한 경우만 임시 사용 여부 추적
 
 ### Phase 3: Complete 모드
 
 - [ ] Strict Concurrency = Complete 설정
 - [ ] 모든 경고/에러 수정
-- [ ] @preconcurrency import 최소화
+- [ ] `@preconcurrency import` 최소화 및 제거 계획 기록
+- [ ] `nonisolated async` / `@concurrent` 의미가 Swift 6.2+ 설정과 맞는지 재확인
 
 ### Phase 4: Swift 6 모드
 
@@ -454,7 +462,8 @@ func fetchUser() throws(UserFetchError) -> User {
 |------|--------|
 | 2024 가을 | Swift 6 출시 (Xcode 16) |
 | 2025년 4월 | App Store 제출 시 iOS 18 SDK 필수 |
-| 2025년 9월 | Swift 6.2 출시 예정 |
+| 2025년 9월 15일 | Swift 6.2 출시, Approachable Concurrency / `@concurrent` |
+| 2026년 3월 24일 | Swift 6.3 출시 |
 
 ---
 
@@ -462,4 +471,9 @@ func fetchUser() throws(UserFetchError) -> User {
 
 - [Swift 6 Migration Guide](https://www.swift.org/migration/documentation/migrationguide/)
 - [WWDC 2024: Migrate to Swift 6](https://developer.apple.com/videos/play/wwdc2024/10169/)
-- [SE-0413: Typed Throws](https://github.com/apple/swift-evolution/blob/main/proposals/0413-typed-throws.md)
+- [WWDC 2025: Embracing Swift concurrency](https://developer.apple.com/videos/play/wwdc2025/268/)
+- [Swift 6.2 Released](https://www.swift.org/blog/swift-6.2-released/)
+- [Swift 6.3 Released](https://www.swift.org/blog/swift-6.3-released/)
+- [SE-0413: Typed Throws](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0413-typed-throws.md)
+- [SE-0461: Run nonisolated async functions on the caller's actor by default](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0461-async-function-isolation.md)
+- [SE-0466: Control default actor isolation inference](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0466-control-default-actor-isolation.md)
