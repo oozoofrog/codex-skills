@@ -566,6 +566,20 @@ func fetchWithCancellation() async throws -> Data {
 
 ## Quick Reference
 
+### Swift 6.2+ isolation semantics
+
+| 의도 | 우선 표현 |
+|---|---|
+| UI 상태/화면 컴포넌트 보호 | `@MainActor` |
+| actor state에 접근하지 않는 sync helper | `nonisolated` |
+| caller actor를 점유하지 않는 CPU-heavy async 작업 | `@concurrent` |
+| actor/task boundary를 넘는 값 | `Sendable` snapshot/DTO 또는 `sending` |
+
+주의:
+- `nonisolated async`를 “백그라운드 실행”으로 가정하지 않기.
+- `@concurrent` 인자/반환값은 actor 경계를 넘으므로 Sendable/transfer 계약을 먼저 확인하기.
+- `SWIFT_DEFAULT_ACTOR_ISOLATION`, `NonisolatedNonsendingByDefault` 설정을 확인한 뒤 진단하기.
+
 ### async let vs TaskGroup
 
 | | async let | TaskGroup |
@@ -648,6 +662,7 @@ final class EventStreamOwner: LegacySystemDelegate {
         }
     }
 
+    // 이 예시는 callback이 main actor에서 온다는 보장이 있는 API 기준입니다.
     func system(_ system: LegacySystem, didProduceEvent data: LegacyData) {
         let safeData = EventResult(id: data.id, value: data.value)
         continuation?.yield(safeData)
@@ -675,6 +690,7 @@ final class EventStreamOwner: LegacySystemDelegate {
 |------|------|
 | **yield는 동기 함수** | `AsyncStream.Continuation`의 `yield`는 `await`를 요구하지 않습니다. 어떤 레거시 델리게이트/콜백 내부에서도 스레드 블로킹 없이 즉시 호출하여 스트림에 데이터를 밀어 넣을 수 있습니다. |
 | **수명(Lifetime) 관리** | 스트림을 소비하는 `Task`가 취소되거나 `for-await` 루프를 빠져나오면 `onTermination` 클로저가 호출됩니다. 이 블록 내에서 기존 델리게이트나 옵저버를 해제하지 않으면 레거시 시스템이 프록시를 계속 강하게 참조하여 **영구적인 메모리 누수(Retain Cycle)**가 발생합니다. |
+| **Callback isolation** | callback이 main actor 보장인지 arbitrary thread인지 먼저 확인합니다. arbitrary thread라면 delegate method에서 UI/MainActor state에 직접 접근하지 말고 `Task { @MainActor in ... }` 또는 별도 actor로 hop합니다. |
 | **단방향 데이터 흐름** | `for await event in observeEvents(from: system)` 형태로 소비하면 데이터 경쟁 없이 안전하게 데이터를 수신할 수 있습니다. |
 
 ---
@@ -770,21 +786,21 @@ actor DataCache {
 |------|-------------|------|
 | **Value Types** | `struct`/`enum`의 모든 속성이 Sendable이면 자동 준수 | 가장 안전한 선택 |
 | **Reference Types** | `final` 클래스 + 불변(`let`) 속성만 가질 때 | 제한적 |
-| **Manual Sync** | `NSLock` 등으로 스레드 안전성 수동 확보 → `@unchecked Sendable` | 기술 부채로 추적 관리 |
+| **Manual Sync** | 기존 검증된 동기화가 이미 있는 경우만 unsafe opt-out 검토 | 새 마이그레이션 기본 해법 아님 |
 | **프로토콜 합성** | `P & Sendable` 문법으로 격리 경계 보증 | 추상화된 프로토콜 전달 시 사용 |
 
-**핵심**: `P & Sendable` 합성 문법은 해당 프로토콜을 준수하는 구체적 인스턴스가 동시성 안전성을 갖추었음을 보장하는 격리 경계의 보증수표입니다.
+**핵심**: `P & Sendable` 합성 문법은 해당 프로토콜을 준수하는 구체적 인스턴스가 동시성 안전성을 갖추었음을 보장하는 격리 경계의 보증수표입니다. repo/user가 `@unchecked Sendable`, lock/semaphore/sync를 금지하면 unsafe opt-out 대신 값 snapshot, actor owner, API isolation 정정을 사용합니다.
 
 ### 6. 협력적 스레드 풀 최적화 및 데드락 방지
 
 Swift Concurrency는 CPU 코어 수에 맞춘 **고정 폭 협력적 스레드 풀**을 사용합니다. 불투명한 하위 시스템(예: Vision.framework)이 내부적으로 `DispatchGroup.wait()` 같은 동기식 차단 작업을 수행하면, 협력적 풀의 스레드가 완전히 점유됩니다. 풀의 모든 스레드가 차단되면 **순환 종속성(Circular Dependency)에 의한 데드락**이 발생합니다.
 
-**해결**: 블로킹 API는 `DispatchQueue`로 작업을 오프로딩하고 Continuation으로 브리징
+**해결**: 우선 async native API, actor owner, 작업 분할, structured concurrency로 바꿉니다. 불투명한 blocking API가 남아 별도 큐 offload가 불가피한 경우는 레거시 경계로 격리하고, repo/user 제약이 허용할 때만 Continuation으로 브리징합니다.
 
 ```swift
 func heavyProcessingBridge() async throws -> ResultData {
     try await withCheckedThrowingContinuation { continuation in
-        // 고정 폭 스레드 풀을 점유하지 않도록 별도 큐로 오프로딩
+        // 불가피한 legacy blocking boundary에서만 사용
         DispatchQueue.global(qos: .userInitiated).async {
             let result = callOpaqueBlockingAPI()
             continuation.resume(returning: result)
@@ -797,10 +813,10 @@ func heavyProcessingBridge() async throws -> ResultData {
 
 | 단계 | 주요 활동 | Build Setting & Tech Debt |
 |------|----------|--------------------------|
-| **Phase 1: 진단** | 경고 분석 및 데이터 격리 경계 파악 | `targeted`, IUO 및 legacy `@objc` 패턴 오딧 |
-| **Phase 2: 기반** | UI `@MainActor` 격리, 값 타입 Sendable 최적화 | `targeted`, Obj-C 인터롭 경계 설정 |
+| **Phase 1: 진단** | Swift 버전/build setting 확인, 경고 분석 및 데이터 격리 경계 파악 | Swift 5 + `complete`, IUO 및 legacy `@objc` 패턴 오딧 |
+| **Phase 2: 기반** | UI `@MainActor` 격리, 값 타입 Sendable 최적화 | Swift 5 + `complete`, Obj-C 인터롭 경계 설정 |
 | **Phase 3: Actor 전환** | 공유 싱글톤/매니저 객체를 Actor로 리팩토링 | `complete`, `@preconcurrency import` 활용 |
-| **Phase 4: 엄격화** | 모든 모듈의 경고 해결 및 브릿징 코드 최적화 | `complete`, `@unchecked Sendable` 정당화 문서화 |
+| **Phase 4: 엄격화** | 모든 모듈의 경고 해결 및 브릿징 코드 최적화 | `complete`, unsafe opt-out 제거 또는 명시 허용분만 추적 |
 | **Phase 5: 완료** | Swift 6 언어 모드 활성화 (Warnings → Errors) | `SWIFT_VERSION=6`, 기술 부채 청산 완료 |
 
 **Objective-C Interop**: `@preconcurrency import`를 사용하여 레거시 모듈의 경계를 관리하고 점진적으로 제거합니다.
