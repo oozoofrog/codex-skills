@@ -23,7 +23,8 @@ Swift/iOS 코드베이스를 리뷰, 최적화, 마이그레이션, 가이드, �
 3. 필요한 reference만 선택해서 읽기.
 4. 리뷰나 마이그레이션은 최소 변경과 버전 제약을 먼저 확인하기.
 5. `MainActor`, `Sendable`, actor 경계, cancellation이 얽히면 strict concurrency 검증을 기본 검증 기준으로 올리기.
-6. 결과에는 근거, 영향, 수정 방향, 검증 방법을 포함하기.
+6. Swift Concurrency 의미가 Swift 버전별로 달라지는 경우(`nonisolated`, `@concurrent`, default actor isolation 등)는 공식 Swift/Apple 문서 확인을 우선하기.
+7. 결과에는 근거, 영향, 수정 방향, 검증 방법을 포함하기.
 
 자주 쓰는 reference:
 - 빠른 진입: `references/quick-reference.md`
@@ -91,9 +92,10 @@ Swift/iOS 코드베이스를 리뷰, 최적화, 마이그레이션, 가이드, �
 ### Concurrency
 
 다음을 우선 점검하기.
+- Swift 버전과 빌드 설정: `SWIFT_VERSION`, `SWIFT_STRICT_CONCURRENCY`, `SWIFT_DEFAULT_ACTOR_ISOLATION`, `NonisolatedNonsendingByDefault`
 - `DispatchQueue`, `DispatchGroup`, `DispatchSemaphore` 대체
 - `Task`, `TaskGroup`, `Actor`, `AsyncStream`, cancellation
-- `Sendable`, actor 재진입, `@MainActor`, continuation 안전성
+- `Sendable`, actor 재진입, `@MainActor`, `nonisolated`, `@concurrent`, continuation 안전성
 - actor-isolated 타입이 non-Sendable 서비스나 protocol existential을 보관한 채 async 호출하는지
 - `async func`가 실제 작업 완료 전에 return하는 의미 불일치 패턴인지
 - 취소된 이전 Task가 최신 요청의 `isLoading` / `error` / `result` 상태를 덮어쓰는지
@@ -135,6 +137,7 @@ Swift/iOS 코드베이스를 리뷰, 최적화, 마이그레이션, 가이드, �
 ### 1) 범위와 버전 가정 확정하기
 
 - 리뷰 대상 파일, 프레임워크, 최소 iOS 버전, Swift 버전을 먼저 확인하기.
+- Swift 6.2+ 동시성은 `nonisolated`/`@concurrent`/default actor isolation 동작이 빌드 설정에 따라 달라질 수 있으므로 설정을 먼저 확인하기.
 - 버전이 불명확하면 최신 패턴을 강제하지 말고 가정으로 명시하기.
 
 ### 2) 필요한 reference만 고르기
@@ -170,6 +173,8 @@ Swift/iOS 코드베이스를 리뷰, 최적화, 마이그레이션, 가이드, �
 - iOS 17+가 확실하면 `ObservableObject` 대신 `@Observable`을 우선 검토하기.
 - iOS 16+면 `NavigationView`보다 `NavigationStack`을 우선 검토하기.
 - GCD와 callback은 `async/await`, `TaskGroup`, `Actor`, continuation으로 단계적 전환을 우선하기.
+- Swift 6.2+에서 `nonisolated async`를 “백그라운드 실행”으로 가정하지 않기. actor를 벗어나 병렬 실행할 의도는 `@concurrent`로 명시하기.
+- `@unchecked Sendable`, `nonisolated(unsafe)`, lock/semaphore/sync는 기본 해결책이 아니라 명시적으로 허용된 레거시 escape hatch로만 다루기. repo/user 제약이 금지하면 사용하지 않기.
 - DI는 container보다 Pure DI와 Composition Root를 우선 검토하기.
 - Combine은 새 코드에서 AsyncSequence 기반 설계를 우선 검토하기.
 - 다만 배포 타깃, 팀 규칙, 외부 라이브러리 의존성 때문에 유지가 필요하면 근거를 남기기.

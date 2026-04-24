@@ -35,8 +35,10 @@
 - 필요 시 `swift6-reference.md`
 
 주요 확인 항목:
+- Swift 버전/빌드 설정: `SWIFT_VERSION`, `SWIFT_STRICT_CONCURRENCY`, `SWIFT_DEFAULT_ACTOR_ISOLATION`, `NonisolatedNonsendingByDefault`
 - `Sendable`
 - `@MainActor`
+- `nonisolated` / `@concurrent` 의미가 현재 toolchain 설정과 맞는지
 - `Task.detached`
 - continuation resume 안전성
 - cancellation
@@ -165,6 +167,7 @@
 
 - SwiftUI: `@StateObject`, `ObservableObject`, `NavigationView`, `.task`, `@Bindable`
 - Concurrency: `Task.detached`, `DispatchQueue.main.sync`, `withCheckedContinuation`, `@unchecked Sendable`, `@MainActor`, `Sendable`
+- Swift 6.2+: `@concurrent`, `nonisolated`, `nonisolated(unsafe)`, `SWIFT_DEFAULT_ACTOR_ISOLATION`, `NonisolatedNonsendingByDefault`
 - Async semantics: `Task {`, `currentTask`, `requestID`, `generationID`, `isLoading`, `errorMessage`
 - SwiftData: `@Model`, `ModelContext`, `@Relationship`, `FetchDescriptor`
 - DI: `Factory`, `Injected`, `Container`, `protocol`

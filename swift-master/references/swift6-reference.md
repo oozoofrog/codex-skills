@@ -56,23 +56,35 @@ do throws(FileError) {
 // 모든 케이스 처리됨 - 추가 catch 불필요
 ```
 
-### 3. Swift 6.2 변경사항
+### 3. Swift 6.2+ Isolation 변경사항
 
 ```swift
-// 기본값: Main Thread 실행
-// @concurrent 명시로 백그라운드 실행
+// Swift 6.2+에서 nonisolated async는 빌드 설정에 따라
+// caller actor를 상속할 수 있습니다. "백그라운드 실행"으로 가정하지 마세요.
+nonisolated func pureAsyncHelper() async -> Int {
+    1
+}
+
+// actor를 벗어나 concurrent executor에서 실행하려는 의도는 명시합니다.
 @concurrent
 func heavyWork() async -> Int {
-    // 백그라운드에서 실행
+    // caller actor를 점유하지 않는 CPU-heavy 작업
     return expensiveCalculation()
 }
 
-// MainActor 코드는 그대로
+// UI 상태는 MainActor에 둡니다.
 @MainActor
 func updateUI() {
     // UI 업데이트
 }
 ```
+
+판단 순서:
+- 현재 toolchain과 빌드 설정(`SWIFT_DEFAULT_ACTOR_ISOLATION`, `NonisolatedNonsendingByDefault`) 확인
+- UI 상태/화면 컴포넌트는 `@MainActor`
+- 순수 sync helper만 `nonisolated` 후보
+- CPU-heavy async 작업은 `@concurrent` 후보
+- `nonisolated async`를 백그라운드 실행 escape hatch로 사용하지 않기
 
 ---
 
@@ -87,6 +99,12 @@ Build Settings → Swift Compiler → Strict Concurrency Checking
 2. Targeted - 명시적 async 코드 검사
 3. Complete - 모든 코드 검사 (Swift 6 모드)
 ```
+
+권장 마이그레이션 순서:
+1. Swift 5 language mode에서 대상 모듈만 `Complete`로 경고를 먼저 본다.
+2. 경고를 “현재 코드의 실제 isolation/Sendable 계약”으로 해소한다.
+3. 경고가 사라진 모듈만 `Swift Language Version = 6`으로 고정한다.
+4. 큰 구조 리팩터와 Swift 6 전환을 한 커밋에 섞지 않는다.
 
 ### Step 2: 경고를 에러로 처리
 
@@ -135,10 +153,11 @@ enum CacheKey {
     @TaskLocal static var current: [String: Data]?
 }
 
-// ✅ 방법 3: nonisolated(unsafe) - 최후의 수단
-// 반드시 외부에서 동기화 보장 필요
-nonisolated(unsafe) var legacyCache: [String: Data] = [:]
+// ✅ 방법 3: immutable snapshot 또는 computed constant로 변경
+let emptyCache: [String: Data] = [:]
 ```
+
+`nonisolated(unsafe)`는 컴파일러 검사를 끄는 escape hatch입니다. 새 마이그레이션의 기본 해결책으로 제안하지 말고, repo/user가 금지하면 사용하지 마세요.
 
 ### 2. Sendable 준수
 
@@ -168,16 +187,13 @@ final class UserData: Sendable {
     var name: String // mutable OK - MainActor에서만 접근
 }
 
-// ✅ 방법 4: @unchecked Sendable (주의)
-final class ThreadSafeUserData: @unchecked Sendable {
-    private let lock = NSLock()
-    private var _name: String
-
-    var name: String {
-        lock.withLock { _name }
-    }
+// ✅ 방법 4: non-Sendable 객체 대신 필요한 값만 snapshot으로 전달
+struct UserDataSnapshot: Sendable {
+    let name: String
 }
 ```
+
+`@unchecked Sendable`은 “스레드 안전함을 사람이 보증한다”는 unsafe opt-out입니다. 기본 수정안으로 제시하지 말고, 값 타입 snapshot/actor isolation/API isolation 정정을 먼저 검토하세요.
 
 ### 3. Closure의 Sendable
 
@@ -211,11 +227,14 @@ import LegacyLibrary
 // @preconcurrency로 경고 억제
 @preconcurrency import LegacyLibrary
 
-// 또는 wrapper 생성
-struct LegacyWrapper: @unchecked Sendable {
-    let legacy: LegacyObject
+// 또는 concurrency boundary에서 필요한 값만 추출
+struct LegacySnapshot: Sendable {
+    let id: String
+    let title: String
 }
 ```
+
+`@preconcurrency import`는 점진 전환용 임시 장치입니다. 사용한 import는 추적하고, 의존 모듈이 Swift Concurrency annotation을 갖추면 제거하세요.
 
 ### 5. Callback → Continuation 패턴
 
@@ -263,14 +282,17 @@ class ViewModel: ObservableObject {
 class ViewModel: ObservableObject {
     @Published var items: [Item] = []
 
-    func loadItems() async {
-        let data = await fetchItems() // 백그라운드
-        items = data // MainActor 보장
+    func loadItems() async throws {
+        let data = try await service.fetchItems()
+        items = data
+
+        // CPU-heavy 후처리만 actor 밖으로 명시적으로 분리
+        thumbnails = try await Self.decodeThumbnails(from: data)
     }
 
-    nonisolated func fetchItems() async -> [Item] {
-        // 백그라운드에서 실행
-        return await networkService.fetch()
+    @concurrent
+    private static func decodeThumbnails(from items: [Item]) async throws -> [Thumbnail] {
+        try items.map { try Thumbnail(item: $0) }
     }
 }
 ```
@@ -287,12 +309,19 @@ class ViewModel {
         DateFormatter.localizedString(from: date, dateStyle: .short, timeStyle: .short)
     }
 
-    // 네트워크 요청도 nonisolated
-    nonisolated func fetchData() async throws -> Data {
-        try await URLSession.shared.data(from: url).0
+    // async 작업을 actor 밖에서 병렬 실행하려면 @concurrent로 의도를 명시
+    @concurrent
+    static func decode(_ data: Data) async throws -> Model {
+        try JSONDecoder().decode(Model.self, from: data)
     }
 }
 ```
+
+주의:
+- `nonisolated`는 actor-isolated state에 접근하지 않는 선언이라는 의미입니다.
+- Swift 6.2+에서는 `nonisolated async`를 백그라운드 실행으로 가정하지 마세요.
+- instance `nonisolated` 메서드는 `@MainActor` 저장 프로퍼티나 non-Sendable dependency에 접근할 수 없습니다.
+- `@concurrent` 인자/반환값은 actor 경계를 넘으므로 `Sendable` value 또는 안전한 transfer 형태여야 합니다.
 
 ### MainActor.assumeIsolated
 
@@ -324,10 +353,10 @@ func updateFromCallback() async {
 | S61 | Non-Sendable Closure Capture | `@escaping () ->` | `@Sendable` 추가 |
 | S62 | Global Mutable State | `var \w+ =` (전역) | Actor/TaskLocal |
 | S63 | Protocol Sync Requirements | `protocol.*func \w+\(\)` | `async` 추가 |
-| S64 | @unchecked without Sync | `@unchecked Sendable` | Lock 추가 확인 |
+| S64 | Unsafe Sendable Opt-out | `@unchecked Sendable` | value snapshot/actor/API isolation 먼저 검토 |
 | S65 | Missing @MainActor | UI class 격리 없음 | `@MainActor` |
 | S66 | Typed Throws Nesting | 중첩된 typed throws | 레이어별 에러 |
-| S67 | Legacy Callback Isolation | callback executor 불일치 | `assumeIsolated` |
+| S67 | Legacy Callback Isolation | callback executor 불일치 | static annotation, `MainActor.run`, 보장된 경우만 `assumeIsolated` |
 | S68 | Non-Sendable Default | 기본값이 non-Sendable | Sendable 타입 |
 | S69 | Isolated Parameter Misuse | `isolated` 파라미터 오용 | isolation 명시 |
 | S610 | Task.detached Overuse | `Task.detached` 남용 | `Task` 사용 |
