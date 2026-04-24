@@ -455,16 +455,18 @@ final class ViewModel {
     var items: [Item] = []
 
     func loadItems() async {
-        // 백그라운드 작업은 nonisolated로
-        let data = await fetchData()
+        let data = await service.fetchData()
         items = data // MainActor에서 안전하게 업데이트
     }
 
-    nonisolated func fetchData() async -> [Item] {
-        // 네트워크 요청 등
+    @concurrent
+    static func decode(_ data: Data) async throws -> [Item] {
+        // CPU-heavy 후처리 등 actor 밖에서 실행할 작업
     }
 }
 ```
+
+Swift 6.2+에서는 `nonisolated async`를 백그라운드 실행으로 가정하지 않습니다. UI 상태는 `@MainActor`, actor 밖에서 병렬 실행할 CPU-heavy async 작업은 `@concurrent`로 의도를 명시하세요.
 
 ### 주의: @Observable 자체는 Thread-Safe하지 않음
 

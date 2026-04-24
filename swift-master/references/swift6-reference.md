@@ -59,9 +59,8 @@ do throws(FileError) {
 ### 3. Swift 6.2+ Isolation 변경사항
 
 ```swift
-// Swift 6.2+에서 nonisolated async는 빌드 설정에 따라
-// caller actor를 상속할 수 있습니다. "백그라운드 실행"으로 가정하지 마세요.
-nonisolated func pureAsyncHelper() async -> Int {
+// 순수 sync helper는 actor state에 접근하지 않도록 nonisolated로 분리할 수 있습니다.
+nonisolated func pureHelper() -> Int {
     1
 }
 
@@ -365,7 +364,7 @@ func updateFromCallback() async {
 | S67 | Legacy Callback Isolation | callback executor 불일치 | static annotation, `MainActor.run`, 보장된 경우만 `assumeIsolated` |
 | S68 | Non-Sendable Default | 기본값이 non-Sendable | Sendable 타입 |
 | S69 | Isolated Parameter Misuse | `isolated` 파라미터 오용 | isolation 명시 |
-| S610 | Task.detached Overuse | `Task.detached` 남용 | `Task` 사용 |
+| S610 | Task.detached Overuse | `Task.detached` 남용 | `async let`/`TaskGroup` 또는 owner-managed `Task` |
 
 ---
 
