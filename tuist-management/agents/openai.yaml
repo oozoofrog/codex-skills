@@ -1,0 +1,6 @@
+interface:
+  display_name: "Tuist Management"
+  short_description: "Repo Tuist/tuism module lifecycle and generation workflow"
+  default_prompt: "Manage Tuist module add/delete/move/rename/change operations safely, update manifests/helpers as the source of truth, run tuism after Tuist changes, and validate affected schemes through the repo build workflow."
+policy:
+  allow_implicit_invocation: true
