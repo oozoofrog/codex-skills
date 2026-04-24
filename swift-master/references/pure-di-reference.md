@@ -470,13 +470,12 @@ final class UIService: Sendable {
     var currentScreen: Screen?
 }
 
-// ⚠️ @unchecked Sendable (주의 - Lock 필수)
-final class ThreadSafeCache: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storage: [String: Any] = [:]
+// ✅ mutable shared state는 actor가 소유
+actor CacheStore {
+    private var storage: [String: Data] = [:]
 
-    func get(_ key: String) -> Any? {
-        lock.withLock { storage[key] }
+    func get(_ key: String) -> Data? {
+        storage[key]
     }
 }
 ```
@@ -896,11 +895,17 @@ struct ProfileView: View {
 ### Testing Strategy
 
 ```swift
-// Mock: @unchecked Sendable + handler 패턴
-final class MockNetworkService: NetworkServiceProtocol, @unchecked Sendable {
-    var requestHandler: ((Endpoint) async throws -> Any)?
+// Mock: actor + Sendable handler 패턴
+actor MockNetworkService: NetworkServiceProtocol {
+    private var requestHandler: @Sendable (Endpoint) async throws -> Data = { _ in Data() }
+
+    func setRequestHandler(_ handler: @escaping @Sendable (Endpoint) async throws -> Data) {
+        requestHandler = handler
+    }
+
     func request<T: Decodable>(_ endpoint: Endpoint) async throws -> T {
-        try await requestHandler?(endpoint) as! T
+        let data = try await requestHandler(endpoint)
+        return try JSONDecoder().decode(T.self, from: data)
     }
 }
 
@@ -908,7 +913,9 @@ final class MockNetworkService: NetworkServiceProtocol, @unchecked Sendable {
 @MainActor
 func testSignIn() async throws {
     let mockNetwork = MockNetworkService()
-    mockNetwork.requestHandler = { _ in User(id: "1", ...) }
+    await mockNetwork.setRequestHandler { _ in
+        try JSONEncoder().encode(User(id: "1", ...))
+    }
 
     let auth = AuthAssembly(dependencies: .init(
         network: mockNetwork,
@@ -937,7 +944,7 @@ Composition Root:
 □ Testable init 제공
 
 테스트:
-□ Mock은 @unchecked Sendable + handler 패턴
+□ Mock은 actor 또는 Sendable value handler 패턴
 □ Assembly 통해 모듈 단위 테스트
 □ @MainActor 어노테이션 적용
 ```

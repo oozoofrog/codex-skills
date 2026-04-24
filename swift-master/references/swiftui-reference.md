@@ -454,7 +454,7 @@ List(items, selection: $selectedItem) { item in
 final class ViewModel {
     var items: [Item] = []
 
-    func loadItems() async {
+    func loadItems(using service: ItemService) async {
         let data = await service.fetchData()
         items = data // MainActor에서 안전하게 업데이트
     }

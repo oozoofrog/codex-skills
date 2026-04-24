@@ -255,57 +255,42 @@ class ImageCache {
 ### After
 
 ```swift
-actor ImageCache {
-    static let shared = ImageCache()
+actor ImageDataCache {
+    static let shared = ImageDataCache()
 
-    private var cache: [String: UIImage] = [:]
-    private var inProgress: [String: Task<UIImage?, Never>] = [:]
+    private var cache: [String: Data] = [:]
+    private var inProgress: [String: Task<Data?, Never>] = [:]
 
-    func image(for key: String) -> UIImage? {
-        cache[key]
-    }
-
-    func setImage(_ image: UIImage, for key: String) {
-        cache[key] = image
-    }
-
-    func downloadImage(from url: URL) async -> UIImage? {
+    func data(for url: URL) async -> Data? {
         let key = url.absoluteString
 
-        // 캐시 확인
         if let cached = cache[key] {
             return cached
         }
 
-        // 진행 중인 다운로드 확인 (중복 요청 방지)
         if let existing = inProgress[key] {
             return await existing.value
         }
 
-        // 새 다운로드 시작
-        let task = Task<UIImage?, Never> {
-            guard let (data, _) = try? await URLSession.shared.data(from: url),
-                  let image = UIImage(data: data) else {
-                return nil
-            }
-            cache[key] = image
-            return image
+        let task = Task<Data?, Never> {
+            try? await URLSession.shared.data(from: url).0
         }
 
         inProgress[key] = task
         let result = await task.value
         inProgress.removeValue(forKey: key)
 
+        if let result {
+            cache[key] = result
+        }
         return result
     }
 }
 
-// 사용
-Task {
-    let image = await ImageCache.shared.downloadImage(from: url)
-    await MainActor.run {
-        imageView.image = image
-    }
+// 사용: UIKit 객체는 MainActor에서 생성/반영
+Task { @MainActor in
+    let data = await ImageDataCache.shared.data(for: url)
+    imageView.image = data.flatMap(UIImage.init(data:))
 }
 ```
 
@@ -623,7 +608,7 @@ Task {
 | Before | After |
 |--------|-------|
 | `DispatchQueue.main.async { }` | `await MainActor.run { }` |
-| `DispatchQueue.global().async { }` | `Task { }` |
+| `DispatchQueue.global().async { }` | `@concurrent` helper, `async let`, `TaskGroup` |
 | `DispatchGroup` | `withTaskGroup` |
 | `DispatchSemaphore` | `Actor` |
 | `@escaping completion` | `async throws ->` |
