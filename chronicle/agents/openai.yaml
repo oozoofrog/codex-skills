@@ -1,0 +1,6 @@
+interface:
+  display_name: "Chronicle"
+  short_description: "Use recent screen context when the user refers to current work"
+  default_prompt: "Use Chronicle screen history only when recent visual context is necessary to disambiguate the user's current work, then switch to filesystem or app-specific evidence as soon as possible."
+policy:
+  allow_implicit_invocation: true
