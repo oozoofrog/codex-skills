@@ -8,7 +8,7 @@ description: 기존 `.codex-research/` 상태 디렉터리와 Codex CLI 기반 �
 Codex CLI를 반복 호출하여 목표 지향 연구 루프를 운영하는 legacy-compatible runner입니다. 새 루프 계약을 처음 설계하는 작업은 `goal-research-loop`가 기본이고, 이 스킬은 `.codex-research/` 상태를 가진 기존 작업을 재개하거나 `codex-research.sh` runner를 직접 써야 할 때 사용합니다.
 
 ## When to use
-- 기존 workspace에 `.codex-research/`가 있고 상태 확인, reconcile, resume, run이 필요할 때
+- 기존 workspace에 `.codex-research/`가 있고 상태 확인, 재개, run이 필요할 때
 - 사용자가 `codex-research`, `.codex-research`, `codex-research.sh`를 명시적으로 언급할 때
 - 이전 codex-research runner가 만든 `program.md`, `contract.md`, `state_snapshot.md`, `ledger.tsv`를 이어서 운영해야 할 때
 
@@ -20,7 +20,7 @@ Codex CLI를 반복 호출하여 목표 지향 연구 루프를 운영하는 leg
 ## Quick start
 1. `~/.codex/skills/codex-research/scripts/preflight.sh`로 `codex` CLI를 확인합니다.
 2. workspace의 `.codex-research/contract.md`와 `state_snapshot.md`를 읽어 hard gate, metric, stop condition을 확인합니다.
-3. 상태가 꼬였으면 `codex-research.sh status` 또는 `reconcile`을 먼저 실행합니다.
+3. 상태가 꼬였으면 `codex-research.sh status`를 먼저 실행하고, 필요하면 `ledger.tsv`와 `state_snapshot.md`를 직접 대조합니다.
 4. bounded 실행이 기본입니다. 명시 동의 없이 `--loop-forever`를 사용하지 않습니다.
 5. 라운드 후 `ledger.tsv`, `state_snapshot.md`, `rounds/*/evidence.md`를 근거로 결과를 보고합니다.
 
@@ -31,7 +31,6 @@ Codex CLI를 반복 호출하여 목표 지향 연구 루프를 운영하는 leg
 ```bash
 ~/.codex/skills/codex-research/scripts/codex-research.sh init <workspace> "objective"
 ~/.codex/skills/codex-research/scripts/codex-research.sh status <workspace>
-~/.codex/skills/codex-research/scripts/codex-research.sh reconcile <workspace>
 ~/.codex/skills/codex-research/scripts/codex-research.sh run <workspace> --max-rounds 3 --search --full-auto
 ```
 
