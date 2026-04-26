@@ -1,7 +1,6 @@
 ---
 name: os-log
 description: iOS/watchOS/macOS 디버그 앱의 os_log 확인 — 실시간 스트리밍, 저장된 로그 조회, 디바이스 목록. "os_log", "로그 확인", "log stream", "log show", "디바이스 로그", "앱 로그", "os log", "콘솔 로그", "실시간 로그", "로그 스트리밍", "디버그 로그", "시뮬레이터 로그" 요청 시 활성화
-argument-hint: "[stream|show|devices] [필터 옵션]"
 ---
 
 <example>

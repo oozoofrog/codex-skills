@@ -1,196 +1,91 @@
 ---
 name: codex-research
-description: Codex CLI로 반복 연구 루프를 운영합니다 — 목표 지향 실험을 자동으로 반복하고 결과를 기록합니다. "codex 연구", "codex research", "반복 연구", "연구 루프", "research loop", "자율 연구", "codex로 연구", "깊이 연구", "반복 실험", "autoresearch", "codex 루프", "계속 연구", "overnight research", "연구 상태 확인", "연구 이어줘", "연구 재개", "research status", "resume research" 요청에 사용합니다. 단발 작업 위임은 hey-codex가 더 적합합니다.
-argument-hint: "[objective 또는 workspace 경로]"
+description: 기존 `.codex-research/` 상태 디렉터리와 Codex CLI 기반 반복 연구 runner를 운영·재개·점검할 때 사용합니다. 새 연구 루프를 설계할 때는 `goal-research-loop`를 우선 사용하고, 이 스킬은 기존 `codex-research` runner 호환이 필요할 때 사용합니다.
 ---
-
-<example>
-user: "codex로 이 스킬의 프롬프트 품질을 연구해줘"
-assistant: "guided-loop 모드로 연구 루프를 시작하겠습니다. 먼저 .codex-research/ 상태를 확인합니다."
-</example>
-
-<example>
-user: "codex 연구 루프 설계만 해줘"
-assistant: "design 모드로 연구 계약을 작성하겠습니다. objective와 hard gate부터 정합니다."
-</example>
-
-<example>
-user: "codex로 밤새 성능 개선 연구 돌려줘"
-assistant: "autonomous-loop 모드입니다. --loop-forever는 중단 없이 실행됩니다. contract와 stop condition을 확인한 뒤 명령을 발행합니다."
-</example>
-
-<example>
-user: "연구 상태 확인해줘"
-assistant: "status 서브커맨드로 현재 연구 상태를 조회합니다."
-</example>
-
-<example>
-user: "/codex-research 테스트 커버리지를 자동으로 개선해줘"
-assistant: "guided-loop 모드로 테스트 커버리지 개선 연구를 시작합니다. .codex-research/가 없으면 init부터 진행합니다."
-</example>
-
-<example>
-user: "codex 연구 계속 이어줘"
-assistant: "기존 .codex-research/의 contract와 state_snapshot을 읽어 guided-loop를 재개합니다."
-</example>
 
 # Codex Research
 
-Codex CLI를 반복 호출하여 **목표 지향 연구 루프**를 운영합니다. karpathy/autoresearch 패턴 기반.
+Codex CLI를 반복 호출하여 목표 지향 연구 루프를 운영하는 legacy-compatible runner입니다. 새 루프 계약을 처음 설계하는 작업은 `goal-research-loop`가 기본이고, 이 스킬은 `.codex-research/` 상태를 가진 기존 작업을 재개하거나 `codex-research.sh` runner를 직접 써야 할 때 사용합니다.
 
-매 라운드마다 Codex가 가설 선택 -> 변경 -> 검증 -> structured JSON 반환을 수행하고, 호스트 스크립트가 3-Layer 판단 -> git 관리 -> ledger 기록을 처리합니다.
+## When to use
+- 기존 workspace에 `.codex-research/`가 있고 상태 확인, reconcile, resume, run이 필요할 때
+- 사용자가 `codex-research`, `.codex-research`, `codex-research.sh`를 명시적으로 언급할 때
+- 이전 codex-research runner가 만든 `program.md`, `contract.md`, `state_snapshot.md`, `ledger.tsv`를 이어서 운영해야 할 때
 
-## 실행 흐름
+## Do not use when
+- 새 목표 연구 루프를 처음 설계해야 할 때 → `goal-research-loop`
+- 단발 Codex CLI 위임이나 세컨드 오피니언이면 → `hey-codex`
+- 단순 요약/조사/구현이면 현재 세션에서 직접 처리합니다.
 
-### Step 1: 사전 검증
+## Quick start
+1. `~/.codex/skills/codex-research/scripts/preflight.sh`로 `codex` CLI를 확인합니다.
+2. workspace의 `.codex-research/contract.md`와 `state_snapshot.md`를 읽어 hard gate, metric, stop condition을 확인합니다.
+3. 상태가 꼬였으면 `codex-research.sh status` 또는 `reconcile`을 먼저 실행합니다.
+4. bounded 실행이 기본입니다. 명시 동의 없이 `--loop-forever`를 사용하지 않습니다.
+5. 라운드 후 `ledger.tsv`, `state_snapshot.md`, `rounds/*/evidence.md`를 근거로 결과를 보고합니다.
 
-```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/preflight.sh"
-```
-- exit 0: 통과
-- exit 1: codex 미설치 -> 설치 안내 후 종료
+## CLI usage
 
-### Step 2: 모드 판별
-
-사용자 요청을 분석하여 모드를 결정합니다.
-
-| 모드 | 키워드 | Claude 역할 | 스크립트 역할 |
-|------|--------|------------|-------------|
-| **design** | 설계, 계약, contract, 루프 설계 | 계약 작성 | init만 |
-| **guided-loop** (기본) | 연구 시작, 루프 시작, N라운드, 연구해줘 | 스크립트 실행 -> 결과 보고 | run --max-rounds N |
-| **autonomous-loop** | 계속 돌려, overnight, 자율, loop-forever | 명령 발행 + 주의사항 | run --loop-forever |
-
-키워드가 불분명하면 **guided-loop**을 기본으로 사용합니다.
-
-### Step 3: 상태 디렉토리 확인
-
-workspace에 `.codex-research/` 디렉토리 존재 여부를 확인합니다.
-
-- **없음** -> `init` 실행 + design 모드 전환 (계약 먼저 작성)
-- **있음** -> `contract.md` 읽어서 hard gate/metric 확인 후 진행
-
-### Step 4: 모드별 실행
-
-**design 모드:**
-1. 사용자 목표를 한 문장으로 압축
-2. `codex-research.sh init` 실행
-3. `contract.md`를 사용자와 함께 작성 (references/loop-contract.md 참조)
-4. 계약 완성 후 guided-loop 전환 확인
-
-**guided-loop 모드:**
-```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/codex-research.sh" run <workspace> --max-rounds N --search --full-auto
-```
-실행 후 `ledger.tsv` + `state_snapshot.md`를 읽어 결과를 보고합니다.
-
-**autonomous-loop 모드:**
-```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/codex-research.sh" run <workspace> --loop-forever --search --full-auto
-```
-중단 없이 실행됩니다. 반드시 경고를 표시하고, contract의 stop condition과 budget을 재확인한 뒤 명령을 발행합니다.
-
-### Step 5: 결과 보고
-
-라운드 완료 후 다음을 보고합니다:
-- 현재 best state와 metric 변화
-- 최근 라운드의 hard gate / experiment status / control action
-- 남은 budget과 다음 실험 후보
-- 종료 시: 최종 delta summary + 남은 리스크
-
-## 3-Layer 판단
-
-hard gate result, experiment status, control action을 **한 칸에 섞어 쓰지 않습니다**.
-
-| 층위 | 값 | 의미 |
-|------|-----|------|
-| **hard gate result** | pass / fail | 최소 통과선. fail이면 metric 개선과 무관하게 reject |
-| **experiment status** | keep / discard / crash | best-known state 대비 이 라운드 결과를 유지할지 |
-| **control action** | pass / refine / pivot / rescope / escalate / stop | 루프 전체 제어. 다음 라운드 방향 결정 |
-
-루프 종료: control_action이 pass/stop/rescope/escalate이거나 max_rounds 도달.
-
-## hey-codex와의 경계
-
-| 기준 | hey-codex | codex-research |
-|------|-----------|----------------|
-| 목적 | 단발 작업 위임 | 반복 연구 루프 |
-| 라운드 | 1회 | N회 |
-| 상태 유지 | 없음 | program + contract + snapshot + ledger |
-| 키워드 | "codex한테 시켜" | "codex로 연구해" |
-
-**라우팅:** "연구/루프/반복/research/loop" 포함 -> codex-research. 없으면 -> hey-codex.
-
-## CLI 사용법
-
-> **주의**: `init`은 workspace 디렉토리가 **미리 존재**해야 합니다. 새 프로젝트라면 먼저 `mkdir -p <workspace>` 후 init하세요.
+전역 설치 기준 경로를 사용합니다.
 
 ```bash
-# 초기화 (workspace 디렉토리는 미리 존재해야 함)
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/codex-research.sh" init <workspace> "objective"
-
-# 상태 확인
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/codex-research.sh" status <workspace>
-
-# 연구 실행
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/codex-research.sh" run <workspace> --max-rounds N --search --full-auto
+~/.codex/skills/codex-research/scripts/codex-research.sh init <workspace> "objective"
+~/.codex/skills/codex-research/scripts/codex-research.sh status <workspace>
+~/.codex/skills/codex-research/scripts/codex-research.sh reconcile <workspace>
+~/.codex/skills/codex-research/scripts/codex-research.sh run <workspace> --max-rounds 3 --search --full-auto
 ```
 
-> shell wrapper는 `<workspace>` 위치 인자를 내부적으로 `--workspace <path>`로 변환합니다. 필요하면 Python runner를 직접 호출해 `--workspace`, `--state-dir` 같은 옵션을 명시할 수 있습니다.
+Python runner를 직접 호출해야 하면:
 
-### run 옵션
+```bash
+python3 ~/.codex/skills/codex-research/scripts/codex-research.py run \
+  --workspace <workspace> \
+  --max-rounds 3 \
+  --search \
+  --full-auto
+```
 
-| 옵션 | 기본값 | 설명 |
-|------|--------|------|
-| --workspace | `.` | 연구를 수행할 workspace 디렉터리 (shell wrapper에서는 위치 인자와 동일) |
-| --state-dir | `<workspace>/.codex-research` | 상태 파일 디렉터리 override |
-| --codex-bin | `codex` | 사용할 Codex CLI 실행 파일 |
-| --sandbox | - | `read-only` / `workspace-write` / `danger-full-access` |
-| --max-rounds | 3 | 최대 라운드 수 |
-| --loop-forever | false | 무한 실행 (autonomous-loop 전용) |
-| --search | false | Codex --search (웹 검색) |
-| --full-auto | false | Codex --full-auto |
-| --model | - | Codex 모델 지정 |
-| --timeout-seconds | 1800 | 라운드당 타임아웃 (초) |
-| --skip-git-repo-check | false | Codex의 git repo 체크를 건너뜀 (non-git workspace용) |
-| --commit-on-keep | auto | keep 결과 자동 commit 강제 |
-| --no-commit-on-keep | false | keep 시 자동 commit 비활성화 |
-| --allow-dirty | false | git dirty tree에서도 실행 허용 |
-| --add-dir | - | Codex에 추가 참조 디렉토리 (반복 가능) |
-
-### keep 시 commit 동작 (tri-state)
-
-- **옵션 생략**: git repo면 자동 commit, non-git workspace면 commit 없이 진행
-- **`--commit-on-keep`**: keep 결과를 항상 자동 commit 시도
-- **`--no-commit-on-keep`**: keep 결과를 자동 commit 하지 않음. 이때 `--allow-dirty`가 없으면 다음 라운드 자동 진행이 중단될 수 있음
-
-## 상태 디렉토리 (.codex-research/)
+## State directory
 
 ```
 .codex-research/
-├── program.md            # objective + 연구 범위
-├── contract.md           # 평가 계약 (loop-contract.md 형식)
-├── state_snapshot.md     # baseline, best state, 다음 후보
-├── ledger.tsv            # 라운드별 결과 기록
-├── runtime/              # Codex 실행 중 임시 파일
+├── program.md
+├── contract.md
+├── state_snapshot.md
+├── ledger.tsv
+├── runtime/
 └── rounds/
-    ├── round-000/
-    │   ├── prompt.md
-    │   ├── last-message.json
-    │   ├── response.json
-    │   ├── codex-events.jsonl
-    │   └── evidence.md
-    └── round-001/...
 ```
 
-## 규칙
+## Result model
 
-- **Claude 사용 최소화**: design에서만 적극 참여. guided-loop에서는 스크립트 실행 + 결과 보고만. autonomous-loop에서는 경고 + 명령 발행만.
-- **한국어 응답**: 사용자에게 보여주는 메시지는 한국어, 코드와 기술 용어는 원문 유지.
-- **Codex 프롬프트는 원문 유지**: 사용자 입력 언어 그대로 Codex에 전달.
-- **bounded가 기본**: 명시 요청 없으면 기본 3~5 라운드. 무한 루프는 사용자 명시 동의 필수.
-- **같은 실패 2회 반복 시** `refine` 대신 `pivot`, `rescope`, `escalate` 우선 검토.
-- **Git 관리**: keep -> 자동 commit, discard/crash -> git restore (.codex-research/ 제외).
+hard gate, experiment status, control action을 한 칸에 섞지 않습니다.
 
-## References
+| 층위 | 값 | 의미 |
+|---|---|---|
+| hard gate result | pass / fail | 최소 통과선. fail이면 metric 개선과 무관하게 reject |
+| experiment status | keep / discard / crash | best-known state 대비 결과 유지 여부 |
+| control action | pass / refine / pivot / rescope / escalate / stop | 다음 라운드 방향 |
 
-- `references/loop-contract.md` -- 연구 계약 작성 가이드
+## Use resources
+- `references/loop-contract.md`
+- `scripts/preflight.sh`
+- `scripts/codex-research.sh`
+- `scripts/codex-research.py`
+- `templates/codex-research/`
+
+## Review Harness
+- mode: optional
+- 공통 기준: `../../../docs/review-harness.md`
+- generator: Codex CLI runner가 라운드별 hypothesis/change/verification을 실행한다
+- evaluator: 부모 세션이 ledger, state snapshot, evidence, git diff를 검토한다
+- 평가축: contract 준수, hard gate 신뢰성, 상태 파일 일관성, keep/discard 판단 안전성
+- artifacts/evidence: `ledger.tsv`, `state_snapshot.md`, `rounds/*/evidence.md`, git diff, runner output
+- pass condition: hard gate가 통과하고 best-known state가 명확할 때만 keep 또는 종료로 판단한다
+- 자동 다음 행동: `pass`면 종료, `refine`이면 bounded 재실행, `pivot/rescope/escalate`면 사용자에게 다음 결정을 보고한다
+
+## Output expectation
+- 선택한 모드와 실행 명령
+- 현재 best state와 metric 변화
+- 최근 라운드의 hard gate / experiment status / control action
+- 남은 budget, 다음 후보, 중단 사유

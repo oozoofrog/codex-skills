@@ -1,7 +1,6 @@
 ---
 name: api-learn
 description: 프로젝트 도메인 API 내재화 — 특정 라이브러리/프레임워크의 공식 문서 + 예제를 수집하여 프로젝트 내 .claude/references/에 저장하고 CLAUDE.md에 Knowledge Authority로 등록합니다. "API 학습", "api learn", "문서 내재화", "레퍼런스 수집", "라이브러리 학습", "API 문서 저장", "api-learn", "문서 수집", "내재화", "internalize", "learn api", "react-query 문서", "zod 학습", "라이브러리 문서화" 등의 요청에 사용하세요.
-argument-hint: "<library-name>"
 ---
 
 <example>
