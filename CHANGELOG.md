@@ -4,12 +4,20 @@
 
 ## [Unreleased]
 ### Updated
+- 사용자 스킬 정리: 중복 discovery 제거, `macos-release` 단일화, `codex-research`를 기존 `.codex-research/` 호환 runner로 축소
+- 누락된 `agents/openai.yaml` metadata를 사용자 스킬에 보강하고, `SKILL.md` extra frontmatter를 제거
+- README skill catalog를 현재 활성 사용자 스킬 기준으로 재작성
 - `hierarchical-context-architecture` 검증 스크립트에 `--strict`와 `.context-audit.yml` 기반 운영 설정 지원 추가
 - `hierarchical-context-architecture` 문서에 운영 모드와 감사 설정 예시 추가
 - 저장소 루트에 `.context-audit.yml`을 추가해 기본 감사 실행에 strict 운영 기준 적용
 - README skill catalog를 표 형태와 빠른 선택 가이드 중심으로 재구성
 - 릴리즈 운영 파일 섹션에 `docs/release-checklist.md` 링크 추가
 - README에 `hierarchical-context-architecture` 사용 예시와 선택 가이드 추가
+
+### Removed
+- `fixer` legacy plugin doctor skill 제거 (`plugin-doctor`로 통합)
+- `ooz-macos-release` 제거 (`macos-release`로 통합)
+- `codex-research/skills/codex-research` nested duplicate 제거
 
 ### Added
 - `hierarchical-context-architecture` skill 추가
