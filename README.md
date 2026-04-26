@@ -75,16 +75,6 @@
 - macOS 릴리스는 `macos-release` 하나로 통합했습니다.
 - plugin 감사는 `plugin-doctor`로 통합했습니다.
 
-## 시스템 스킬 미러링
-
-현재 이 저장소는 아래 기본 시스템 스킬도 함께 추적합니다.
-
-- `.system/imagegen`
-- `.system/openai-docs`
-- `.system/plugin-creator`
-- `.system/skill-creator`
-- `.system/skill-installer`
-
 ## 사용 예시
 
 ```text
