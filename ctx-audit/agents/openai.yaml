@@ -1,0 +1,6 @@
+interface:
+  display_name: "Context Audit"
+  short_description: "Audit CLAUDE.md/CONTEXT.md context architecture efficiency"
+  default_prompt: "Audit a legacy CLAUDE.md/CONTEXT.md context architecture for length, duplication, layering, and coverage, then propose token-efficient improvements."
+policy:
+  allow_implicit_invocation: false

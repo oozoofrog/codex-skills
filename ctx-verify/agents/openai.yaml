@@ -1,0 +1,6 @@
+interface:
+  display_name: "Context Verify"
+  short_description: "Verify legacy context file links and code references"
+  default_prompt: "Verify a CLAUDE.md/CONTEXT.md context tree for link integrity, code reference validity, and content accuracy, then report concrete stale references."
+policy:
+  allow_implicit_invocation: false

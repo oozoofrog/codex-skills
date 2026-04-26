@@ -1,0 +1,6 @@
+interface:
+  display_name: "Context Guide"
+  short_description: "Guide legacy CLAUDE.md/CONTEXT.md context architecture"
+  default_prompt: "Explain or design a hierarchical context architecture using CLAUDE.md, CONTEXT.md, rules, and AGENTS.md while keeping Codex portability in mind."
+policy:
+  allow_implicit_invocation: false

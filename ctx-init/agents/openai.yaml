@@ -1,0 +1,6 @@
+interface:
+  display_name: "Context Init"
+  short_description: "Initialize legacy CLAUDE.md/CONTEXT.md context files"
+  default_prompt: "Analyze a repository and scaffold or refine legacy CLAUDE.md, CONTEXT.md, rules, and AGENTS.md context files without overwriting existing work."
+policy:
+  allow_implicit_invocation: false
