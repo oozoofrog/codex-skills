@@ -5,7 +5,7 @@ This skill snapshots VoltAgent's awesome-design-md / getdesign.md design-system 
 - Source repository: https://github.com/voltagent/awesome-design-md
 - Source remote: https://github.com/voltagent/awesome-design-md
 - Repository HEAD: `6dc4def886e9ad4022d616dc2afc2fcdf0056d07`
-- Snapshot downloaded at: 2026-04-30T08:41:34Z
+- Snapshot downloaded at: 2026-04-30T08:42:31Z → 2026-04-30T08:43:02Z
 - Hosted source pattern: `https://getdesign.md/design-md/<slug>/DESIGN.md`
 - Snapshot scope: slugs listed in the source repository README collection at the repository HEAD above.
 - Snapshot count: 69
