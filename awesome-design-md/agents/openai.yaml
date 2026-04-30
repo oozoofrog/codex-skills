@@ -1,0 +1,6 @@
+interface:
+  display_name: Awesome DESIGN.md
+  short_description: Use local getdesign.md DESIGN.md snapshots for brand-inspired UI tokens.
+  default_prompt: "Pick a DESIGN.md slug, read its exact source file, then apply or review UI against its documented tokens and guardrails."
+policy:
+  allow_implicit_invocation: true
