@@ -1,6 +1,0 @@
-interface:
-  display_name: "Apple Harness"
-  short_description: "Plan, design, build, and skeptically evaluate long Apple tasks"
-  default_prompt: "Run a long Apple platform workflow with planner/builder/evaluator roles, PLAN→DESIGN→BUILD→EVALUATE loops, shared artifacts, and evidence-driven Xcode verification."
-policy:
-  allow_implicit_invocation: true

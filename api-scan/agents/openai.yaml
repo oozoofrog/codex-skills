@@ -1,6 +1,0 @@
-interface:
-  display_name: "API Scan"
-  short_description: "Scan project dependencies and identify missing API references"
-  default_prompt: "Scan dependency files, compare discovered libraries with existing project references, and recommend which APIs should be learned or refreshed."
-policy:
-  allow_implicit_invocation: true

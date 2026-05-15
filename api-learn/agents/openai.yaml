@@ -1,6 +1,0 @@
-interface:
-  display_name: "API Learn"
-  short_description: "Collect official library/API docs into project references"
-  default_prompt: "Collect authoritative documentation and examples for the requested library or framework, compare with project usage, and save a concise internal reference with source notes."
-policy:
-  allow_implicit_invocation: true

@@ -1,6 +1,0 @@
-interface:
-  display_name: "Codex Research"
-  short_description: "Resume or inspect legacy .codex-research runner state"
-  default_prompt: "Inspect an existing .codex-research workspace, run status or bounded run safely, and report hard gate, experiment status, control action, and remaining budget."
-policy:
-  allow_implicit_invocation: false

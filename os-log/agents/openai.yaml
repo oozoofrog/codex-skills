@@ -1,6 +1,0 @@
-interface:
-  display_name: "OS Log"
-  short_description: "Inspect iOS/watchOS/macOS os_log streams and history"
-  default_prompt: "Collect or query Apple platform os_log output for a simulator, device, process, subsystem, category, predicate, or recent time window and summarize actionable findings."
-policy:
-  allow_implicit_invocation: true
