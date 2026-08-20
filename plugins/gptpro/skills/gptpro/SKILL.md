@@ -30,11 +30,11 @@ Choose exactly one mode:
 ## Workflow
 
 1. Before the first handoff in a repository, run `scripts/gptpro.py init --repo <repo>` without `--apply`. If it reports actions, show the exact directory and ignore target, explain that default `local` writes `.git/info/exclude`, and ask for approval. After approval, rerun with `--apply`. Skip mutation when `ready` is already true.
-2. Prepare a handoff with `scripts/gptpro.py prepare`. The default `--transport auto` chooses direct paste for a small payload and one Markdown attachment for a larger payload. Prefer directed selection with `--include` or `--file-list` when whole-repository context is unnecessary.
-3. Run `scripts/gptpro.py verify --handoff-dir <dir>` and `status`. Inspect `manifest.json`, especially Git identity, dirty paths, included files, exclusions, secret findings, warnings, resolved transport, exact outbound paths, and hashes. The ZIP is a local audit artifact, not a default upload.
+2. Prepare a handoff with `scripts/gptpro.py prepare`. The default `--transport auto` is GitHub-first: it uses a verified, pushed GitHub commit when all selected bytes match HEAD, then falls back with an explicit warning to direct paste for a small payload or one Markdown attachment for a larger payload. Use `--transport github` to require GitHub without fallback, or `paste|text-file` to avoid repository-app access. Prefer directed selection with `--include` or `--file-list` when whole-repository context is unnecessary.
+3. Run `scripts/gptpro.py verify --handoff-dir <dir>` and `status`. Inspect `manifest.json`, especially Git identity, dirty paths, included files, exclusions, secret findings, warnings, resolved transport, exact outbound paths, hashes, and any GitHub repository/commit/PR identity. The ZIP is a local audit artifact, not a default upload.
 4. Tell the user the destination, purpose, resolved transport, exact outbound artifacts, included count/bytes, Git SHA, dirty-state summary, and all security findings. Ask for approval to transmit those exact bytes. Stop and wait.
 5. Only after explicit approval, run `scripts/gptpro.py approve ... --approved-by user --confirm-transmission`.
-6. Read [references/browser-handoff.md](references/browser-handoff.md). Use an available official Chrome-control skill for the visible web steps, or give the user the manual handoff. Use only the approved transport; never fall back automatically. If a person must act, read [references/human-takeover.md](references/human-takeover.md) and run the read-only `human-handoff` command for an exact phase-aware checklist. Submit once, then record the observed transport with `mark-submitted`.
+6. Read [references/browser-handoff.md](references/browser-handoff.md). For `github`, also read [references/github-transport.md](references/github-transport.md). Use an available official Chrome-control skill for the visible web steps, or give the user the manual handoff. Use only the approved transport; never fall back automatically. If a person must act, read [references/human-takeover.md](references/human-takeover.md) and run the read-only `human-handoff` command for an exact phase-aware checklist. Submit once, then record the observed transport and GitHub identity with `mark-submitted`.
 7. Import the completed, package-marked response with `import-response`. Do not accept a response from a different package or an unsubmitted handoff.
 8. Read [references/advisory-validation.md](references/advisory-validation.md), inspect the repository again, test the relevant claims, and decide which recommendations survive verification.
 9. Record the result with `record-evaluation`, including concrete evidence. Apply changes only within the user's authorization and report executed evidence separately from Pro advice.
@@ -60,6 +60,16 @@ python3 <skill-dir>/scripts/gptpro.py prepare \
   --transport auto \
   --task "Review the current change for correctness and missing tests."
 
+# Use only when every selected file is committed at HEAD and that SHA is pushed.
+python3 <skill-dir>/scripts/gptpro.py prepare \
+  --repo "$PWD" \
+  --mode review \
+  --transport github \
+  --github-pr-url "https://github.com/owner/repo/pull/123" \
+  --include "src/**" \
+  --include "tests/**" \
+  --task "Review the pinned pull request change."
+
 python3 <skill-dir>/scripts/gptpro.py verify \
   --handoff-dir .gptpro/handoffs/<package-id>
 
@@ -78,7 +88,7 @@ python3 <skill-dir>/scripts/gptpro.py human-handoff \
 
 Approval is package- and transport-specific and expires if verification fails or any outbound artifact hash changes. Use wording equivalent to:
 
-`I prepared a <paste|text-file> handoff for ChatGPT Pro general Chat. The exact outbound artifacts are <paths and hashes>. It represents Git <sha> with <dirty summary>, contains <count> files / <bytes>, and has these exclusions or security findings: <summary>. May I transmit and submit these exact bytes to chatgpt.com for <purpose>?`
+`I prepared a <github|paste|text-file> handoff for ChatGPT Pro general Chat. The exact outbound artifacts are <paths and hashes>. It represents Git <sha> with <dirty summary>, contains <count> files / <bytes>, and has these exclusions or security findings: <summary>. For github, the connected app will be asked to read <repository> at immutable commit <sha> and optional PR <url>, limited by the prompt to <selected paths>. May I transmit the prompt and authorize that repository read, or transmit the listed text bytes, to chatgpt.com for <purpose>?`
 
 An earlier general request to use `$gptpro` is not the action-time approval. Wait for a clear answer after presenting the manifest summary.
 

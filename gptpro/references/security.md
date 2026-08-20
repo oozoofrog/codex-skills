@@ -43,7 +43,7 @@ The external manifest records SHA-256 hashes for the prompt, structured context,
 
 Git HEAD identity and the packaged tree hash are separate. This preserves honest provenance for dirty worktrees.
 
-The outbound structured context omits the local absolute repository root and the absolute source path of `--file-list`. The external local manifest retains them for audit. Changing transport changes the outbound artifact set, so the workflow requires a new package and approval instead of automatic fallback.
+The outbound structured context omits the local absolute repository root and the absolute source path of `--file-list`. The external local manifest retains them for audit. GitHub transport canonicalizes the repository URL and never stores a credential-bearing remote URL. It verifies that selected bytes equal HEAD and that HEAD is remotely advertised, but the prompt path allowlist is not a technical sandbox: the connected app's repository authorization can be broader. Changing transport changes the outbound artifact set, so the workflow requires a new package and approval instead of automatic fallback after preparation.
 
 ## Retention
 
