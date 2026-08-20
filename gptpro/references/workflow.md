@@ -8,7 +8,9 @@ The supported state sequence is:
 prepared -> approved -> submitted -> response_imported -> evaluated
 ```
 
-`verify` is read-only and may run at any phase. Every mutating transition first verifies the existing manifest, archive, prompt, state identity, and receipt hash chain.
+`verify` is read-only and may run at any phase. Every mutating transition first verifies the existing manifest, prompt, context, optional paste payload, local archive, state identity, and receipt hash chain.
+
+Schema-1 ZIP-first handoffs are immutable legacy receipts. Do not silently reinterpret their approval as text-transmission approval; prepare and approve a schema-2 handoff instead.
 
 ## Prepare
 
@@ -16,6 +18,7 @@ prepared -> approved -> submitted -> response_imported -> evaluated
 python3 <skill-dir>/scripts/gptpro.py prepare \
   --repo "$PWD" \
   --mode debug \
+  --transport auto \
   --task "Explain the intermittent timeout and propose discriminating checks." \
   --include "src/**" \
   --include "tests/**" \
@@ -32,8 +35,10 @@ Useful safeguards:
 - `--max-file-bytes`: exclude oversized individual files.
 - `--dry-run`: scan and summarize without writing a package.
 - `--requested-model`: record a user-approved alternative when the default visible ChatGPT Pro selection is not appropriate.
+- `--transport auto|paste|text-file`: choose the browser handoff. `auto` is the default.
+- `--max-paste-bytes`: set the conservative auto-selection threshold; the default 128 KiB is Skill policy, not a published ChatGPT limit.
 
-Preparation records both `git.head_sha` and a hash of the actual packaged file set. A dirty package is not represented as the HEAD commit; dirty paths and the package tree hash remain explicit.
+Preparation records both `git.head_sha` and a hash of the actual packaged file set. A dirty package is not represented as the HEAD commit; dirty paths and the package tree hash remain explicit. Only valid UTF-8 files enter the text context. The generated ZIP remains local audit evidence and is not a default Pro upload.
 
 ## Verify and inspect
 
@@ -42,7 +47,7 @@ python3 <skill-dir>/scripts/gptpro.py verify --handoff-dir <dir>
 python3 <skill-dir>/scripts/gptpro.py status --handoff-dir <dir> --json
 ```
 
-`status --json` is the machine-readable bridge between local packaging and any visible browser controller. It reports absolute prompt/archive paths, destination, requested model, response markers, current phase, and the next required action. It does not open a browser or submit anything.
+`status --json` is the machine-readable bridge between local preparation and any visible browser controller. It reports the resolved transport, exact absolute `outbound_paths`, destination, requested model, context/response markers, current phase, and next required action. It labels the ZIP separately as `local_audit_archive_path`. It does not open a browser or submit anything.
 
 ## Approve
 
@@ -55,7 +60,7 @@ python3 <skill-dir>/scripts/gptpro.py approve \
   --confirm-transmission
 ```
 
-Approval binds to current prompt/archive hashes. Any later artifact change makes verification fail and invalidates progression.
+Approval binds to the manifest, resolved transport, and exact outbound artifact hashes. Any later artifact change makes verification fail and invalidates progression.
 
 ## Submit
 
@@ -65,11 +70,12 @@ Follow [browser-handoff.md](browser-handoff.md). After visible UI evidence confi
 python3 <skill-dir>/scripts/gptpro.py mark-submitted \
   --handoff-dir <dir> \
   --confirm-sent \
-  --observed-model "GPT-5.6 Sol / Intelligence: Pro" \
+  --observed-model "ChatGPT Pro / GPT-5.6 Sol / Intelligence: Pro" \
+  --observed-transport text-file \
   --thread-url "https://chatgpt.com/c/<id>"
 ```
 
-Omit `--thread-url` if the user does not want the URL recorded. Never mark an ambiguous or failed send as submitted.
+Omit `--thread-url` if the user does not want the URL recorded. Never mark an ambiguous or failed send as submitted. If a transport fails, prepare and approve a new handoff instead of silently falling back.
 
 ## Import
 

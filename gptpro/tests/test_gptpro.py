@@ -4,8 +4,8 @@ import json
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
-
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "gptpro.py"
 
@@ -88,6 +88,8 @@ class GptProCliTests(unittest.TestCase):
             str(handoff),
             "--observed-model",
             manifest["requested_model"],
+            "--observed-transport",
+            manifest["transport"]["resolved"],
             "--confirm-sent",
         )
         return manifest
@@ -122,6 +124,61 @@ class GptProCliTests(unittest.TestCase):
                 payload = json.loads(result.stdout)
                 self.assertEqual(self.head, payload["git_head_sha"])
                 self.assertGreater(payload["included_files"], 0)
+                self.assertIn(payload["transport_resolved"], ("paste", "text-file"))
+
+    def test_auto_transport_uses_paste_for_small_payload(self) -> None:
+        handoff = self.prepare()
+        manifest = self.load(handoff / "manifest.json")
+        status = json.loads(self.run_cli("status", "--handoff-dir", str(handoff)).stdout)
+
+        self.assertEqual("auto", manifest["transport"]["requested"])
+        self.assertEqual("paste", manifest["transport"]["resolved"])
+        self.assertEqual(["paste_payload"], [item["artifact"] for item in status["outbound_paths"]])
+        self.assertIsNotNone(status["paste_payload_path"])
+        self.assertNotIn(
+            status["local_audit_archive_path"],
+            {item["path"] for item in status["outbound_paths"]},
+        )
+
+    def test_auto_transport_uses_text_file_over_policy_threshold(self) -> None:
+        handoff = self.prepare("review", "--max-paste-bytes", "1")
+        manifest = self.load(handoff / "manifest.json")
+        status = json.loads(self.run_cli("status", "--handoff-dir", str(handoff)).stdout)
+
+        self.assertEqual("text-file", manifest["transport"]["resolved"])
+        self.assertEqual(["prompt", "context"], [item["artifact"] for item in status["outbound_paths"]])
+        self.assertIsNone(status["paste_payload_path"])
+
+    def test_text_context_contains_selected_files_without_local_absolute_paths(self) -> None:
+        file_list = self.root / "selected-files.txt"
+        file_list.write_text("src/main.py\n", encoding="utf-8")
+        handoff = self.prepare(
+            "architecture",
+            "--transport",
+            "text-file",
+            "--file-list",
+            str(file_list),
+        )
+        manifest = self.load(handoff / "manifest.json")
+        context = (handoff / manifest["artifacts"]["context"]).read_text(encoding="utf-8")
+
+        self.assertIn("src/main.py", context)
+        self.assertIn("def answer():", context)
+        self.assertIn(self.head, context)
+        self.assertNotIn(str(self.repo), context)
+        self.assertNotIn(str(file_list), context)
+        with zipfile.ZipFile(handoff / manifest["artifacts"]["archive"], "r") as archive:
+            internal = archive.read("_gptpro/file-manifest.json").decode("utf-8")
+        self.assertNotIn(str(self.repo), internal)
+        self.assertNotIn(str(file_list), internal)
+
+    def test_non_utf8_text_is_excluded_from_text_transport(self) -> None:
+        (self.repo / "invalid.txt").write_bytes(b"not utf-8: \xff\xfe")
+        handoff = self.prepare("ask")
+        manifest = self.load(handoff / "manifest.json")
+
+        reasons = {(item["path"], item["reason"]) for item in manifest["excluded"]}
+        self.assertIn(("invalid.txt", "non-utf8-text"), reasons)
 
     def test_directed_selection_records_omitted_files(self) -> None:
         handoff = self.prepare("architecture", "--include", "src/**")
@@ -138,6 +195,8 @@ class GptProCliTests(unittest.TestCase):
             str(handoff),
             "--observed-model",
             "Pro",
+            "--observed-transport",
+            "paste",
             "--confirm-sent",
             expected=2,
         )
@@ -152,6 +211,13 @@ class GptProCliTests(unittest.TestCase):
         self.approve_and_submit(handoff)
         status = json.loads(self.run_cli("status", "--handoff-dir", str(handoff)).stdout)
         self.assertEqual("submitted", status["phase"])
+        receipt = self.load(handoff / "receipt.json")
+        outbound = self.load(handoff / "manifest.json")["transport"]["outbound_artifacts"]
+        self.assertEqual(
+            outbound,
+            receipt["events"][1]["data"]["outbound_artifacts"],
+        )
+        self.assertEqual(outbound, receipt["events"][2]["data"]["outbound_artifacts"])
 
     def test_submission_rejects_model_or_pro_setting_drift(self) -> None:
         handoff = self.prepare()
@@ -170,6 +236,8 @@ class GptProCliTests(unittest.TestCase):
             str(handoff),
             "--observed-model",
             "A fallback model",
+            "--observed-transport",
+            manifest["transport"]["resolved"],
             "--confirm-sent",
             expected=2,
         )
@@ -179,7 +247,32 @@ class GptProCliTests(unittest.TestCase):
             str(handoff),
             "--observed-model",
             manifest["requested_model"],
+            "--observed-transport",
+            manifest["transport"]["resolved"],
             "--confirm-sent",
+        )
+
+    def test_submission_rejects_transport_fallback(self) -> None:
+        handoff = self.prepare("review", "--transport", "text-file")
+        manifest = self.load(handoff / "manifest.json")
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(handoff),
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        self.run_cli(
+            "mark-submitted",
+            "--handoff-dir",
+            str(handoff),
+            "--observed-model",
+            manifest["requested_model"],
+            "--observed-transport",
+            "paste",
+            "--confirm-sent",
+            expected=2,
         )
 
     def test_response_import_and_evaluation_complete_receipt_chain(self) -> None:
@@ -237,6 +330,22 @@ class GptProCliTests(unittest.TestCase):
         archive = handoff / manifest["artifacts"]["archive"]
         with archive.open("ab") as handle:
             handle.write(b"tampered")
+        self.run_cli("verify", "--handoff-dir", str(handoff), expected=2)
+
+    def test_paste_payload_tampering_is_detected(self) -> None:
+        handoff = self.prepare("review", "--transport", "paste")
+        manifest = self.load(handoff / "manifest.json")
+        payload = handoff / manifest["artifacts"]["paste_payload"]
+        with payload.open("a", encoding="utf-8") as handle:
+            handle.write("tampered\n")
+        self.run_cli("verify", "--handoff-dir", str(handoff), expected=2)
+
+    def test_text_context_tampering_is_detected(self) -> None:
+        handoff = self.prepare("review", "--transport", "text-file")
+        manifest = self.load(handoff / "manifest.json")
+        context = handoff / manifest["artifacts"]["context"]
+        with context.open("a", encoding="utf-8") as handle:
+            handle.write("tampered\n")
         self.run_cli("verify", "--handoff-dir", str(handoff), expected=2)
 
     def test_receipt_tampering_is_detected(self) -> None:

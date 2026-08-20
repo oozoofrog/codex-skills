@@ -30,7 +30,7 @@
 
 | Skill | Best for |
 |---|---|
-| `gptpro` | 로그인된 ChatGPT Pro 일반 Chat과 안전한 repo handoff 협업 |
+| `gptpro` | 로그인된 ChatGPT Pro 일반 Chat과 승인된 구조화 텍스트로 repo handoff 협업 |
 | `goal-research-loop` | 새 목표 지향 반복 연구 루프 설계·운영 |
 | `codex-research` | 기존 `.codex-research/` runner 상태 재개·점검 |
 | `hey-codex` | 명시 요청 시 별도 Codex CLI 인스턴스 실행 |
