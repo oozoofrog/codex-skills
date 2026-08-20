@@ -1,0 +1,1 @@
+Build a ranked hypothesis set from the supplied symptoms and code. For each leading hypothesis, give supporting/conflicting evidence and the smallest discriminating check. Recommend a fix only after identifying the likely cause and note remaining uncertainty.

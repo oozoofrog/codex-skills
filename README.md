@@ -97,7 +97,21 @@ $macos-release 이번 macOS CLI 릴리스를 dry-run부터 Homebrew 반영까지
 
 ## 필요한 스킬만 선택 설치
 
-설치 가능한 top-level Skill과 현재 상태를 확인합니다.
+터미널 없이 GitHub에서 `gptpro`만 설치하려면 Codex에 다음과 같이 요청합니다.
+
+```text
+$skill-installer Install gptpro from https://github.com/oozoofrog/codex-skills/tree/main/gptpro
+```
+
+Plugin 형태로 설치하려면 저장소 Marketplace를 한 번 등록한 뒤 Codex의 Plugins 화면에서 `GPT Pro Collaborator`를 선택합니다.
+
+```bash
+codex plugin marketplace add oozoofrog/codex-skills --ref main
+```
+
+이 두 경로 모두 사용자가 `python3` 설치 명령을 직접 실행할 필요가 없습니다. 공개 Plugins Directory의 완전한 클릭 설치는 OpenAI의 Plugin 검토·게시 이후 사용할 수 있습니다. 자세한 내용은 [`docs/plugin-installation.md`](./docs/plugin-installation.md)를 참고하세요.
+
+저장소 maintainer가 clone에서 설치 상태를 점검하거나 기존 설치를 원자적으로 갱신할 때는 호환 관리 도구를 사용할 수 있습니다.
 
 ```bash
 python3 scripts/manage_skills.py list

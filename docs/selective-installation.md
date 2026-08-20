@@ -2,6 +2,8 @@
 
 `scripts/manage_skills.py` installs only the top-level skill packages you name. It does not copy `.system/` mirrors or every repository directory.
 
+For a first installation, prefer the network paths in [`plugin-installation.md`](./plugin-installation.md). They use Codex's bundled `$skill-installer` or Plugin marketplace and do not require the user to invoke Python. The manager documented here remains useful for a reviewed checkout, offline use, and atomic updates.
+
 ## List available packages
 
 ```bash
@@ -38,12 +40,12 @@ The manager rejects symlinks inside Skill packages and ignores cache artifacts s
 
 ## Install directly from GitHub
 
-Codex's bundled `skill-installer` can install a fresh package without cloning this repository:
+Codex's bundled `$skill-installer` can install a fresh package without cloning this repository or exposing its helper implementation to the user:
 
-```bash
-python3 ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
-  --repo oozoofrog/codex-skills \
-  --path gptpro
+```text
+$skill-installer Install gptpro from https://github.com/oozoofrog/codex-skills/tree/main/gptpro
 ```
 
 The bundled installer refuses to overwrite an existing destination. Use a reviewed checkout plus `manage_skills.py --update` for updates.
+
+For Plugin installation and the repository marketplace, see [`plugin-installation.md`](./plugin-installation.md).

@@ -1,0 +1,29 @@
+{
+  "name": "gptpro",
+  "version": "0.1.0",
+  "description": "Secure attended handoffs between Codex and logged-in ChatGPT Pro general Chat.",
+  "author": {
+    "name": "oozoofrog",
+    "url": "https://github.com/oozoofrog"
+  },
+  "homepage": "https://github.com/oozoofrog/codex-skills/tree/main/gptpro",
+  "repository": "https://github.com/oozoofrog/codex-skills",
+  "keywords": [
+    "chatgpt-pro",
+    "codex",
+    "handoff",
+    "review"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "GPT Pro Collaborator",
+    "shortDescription": "Secure ChatGPT Pro text handoffs",
+    "longDescription": "Prepare an approved, hash-verified repository handoff for logged-in ChatGPT Pro, then import and validate its response as advisory evidence.",
+    "developerName": "oozoofrog",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": "Use $gptpro in review mode, initialize local handoff storage if needed, prepare approved repository text, consult ChatGPT Pro, and validate the advisory response."
+  }
+}

@@ -5,6 +5,8 @@
 ## [Unreleased]
 ### Added
 - `gptpro` Skill: plan/ask/review/debug/architecture 모드, Git SHA와 packaged-tree pinning, secret/exclude scan, manifest/archive hash 검증, 승인 gate, visible Chrome handoff, response import, receipt/state, advisory 검증 계약
+- `gptpro` skills-only Plugin과 repo Marketplace: Codex Plugin 브라우저 및 `$skill-installer` 기반 네트워크 설치 경로
+- Plugin manifest, Marketplace entry, standalone/Plugin Skill mirror 일치 검증 테스트와 설치 문서
 - `scripts/manage_skills.py`: top-level Skill 목록 조회와 선택 설치, dry-run, hash-checked atomic update
 - 선택 설치 운영 문서와 단위/통합 테스트
 - `hierarchical-context-architecture` skill 추가
