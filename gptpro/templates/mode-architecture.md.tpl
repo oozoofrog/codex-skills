@@ -1,0 +1,1 @@
+Describe the current architecture evidenced by the archive, then compare viable options using explicit decision criteria. Recommend one option with tradeoffs, compatibility constraints, migration stages, rollback, and validation. Avoid speculative services or abstractions without a demonstrated need.

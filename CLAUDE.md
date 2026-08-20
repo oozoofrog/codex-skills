@@ -6,6 +6,8 @@
 - Strict audit for CI/ops: `python3 hierarchical-context-architecture/scripts/verify_context_tree.py --root . --strict`
 - Syntax-check repo shell scripts: `bash -n scripts/*.sh`
 - Syntax-check repo Python scripts: `python3 -m py_compile scripts/*.py hierarchical-context-architecture/scripts/verify_context_tree.py`
+- Test selective installation: `python3 -m unittest discover -s scripts/tests -v`
+- Test gptpro lifecycle: `python3 -m unittest discover -s gptpro/tests -v`
 
 ## Repository Architecture
 - Top-level non-hidden directories are usually self-contained skill packages.

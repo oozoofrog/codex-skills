@@ -3,6 +3,14 @@
 이 저장소의 의미 있는 skill 묶음 변경을 기록합니다.
 
 ## [Unreleased]
+### Added
+- `gptpro` Skill: plan/ask/review/debug/architecture 모드, Git SHA와 packaged-tree pinning, secret/exclude scan, manifest/archive hash 검증, 승인 gate, visible Chrome handoff, response import, receipt/state, advisory 검증 계약
+- `scripts/manage_skills.py`: top-level Skill 목록 조회와 선택 설치, dry-run, hash-checked atomic update
+- 선택 설치 운영 문서와 단위/통합 테스트
+- `hierarchical-context-architecture` skill 추가
+- 루트 `CLAUDE.md`, `AGENTS.md` 및 `docs/`, `scripts/`, `.system/`, `hierarchical-context-architecture/`용 `CONTEXT.md` 초안 추가
+- `docs/release-checklist.md` 추가
+
 ### Updated
 - 사용자 스킬 정리: 중복 discovery 제거, `macos-release` 단일화, `codex-research`를 기존 `.codex-research/` 호환 runner로 축소
 - 누락된 `agents/openai.yaml` metadata를 사용자 스킬에 보강하고, `SKILL.md` extra frontmatter를 제거
@@ -18,11 +26,6 @@
 - `fixer` legacy plugin doctor skill 제거 (`plugin-doctor`로 통합)
 - `ooz-macos-release` 제거 (`macos-release`로 통합)
 - `codex-research/skills/codex-research` nested duplicate 제거
-
-### Added
-- `hierarchical-context-architecture` skill 추가
-- 루트 `CLAUDE.md`, `AGENTS.md` 및 `docs/`, `scripts/`, `.system/`, `hierarchical-context-architecture/`용 `CONTEXT.md` 초안 추가
-- `docs/release-checklist.md` 추가
 
 ## [0.1.1] - 2026-03-14
 ### Added
