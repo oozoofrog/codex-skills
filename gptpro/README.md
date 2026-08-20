@@ -2,7 +2,7 @@
 
 `gptpro` is an attended Codex Skill for consulting a logged-in ChatGPT Pro general Chat without giving the web model direct authority over the local repository.
 
-It converts selected repository files into hash-verified structured Markdown, records the exact Git state, excludes likely secrets and build noise, requires transport-specific user approval, guides the visible Chrome handoff, imports only the package-marked response, and records Codex's later evaluation. A ZIP is retained locally for audit and integrity checks but is not uploaded by default.
+It initializes local handoff storage, converts selected repository files into hash-verified structured Markdown, records the exact Git state, excludes likely secrets and build noise, requires transport-specific user approval, guides the visible Chrome handoff, imports only the package-marked response, and records Codex's later evaluation. A ZIP is retained locally for audit and integrity checks but is not uploaded by default.
 
 ## Install
 
@@ -38,6 +38,22 @@ $gptpro review 모드로 현재 변경의 정확성과 빠진 테스트를 검�
 ```
 
 The Skill will prepare and verify local artifacts first. Transmission is a separate attended action: it must show the exact manifest summary and receive approval before pasting, attaching, or submitting to `chatgpt.com`.
+
+## First-use setup
+
+Preview the repository-local environment without writing anything:
+
+```bash
+python3 scripts/gptpro.py init --repo /path/to/repo
+```
+
+The recommended `local` scope plans two idempotent changes: create `<repo>/.gptpro/handoffs/` and add `.gptpro/` to that clone's `.git/info/exclude`. After reviewing and approving the JSON preview:
+
+```bash
+python3 scripts/gptpro.py init --repo /path/to/repo --apply
+```
+
+Use `--ignore-scope repository` to update the tracked-worktree `.gitignore` instead, or `--ignore-scope none` to create only the directory. The Skill never applies the preview automatically. `prepare` remains usable without initialization but reports a warning when an in-repository output directory is not ignored.
 
 The default `--transport auto` uses:
 
