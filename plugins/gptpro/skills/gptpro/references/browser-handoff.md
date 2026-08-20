@@ -17,6 +17,8 @@ This stage is attended browser work. Local scripts intentionally stop at verifie
 9. Wait for completion without repeated prompt submission or page refresh. For long reasoning, use bounded waits and infrequent UI inspection. Stop on login loss, CAPTCHA, permission failure, rate limit, selector drift, navigation changes, or lost connection.
 10. Capture the complete answer including both package-specific markers into a UTF-8 file and import it locally.
 
+Browser control is not required to complete this stage. When credentials, OAuth/app scope, account choice, permissions, an OS file chooser, model controls, uncertain submission, or response export require a person, follow [human-takeover.md](human-takeover.md). Generate the checklist with `gptpro.py human-handoff` and resume from the user's visible observation. Do not describe a required human checkpoint as a failed consultation.
+
 ## Transport failure rule
 
 Do not switch from `text-file` to `paste`, from `paste` to `text-file`, or to ZIP after an upload/paste failure. A transport change alters the approved outbound artifact set. Prepare a new handoff with the desired `--transport`, show its new hashes, and obtain a new approval.
@@ -29,14 +31,22 @@ Never ask the user to choose global all-site access just to complete this handof
 
 ## Manual fallback
 
-If browser control is unavailable, provide the user:
+If browser control is unavailable, run:
+
+```bash
+python3 <skill-dir>/scripts/gptpro.py human-handoff \
+  --handoff-dir <dir> \
+  --reason manual-transport
+```
+
+The generated checklist provides the user:
 
 - resolved transport and `outbound_paths`
 - `paste_payload_path`, or `prompt_path` plus `context_path`
 - requested model/Pro setting
 - exact response markers
 
-The user can create the Chat, paste or attach as specified, and return the saved response. The same `approve`, `mark-submitted`, and `import-response` receipts still apply. Markdown is also a supported ChatGPT review surface in OpenAI's [Artifacts documentation](https://learn.chatgpt.com/docs/artifacts-viewer).
+The user can create the Chat, paste or attach as specified, and report `sent`, `not-sent`, or `unknown`. Record `mark-submitted` only for a visibly matching sent turn. If response extraction later needs a person, use `--reason response-export`. The same `approve`, `mark-submitted`, and `import-response` receipts still apply. Markdown is also a supported ChatGPT review surface in OpenAI's [Artifacts documentation](https://learn.chatgpt.com/docs/artifacts-viewer).
 
 ## Why there are no DOM selectors
 

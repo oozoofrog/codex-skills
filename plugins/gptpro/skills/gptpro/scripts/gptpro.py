@@ -25,6 +25,19 @@ MODES = ("plan", "ask", "review", "debug", "architecture")
 TRANSPORTS = ("auto", "paste", "text-file")
 IGNORE_SCOPES = ("local", "repository", "none")
 PHASES = ("prepared", "approved", "submitted", "response_imported", "evaluated")
+HUMAN_HANDOFF_REASONS = (
+    "login",
+    "account-or-workspace",
+    "app-authorization",
+    "file-permission",
+    "file-selection",
+    "model-selection",
+    "captcha",
+    "site-approval",
+    "manual-transport",
+    "submission-uncertain",
+    "response-export",
+)
 DEFAULT_REQUESTED_MODEL = "ChatGPT Pro / GPT-5.6 Sol / Intelligence: Pro"
 DESTINATION = "https://chatgpt.com/"
 DEFAULT_MAX_FILES = 2_000
@@ -1239,11 +1252,221 @@ def command_verify(args: argparse.Namespace) -> int:
 def next_action(phase: str) -> str:
     return {
         "prepared": "show exact outbound text, hashes, and transport; obtain package-specific user approval",
-        "approved": "perform the approved visible ChatGPT Pro general Chat transport",
+        "approved": (
+            "perform the approved visible ChatGPT Pro general Chat transport; "
+            "use human-handoff when a person must complete a trust or browser boundary"
+        ),
         "submitted": "wait for completion and import the package-marked response",
         "response_imported": "independently validate the advisory response",
         "evaluated": "report the verified result and any separately authorized implementation",
     }[phase]
+
+
+def outbound_path_entries(verified: dict[str, Any]) -> list[dict[str, Any]]:
+    manifest = verified["manifest"]
+    entries = []
+    for item in verified["outbound_artifacts"]:
+        artifact_key = item["artifact"]
+        artifact_name = manifest["artifacts"][artifact_key]
+        entries.append({**item, "path": str(verified["manifest_path"].parent / artifact_name)})
+    return entries
+
+
+def human_handoff_reasons_for(phase: str, transport: str) -> list[str]:
+    if phase == "approved":
+        reasons = [
+            "login",
+            "account-or-workspace",
+            "app-authorization",
+            "model-selection",
+            "captcha",
+            "site-approval",
+            "manual-transport",
+            "submission-uncertain",
+        ]
+        if transport == "text-file":
+            reasons[3:3] = ["file-permission", "file-selection"]
+        return reasons
+    if phase == "submitted":
+        return ["login", "captcha", "response-export"]
+    return []
+
+
+def human_handoff_instructions(
+    reason: str,
+    *,
+    transport: str,
+    requested_model: str,
+    outbound_paths: list[dict[str, Any]],
+    response_markers: dict[str, str],
+) -> tuple[str, list[str], list[str], dict[str, Any]]:
+    approved_paths = [item["path"] for item in outbound_paths]
+    common_return = ["what was visibly observed", "whether the requested action was completed, declined, or blocked"]
+    if reason == "login":
+        return (
+            "Authentication requires the account owner and must not be automated with stored credentials.",
+            [
+                "Sign in to chatgpt.com in the visible browser using the intended account.",
+                "Complete any MFA yourself; do not share credentials, codes, cookies, or session data.",
+                "Stop when the general Chat composer and account identity are visible; do not submit the handoff yet.",
+            ],
+            common_return + ["the visible account or workspace identity"],
+            {"allowed_outcomes": ["completed", "declined", "blocked"], "automatic_retry_allowed": True},
+        )
+    if reason == "account-or-workspace":
+        return (
+            "Only the user can decide which visible ChatGPT account or workspace may receive repository context.",
+            [
+                "Inspect the visible account and workspace without opening unrelated chats or settings.",
+                "Select the intended account or workspace only if you want this approved package sent there.",
+                "Return control before any paste, attachment, or submission.",
+            ],
+            common_return + ["the exact visible account or workspace selected"],
+            {"allowed_outcomes": ["completed", "declined", "blocked"], "automatic_retry_allowed": True},
+        )
+    if reason == "app-authorization":
+        return (
+            "Connecting GitHub or another ChatGPT app is an OAuth and repository-scope decision owned by the user.",
+            [
+                "Review the visible app name, account, organization, requested permissions, and repository scope.",
+                "Approve or decline the connection yourself; prefer only the repositories needed for this task.",
+                "Return when the intended app is visibly connected or when you decide not to connect it; do not submit the handoff.",
+            ],
+            common_return + ["the app name and repository scope that are visibly available"],
+            {"allowed_outcomes": ["completed", "declined", "blocked"], "automatic_retry_allowed": True},
+        )
+    if reason == "file-permission":
+        if transport != "text-file":
+            raise HandoffError("file-permission applies only to an approved text-file transport")
+        return (
+            "The browser extension cannot grant itself local-file access; the user must decide whether to enable it.",
+            [
+                "Open the Codex Chrome extension details and review the Allow access to file URLs permission.",
+                "Enable it only if you accept local file attachment for this handoff; do not grant broader all-site access.",
+                "Return to the existing ChatGPT draft without selecting or sending any unapproved file.",
+            ],
+            common_return + ["whether local-file access is now enabled"],
+            {"allowed_outcomes": ["completed", "declined", "blocked"], "automatic_retry_allowed": True},
+        )
+    if reason == "file-selection":
+        if transport != "text-file":
+            raise HandoffError("file-selection applies only to an approved text-file transport")
+        attachments = [item["path"] for item in outbound_paths if item.get("role") == "attachment"]
+        return (
+            "The operating-system file chooser may require a visible human selection even when browser automation is available.",
+            [
+                "In the existing ChatGPT draft, choose the file attachment action.",
+                f"Select only the approved attachment path(s): {attachments}.",
+                "Wait until each exact filename is visibly attached, then return control without clicking Send.",
+            ],
+            common_return + ["the exact attachment filenames visible in the composer"],
+            {"allowed_outcomes": ["completed", "declined", "blocked"], "automatic_retry_allowed": True},
+        )
+    if reason == "model-selection":
+        return (
+            "Model and reasoning controls can be ambiguous or unavailable, so the user must confirm the visible choice.",
+            [
+                f"Select exactly this approved model and reasoning setting: {requested_model}.",
+                "Do not choose a fallback model or alter account settings to unlock an unavailable option.",
+                "Return control after the selected model and Pro setting are visibly confirmed; do not submit yet.",
+            ],
+            common_return + ["the exact model and reasoning labels visibly selected"],
+            {"allowed_outcomes": ["completed", "declined", "blocked"], "automatic_retry_allowed": True},
+        )
+    if reason == "captcha":
+        return (
+            "CAPTCHA and anti-bot challenges require a human decision and must never be bypassed by the skill.",
+            [
+                "Complete or decline the visible challenge yourself.",
+                "Do not share challenge tokens, cookies, or account credentials.",
+                "Return control on the same ChatGPT page; do not resend any prompt while prior submission state is uncertain.",
+            ],
+            common_return + ["whether the same conversation and draft remain available"],
+            {"allowed_outcomes": ["completed", "declined", "blocked"], "automatic_retry_allowed": True},
+        )
+    if reason == "site-approval":
+        return (
+            "Browser site permissions and external-data disclosures are user decisions.",
+            [
+                "Review the visible site, destination, account, permission, and data scope.",
+                "Approve only the narrow chatgpt.com access needed for this handoff, or decline it.",
+                "Return control before any message is sent.",
+            ],
+            common_return + ["the permission decision and visible destination"],
+            {"allowed_outcomes": ["completed", "declined", "blocked"], "automatic_retry_allowed": True},
+        )
+    if reason == "manual-transport":
+        steps = [
+            "Open or reuse the approved unsent new ChatGPT general Chat in the intended account or workspace.",
+            f"Select exactly this model and reasoning setting: {requested_model}.",
+        ]
+        if transport == "paste":
+            steps.append(f"Paste the complete contents of the one approved message file: {approved_paths[0]}.")
+        else:
+            prompt_paths = [item["path"] for item in outbound_paths if item.get("role") == "message"]
+            attachment_paths = [item["path"] for item in outbound_paths if item.get("role") == "attachment"]
+            steps.extend(
+                [
+                    f"Attach only the approved context file(s): {attachment_paths}.",
+                    f"Paste the complete contents of the approved prompt file(s): {prompt_paths}.",
+                ]
+            )
+        steps.extend(
+            [
+                "Verify the package ID, exact attachment names if any, and response-marker request in the visible composer.",
+                "Send exactly once. If the click or resulting user turn is uncertain, report unknown and do not retry.",
+            ]
+        )
+        return (
+            "Visible browser automation is optional; a person may complete the already approved transport without weakening any gate.",
+            steps,
+            [
+                "result: sent, not-sent, or unknown",
+                "the exact visible model and reasoning labels",
+                "the ChatGPT conversation URL if a matching user turn is visibly present",
+            ],
+            {
+                "allowed_outcomes": ["sent", "not-sent", "unknown"],
+                "automatic_retry_allowed": False,
+                "on_sent": "run mark-submitted only after matching visible UI evidence",
+            },
+        )
+    if reason == "submission-uncertain":
+        return (
+            "An interrupted or timed-out Send cannot be classified safely by automation and duplicate submission would be harmful.",
+            [
+                "Inspect only the current or uniquely matching ChatGPT conversation.",
+                "Look for one user turn containing this package ID and the approved payload or attachment names.",
+                "Report sent only when the matching user turn is visibly present; otherwise report not-sent or unknown.",
+                "Do not click Send, paste again, attach again, refresh into a new chat, or create a replacement conversation.",
+            ],
+            ["result: sent, not-sent, or unknown", "the matching conversation URL and visible evidence when sent"],
+            {
+                "allowed_outcomes": ["sent", "not-sent", "unknown"],
+                "automatic_retry_allowed": False,
+                "on_sent": "run mark-submitted only after matching visible UI evidence",
+            },
+        )
+    if reason == "response-export":
+        return (
+            "A complete Pro response may need a human copy or download when browser extraction is unavailable or truncated.",
+            [
+                "Wait until the same submitted conversation has finished generating.",
+                "Copy the complete assistant response, including both package-specific marker lines, into a UTF-8 text or Markdown file.",
+                "Do not edit, summarize, combine, or add text outside the response markers.",
+                "Return the saved local file path; importing it does not authorize applying its recommendations.",
+            ],
+            [
+                "the UTF-8 response file path",
+                f"confirmation that it includes {response_markers['begin']} and {response_markers['end']}",
+            ],
+            {
+                "allowed_outcomes": ["completed", "blocked"],
+                "automatic_retry_allowed": True,
+                "on_completed": "run import-response with the saved response file",
+            },
+        )
+    raise HandoffError(f"Unsupported human handoff reason: {reason}")
 
 
 def command_status(args: argparse.Namespace) -> int:
@@ -1251,16 +1474,7 @@ def command_status(args: argparse.Namespace) -> int:
     verified = verify_package(handoff_dir)
     manifest = verified["manifest"]
     state = verified["state"]
-    outbound_paths = []
-    for item in verified["outbound_artifacts"]:
-        artifact_key = item["artifact"]
-        artifact_name = manifest["artifacts"][artifact_key]
-        outbound_paths.append(
-            {
-                **item,
-                "path": str(handoff_dir / artifact_name),
-            }
-        )
+    outbound_paths = outbound_path_entries(verified)
     payload = {
         "package_id": manifest["package_id"],
         "phase": state["phase"],
@@ -1282,6 +1496,61 @@ def command_status(args: argparse.Namespace) -> int:
         "totals": manifest["totals"],
         "security_findings": manifest["security_findings"],
         "warnings": manifest["warnings"],
+        "human_takeover": {
+            "available": bool(human_handoff_reasons_for(state["phase"], manifest["transport"]["resolved"])),
+            "read_only": True,
+            "reasons": human_handoff_reasons_for(state["phase"], manifest["transport"]["resolved"]),
+            "command": "human-handoff",
+            "state_changes_only_after_observed_completion": True,
+        },
+    }
+    print(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False))
+    return 0
+
+
+def command_human_handoff(args: argparse.Namespace) -> int:
+    handoff_dir = validate_handoff_dir(args.handoff_dir)
+    verified = verify_package(handoff_dir)
+    manifest = verified["manifest"]
+    state = verified["state"]
+    transport = str(manifest["transport"]["resolved"])
+    available = human_handoff_reasons_for(str(state["phase"]), transport)
+    if args.reason not in available:
+        raise HandoffError(
+            f"Human handoff reason {args.reason!r} is not valid in phase {state['phase']!r}; "
+            f"available reasons: {', '.join(available) if available else 'none'}"
+        )
+    outbound_paths = outbound_path_entries(verified)
+    why, steps, return_with, resume = human_handoff_instructions(
+        args.reason,
+        transport=transport,
+        requested_model=str(manifest["requested_model"]),
+        outbound_paths=outbound_paths,
+        response_markers=manifest["response_markers"],
+    )
+    payload = {
+        "status": "human_action_required",
+        "blocking": True,
+        "read_only": True,
+        "state_unchanged": True,
+        "package_id": manifest["package_id"],
+        "phase": state["phase"],
+        "reason": args.reason,
+        "observed_blocker_details": args.details.strip() if args.details else None,
+        "why_human_is_required": why,
+        "destination": manifest["destination"],
+        "requested_model": manifest["requested_model"],
+        "transport": transport,
+        "outbound_paths": outbound_paths,
+        "human_steps": steps,
+        "return_with": return_with,
+        "resume": resume,
+        "safety_rules": [
+            "Do not disclose credentials, MFA codes, cookies, tokens, or unrelated browser content.",
+            "Do not change the approved transport or substitute outbound files.",
+            "Do not infer submission from a click, timeout, or missing draft; require a matching visible user turn.",
+            "Do not apply ChatGPT advice until it has been imported and independently evaluated.",
+        ],
     }
     print(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False))
     return 0
@@ -1513,6 +1782,18 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "status":
             command.add_argument("--json", action="store_true", help="Compatibility flag; output is always JSON")
         command.set_defaults(func=func)
+
+    human_handoff = subparsers.add_parser(
+        "human-handoff",
+        help="Print a read-only, phase-aware checklist for required human browser action",
+    )
+    human_handoff.add_argument("--handoff-dir", required=True)
+    human_handoff.add_argument("--reason", choices=HUMAN_HANDOFF_REASONS, required=True)
+    human_handoff.add_argument(
+        "--details",
+        help="Optional observed blocker details; displayed in the checklist but not persisted",
+    )
+    human_handoff.set_defaults(func=command_human_handoff)
 
     approve = subparsers.add_parser("approve", help="Record package-specific user approval")
     approve.add_argument("--handoff-dir", required=True)

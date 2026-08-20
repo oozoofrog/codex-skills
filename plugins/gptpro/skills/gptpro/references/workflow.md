@@ -65,7 +65,7 @@ python3 <skill-dir>/scripts/gptpro.py verify --handoff-dir <dir>
 python3 <skill-dir>/scripts/gptpro.py status --handoff-dir <dir> --json
 ```
 
-`status --json` is the machine-readable bridge between local preparation and any visible browser controller. It reports the resolved transport, exact absolute `outbound_paths`, destination, requested model, context/response markers, current phase, and next required action. It labels the ZIP separately as `local_audit_archive_path`. It does not open a browser or submit anything.
+`status --json` is the machine-readable bridge between local preparation and any visible browser controller. It reports the resolved transport, exact absolute `outbound_paths`, destination, requested model, context/response markers, current phase, and next required action. It labels the ZIP separately as `local_audit_archive_path`. Its `human_takeover` object reports whether a read-only human checklist is available in the current phase and which reasons are valid. It does not open a browser or submit anything.
 
 ## Approve
 
@@ -79,6 +79,21 @@ python3 <skill-dir>/scripts/gptpro.py approve \
 ```
 
 Approval binds to the manifest, resolved transport, and exact outbound artifact hashes. Any later artifact change makes verification fail and invalidates progression.
+
+## Human checkpoint
+
+Human involvement is an expected attended path when the browser cannot or should not cross an account, OAuth, permission, operating-system, or ambiguous-state boundary. After approval, generate the exact checklist instead of improvising a workaround:
+
+```bash
+python3 <skill-dir>/scripts/gptpro.py human-handoff \
+  --handoff-dir <dir> \
+  --reason file-selection \
+  --details "The browser file chooser did not become observable."
+```
+
+The command verifies the package and prints JSON containing the approved model, transport, exact outbound paths and hashes, human steps, expected return evidence, and retry policy. It is read-only: state and receipt bytes remain unchanged. Use `manual-transport` when the person should perform the complete approved send, `submission-uncertain` when Send may already have occurred, and `response-export` after submission when the marked answer must be saved manually.
+
+Read [human-takeover.md](human-takeover.md) for the return contract. A human observation is not a submission receipt. Continue with `mark-submitted` only after a matching user turn is visibly confirmed, and never retry an uncertain submission automatically.
 
 ## Submit
 

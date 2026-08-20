@@ -238,6 +238,132 @@ class GptProCliTests(unittest.TestCase):
             status["local_audit_archive_path"],
             {item["path"] for item in status["outbound_paths"]},
         )
+        self.assertFalse(status["human_takeover"]["available"])
+        self.assertEqual([], status["human_takeover"]["reasons"])
+
+    def test_human_handoff_is_read_only_and_phase_aware(self) -> None:
+        handoff = self.prepare()
+        manifest = self.load(handoff / "manifest.json")
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(handoff),
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        before_state = (handoff / "state.json").read_bytes()
+        before_receipt = (handoff / "receipt.json").read_bytes()
+
+        result = json.loads(
+            self.run_cli(
+                "human-handoff",
+                "--handoff-dir",
+                str(handoff),
+                "--reason",
+                "manual-transport",
+                "--details",
+                "Chrome control is unavailable.",
+            ).stdout
+        )
+
+        self.assertEqual("human_action_required", result["status"])
+        self.assertTrue(result["read_only"])
+        self.assertTrue(result["state_unchanged"])
+        self.assertEqual("approved", result["phase"])
+        self.assertEqual("paste", result["transport"])
+        self.assertEqual("Chrome control is unavailable.", result["observed_blocker_details"])
+        self.assertEqual(["sent", "not-sent", "unknown"], result["resume"]["allowed_outcomes"])
+        self.assertFalse(result["resume"]["automatic_retry_allowed"])
+        self.assertEqual(
+            [manifest["transport"]["outbound_artifacts"][0]["sha256"]],
+            [item["sha256"] for item in result["outbound_paths"]],
+        )
+        self.assertEqual(before_state, (handoff / "state.json").read_bytes())
+        self.assertEqual(before_receipt, (handoff / "receipt.json").read_bytes())
+
+        status = json.loads(self.run_cli("status", "--handoff-dir", str(handoff)).stdout)
+        self.assertTrue(status["human_takeover"]["available"])
+        self.assertIn("manual-transport", status["human_takeover"]["reasons"])
+        self.assertNotIn("file-selection", status["human_takeover"]["reasons"])
+
+    def test_text_file_human_handoff_lists_only_approved_attachment(self) -> None:
+        handoff = self.prepare("review", "--transport", "text-file")
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(handoff),
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        result = json.loads(
+            self.run_cli(
+                "human-handoff",
+                "--handoff-dir",
+                str(handoff),
+                "--reason",
+                "file-selection",
+            ).stdout
+        )
+
+        attachment_paths = [item["path"] for item in result["outbound_paths"] if item["role"] == "attachment"]
+        self.assertEqual(1, len(attachment_paths))
+        self.assertTrue(any(attachment_paths[0] in step for step in result["human_steps"]))
+        self.assertIn("file-permission", json.loads(
+            self.run_cli("status", "--handoff-dir", str(handoff)).stdout
+        )["human_takeover"]["reasons"])
+
+    def test_human_handoff_rejects_wrong_phase_or_transport(self) -> None:
+        paste_handoff = self.prepare()
+        self.run_cli(
+            "human-handoff",
+            "--handoff-dir",
+            str(paste_handoff),
+            "--reason",
+            "manual-transport",
+            expected=2,
+        )
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(paste_handoff),
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        self.run_cli(
+            "human-handoff",
+            "--handoff-dir",
+            str(paste_handoff),
+            "--reason",
+            "file-selection",
+            expected=2,
+        )
+
+    def test_submitted_handoff_offers_human_response_export(self) -> None:
+        handoff = self.prepare()
+        manifest = self.approve_and_submit(handoff)
+        status = json.loads(self.run_cli("status", "--handoff-dir", str(handoff)).stdout)
+        self.assertEqual(["login", "captcha", "response-export"], status["human_takeover"]["reasons"])
+
+        result = json.loads(
+            self.run_cli(
+                "human-handoff",
+                "--handoff-dir",
+                str(handoff),
+                "--reason",
+                "response-export",
+            ).stdout
+        )
+        markers = manifest["response_markers"]
+        instructions = "\n".join(result["human_steps"] + result["return_with"])
+        self.assertIn(markers["begin"], instructions)
+        self.assertIn(markers["end"], instructions)
+        self.assertEqual(
+            "run import-response with the saved response file",
+            result["resume"]["on_completed"],
+        )
 
     def test_auto_transport_uses_text_file_over_policy_threshold(self) -> None:
         handoff = self.prepare("review", "--max-paste-bytes", "1")
