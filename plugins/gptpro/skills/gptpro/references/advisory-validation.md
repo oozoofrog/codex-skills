@@ -4,6 +4,7 @@
 
 1. Re-run `gptpro.py verify` and read `manifest.json` plus `response.md`.
 2. Compare the current repository HEAD/status with the recorded Git identity and packaged tree hash. If relevant files changed, mark the advice stale or repackage.
+   - For `github`, confirm the response attestation names the pinned repository/commit and lists only approved paths. Reopen every material cited path from the pinned commit and compare it with current local state. The attestation is self-report, not execution proof.
 3. Convert each material recommendation into a falsifiable claim: affected file/behavior, expected evidence, and failure condition.
 4. Inspect the cited files directly. Never trust a quoted path, symbol, line number, command, URL, or test result solely because Pro supplied it.
 5. Reproduce review/debug findings when practical. Distinguish confirmed facts, plausible hypotheses, and unsupported claims.

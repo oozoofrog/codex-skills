@@ -19,10 +19,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlparse
 
 SCHEMA_VERSION = 2
 MODES = ("plan", "ask", "review", "debug", "architecture")
-TRANSPORTS = ("auto", "paste", "text-file")
+TRANSPORTS = ("auto", "github", "paste", "text-file")
 IGNORE_SCOPES = ("local", "repository", "none")
 PHASES = ("prepared", "approved", "submitted", "response_imported", "evaluated")
 HUMAN_HANDOFF_REASONS = (
@@ -201,14 +202,26 @@ def load_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def run_git(repo: Path, *args: str, binary: bool = False) -> str | bytes:
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=not binary,
-        check=False,
-    )
+def run_git(
+    repo: Path,
+    *args: str,
+    binary: bool = False,
+    timeout_seconds: int | None = None,
+) -> str | bytes:
+    git_env = os.environ.copy()
+    git_env["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=not binary,
+            check=False,
+            env=git_env,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HandoffError(f"git {' '.join(args)} timed out") from exc
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", "replace") if binary else result.stderr
         raise HandoffError(stderr.strip() or f"git {' '.join(args)} failed")
@@ -375,6 +388,135 @@ def git_identity(root: Path) -> dict[str, Any]:
         "branch": branch,
         "clean": not dirty_paths,
         "dirty_paths": dirty_paths,
+    }
+
+
+def github_repository_from_remote_url(remote_url: str) -> tuple[str, str]:
+    """Return owner/repository and its canonical web URL without retaining credentials."""
+    value = remote_url.strip()
+    scp_match = re.fullmatch(r"(?:[^@/]+@)?github\.com:(?P<path>[^?#]+)", value, re.IGNORECASE)
+    if scp_match:
+        repo_path = scp_match.group("path")
+    else:
+        parsed = urlparse(value)
+        if parsed.scheme.lower() not in {"git", "http", "https", "ssh"}:
+            raise HandoffError("GitHub transport requires a github.com remote URL")
+        if (parsed.hostname or "").lower() != "github.com":
+            raise HandoffError("GitHub transport requires a github.com remote URL")
+        repo_path = parsed.path.lstrip("/")
+    if repo_path.endswith(".git"):
+        repo_path = repo_path[:-4]
+    parts = repo_path.strip("/").split("/")
+    if len(parts) != 2 or any(not re.fullmatch(r"[A-Za-z0-9_.-]+", part) for part in parts):
+        raise HandoffError("Unable to derive owner/repository from the GitHub remote URL")
+    repository = "/".join(parts)
+    return repository, f"https://github.com/{repository}"
+
+
+def github_pr_identity(pr_url: str) -> tuple[str, int, str]:
+    parsed = urlparse(pr_url.strip())
+    if parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() != "github.com":
+        raise HandoffError("--github-pr-url must be an https://github.com/<owner>/<repo>/pull/<number> URL")
+    match = re.fullmatch(r"/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)/?", parsed.path)
+    if not match or parsed.params or parsed.query or parsed.fragment:
+        raise HandoffError("--github-pr-url must be an https://github.com/<owner>/<repo>/pull/<number> URL")
+    repository = f"{match.group(1)}/{match.group(2)}"
+    number = int(match.group(3))
+    return repository, number, f"https://github.com/{repository}/pull/{number}"
+
+
+def github_remote_url(root: Path, remote: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9._/-]+", remote):
+        raise HandoffError("--github-remote contains unsupported characters")
+    return str(run_git(root, "config", "--get", f"remote.{remote}.url")).strip()
+
+
+def remote_refs(root: Path, remote: str, pattern: str | None = None) -> dict[str, str]:
+    args = ["ls-remote", "--refs", remote]
+    if pattern:
+        args.append(pattern)
+    try:
+        output = str(run_git(root, *args, timeout_seconds=30))
+    except HandoffError as exc:
+        raise HandoffError(
+            f"Unable to query GitHub remote {remote!r} without interactive authentication"
+        ) from exc
+    refs: dict[str, str] = {}
+    for line in output.splitlines():
+        fields = line.split("\t", 1)
+        if len(fields) != 2 or not re.fullmatch(r"[0-9a-fA-F]{40,64}", fields[0]):
+            raise HandoffError("GitHub remote returned an invalid ref listing")
+        refs[fields[1]] = fields[0].lower()
+    return refs
+
+
+def github_transport_metadata(
+    root: Path,
+    *,
+    git: dict[str, Any],
+    selected: list[SelectedFile],
+    package_tree_hash: str,
+    remote: str,
+    pr_url: str | None,
+) -> dict[str, Any]:
+    remote_url = github_remote_url(root, remote)
+    repository, repository_url = github_repository_from_remote_url(remote_url)
+    head_sha = str(git["head_sha"]).lower()
+
+    mismatched_paths: list[str] = []
+    for item in selected:
+        try:
+            committed = run_git(root, "show", f"{head_sha}:{item.path}", binary=True)
+        except HandoffError:
+            mismatched_paths.append(item.path)
+            continue
+        assert isinstance(committed, bytes)
+        if committed != item.content:
+            mismatched_paths.append(item.path)
+    if mismatched_paths:
+        sample = ", ".join(mismatched_paths[:5])
+        suffix = "" if len(mismatched_paths) <= 5 else f" (+{len(mismatched_paths) - 5} more)"
+        raise HandoffError(
+            "GitHub transport cannot represent selected local-only or dirty content at HEAD: "
+            f"{sample}{suffix}. Commit and push it, or prepare a paste/text-file handoff."
+        )
+
+    canonical_pr_url: str | None = None
+    pr_number: int | None = None
+    if pr_url:
+        pr_repository, pr_number, canonical_pr_url = github_pr_identity(pr_url)
+        if pr_repository.lower() != repository.lower():
+            raise HandoffError("--github-pr-url repository does not match --github-remote")
+        expected_ref = f"refs/pull/{pr_number}/head"
+        refs = remote_refs(root, remote, expected_ref)
+        if refs.get(expected_ref) != head_sha:
+            raise HandoffError("GitHub PR head ref does not resolve to the current HEAD SHA")
+        remote_ref = expected_ref
+    else:
+        refs = remote_refs(root, remote)
+        matching_refs = sorted(
+            ref for ref, sha in refs.items() if sha == head_sha and ref.startswith(("refs/heads/", "refs/tags/"))
+        )
+        if not matching_refs:
+            raise HandoffError(
+                "Current HEAD is not advertised by a GitHub branch or tag. Push it first, "
+                "or provide --github-pr-url for a matching PR head."
+            )
+        remote_ref = matching_refs[0]
+
+    allowed_paths = [item.path for item in sorted(selected, key=lambda value: value.path)]
+    return {
+        "repository": repository,
+        "repository_url": repository_url,
+        "commit_sha": head_sha,
+        "commit_url": f"{repository_url}/commit/{head_sha}",
+        "remote_name": remote,
+        "remote_ref": remote_ref,
+        "pr_number": pr_number,
+        "pr_url": canonical_pr_url,
+        "allowed_paths": allowed_paths,
+        "selected_tree_sha256": package_tree_hash,
+        "remote_verified": True,
     }
 
 
@@ -580,6 +722,7 @@ def render_prompt(
     end_marker: str,
     transport: str,
     context_artifact: str,
+    transport_guidance: str,
 ) -> str:
     skill_root = Path(__file__).resolve().parent.parent
     base_path = skill_root / "templates" / "base-prompt.md.tpl"
@@ -605,6 +748,7 @@ def render_prompt(
         "END_MARKER": end_marker,
         "TRANSPORT": transport,
         "CONTEXT_ARTIFACT": context_artifact,
+        "TRANSPORT_GUIDANCE": transport_guidance.rstrip(),
     }
     for key, value in replacements.items():
         template = template.replace("{{" + key + "}}", value)
@@ -612,6 +756,43 @@ def render_prompt(
     if unresolved:
         raise HandoffError(f"Unresolved prompt template values: {', '.join(sorted(set(unresolved)))}")
     return template.rstrip() + "\n"
+
+
+def github_prompt_guidance(github: dict[str, Any]) -> str:
+    allowed_paths = "\n".join(f"- `{path}`" for path in github["allowed_paths"])
+    pr_line = f"- Pull request: {github['pr_url']}" if github.get("pr_url") else "- Pull request: none"
+    attestation_example = json.dumps(
+        {
+            "status": "accessed",
+            "repository": github["repository"],
+            "commit_sha": github["commit_sha"],
+            "files_read": [github["allowed_paths"][0]],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "\n".join(
+        [
+            "## GitHub context contract",
+            "",
+            "Use the connected GitHub app/plugin to inspect only this immutable repository snapshot:",
+            f"- Repository: `{github['repository']}` ({github['repository_url']})",
+            f"- Commit: `{github['commit_sha']}` ({github['commit_url']})",
+            f"- Verified remote ref: `{github['remote_ref']}`",
+            pr_line,
+            f"- Approved selected-tree SHA-256: `{github['selected_tree_sha256']}`",
+            "- Approved paths:",
+            allowed_paths,
+            "",
+            "Do not silently read another branch, moving ref, commit, repository, or path. The GitHub app may have broader repository-level access, but this prompt authorizes analysis only of the paths above. If the app cannot retrieve the exact commit, return a blocked response instead of inferring content from the prompt, a default branch, search snippets, or prior knowledge.",
+            "",
+            "Inside the response markers, include exactly one single-line attestation beginning `GPTPRO_GITHUB_ATTESTATION: `. For successful access, use compact JSON with status `accessed`, the exact repository and commit above, and a non-empty `files_read` array containing only approved paths. Example:",
+            "",
+            f"`GPTPRO_GITHUB_ATTESTATION: {attestation_example}`",
+            "",
+            "If exact access is blocked, use the same object with status `blocked` and an empty `files_read` array, then explain the visible blocker. This attestation is advisory evidence, not proof by itself.",
+        ]
+    )
 
 
 def public_git_identity(git: dict[str, Any]) -> dict[str, Any]:
@@ -836,19 +1017,69 @@ def create_package(args: argparse.Namespace) -> int:
         end_marker=end_marker,
         transport="paste",
         context_artifact=f"inline text beginning GPTPRO_CONTEXT_BEGIN:{package_id}",
+        transport_guidance=(
+            "Use only the inline structured context in this message. Do not use a connected app, "
+            "another repository snapshot, or prior conversation memory as repository evidence."
+        ),
     )
     candidate_paste_payload = render_paste_payload(paste_prompt, context)
+    github: dict[str, Any] | None = None
     if args.transport == "auto":
-        resolved_transport = (
-            "paste"
-            if len(candidate_paste_payload.encode("utf-8")) <= args.max_paste_bytes
-            else "text-file"
-        )
+        try:
+            github = github_transport_metadata(
+                root,
+                git=git,
+                selected=selected,
+                package_tree_hash=package_tree_hash,
+                remote=args.github_remote,
+                pr_url=args.github_pr_url,
+            )
+            resolved_transport = "github"
+        except HandoffError as exc:
+            if args.github_pr_url:
+                raise
+            resolved_transport = (
+                "paste"
+                if len(candidate_paste_payload.encode("utf-8")) <= args.max_paste_bytes
+                else "text-file"
+            )
+            scan["warnings"].append(
+                f"GitHub-first auto transport was unavailable ({exc}); resolved to {resolved_transport}"
+            )
     else:
         resolved_transport = args.transport
+    if args.github_pr_url and resolved_transport != "github":
+        raise HandoffError("--github-pr-url requires --transport github or auto")
+    if resolved_transport == "github" and github is None:
+        github = github_transport_metadata(
+            root,
+            git=git,
+            selected=selected,
+            package_tree_hash=package_tree_hash,
+            remote=args.github_remote,
+            pr_url=args.github_pr_url,
+        )
     if resolved_transport == "paste":
         prompt = paste_prompt
         paste_payload = candidate_paste_payload
+    elif resolved_transport == "github":
+        assert github is not None
+        prompt = render_prompt(
+            package_id=package_id,
+            mode=args.mode,
+            requested_model=args.requested_model,
+            git=git,
+            package_tree_hash=package_tree_hash,
+            file_count=len(selected),
+            total_bytes=scan["total_bytes"],
+            task=task,
+            begin_marker=begin_marker,
+            end_marker=end_marker,
+            transport="github",
+            context_artifact=f"connected GitHub app at {github['commit_url']}",
+            transport_guidance=github_prompt_guidance(github),
+        )
+        paste_payload = None
     else:
         prompt = render_prompt(
             package_id=package_id,
@@ -863,6 +1094,10 @@ def create_package(args: argparse.Namespace) -> int:
             end_marker=end_marker,
             transport="text-file",
             context_artifact=context_name,
+            transport_guidance=(
+                "Use only the attached structured Markdown context named above. Do not use a connected app, "
+                "another repository snapshot, or prior conversation memory as repository evidence."
+            ),
         )
         paste_payload = None
     file_entries = [item.manifest_entry() for item in selected]
@@ -891,6 +1126,7 @@ def create_package(args: argparse.Namespace) -> int:
         "transport_resolved": resolved_transport,
         "paste_payload_bytes": len(candidate_paste_payload.encode("utf-8")),
         "max_paste_bytes": args.max_paste_bytes,
+        "github": github,
         "warnings": scan["warnings"],
     }
     if args.dry_run:
@@ -937,6 +1173,15 @@ def create_package(args: argparse.Namespace) -> int:
                 "artifact": "paste_payload",
                 "bytes": paste_payload_path.stat().st_size if paste_payload_path else 0,
                 "sha256": hashes["paste_payload_sha256"],
+            }
+        ]
+    elif resolved_transport == "github":
+        outbound_artifacts = [
+            {
+                "role": "message",
+                "artifact": "prompt",
+                "bytes": prompt_path.stat().st_size,
+                "sha256": hashes["prompt_sha256"],
             }
         ]
     else:
@@ -994,6 +1239,7 @@ def create_package(args: argparse.Namespace) -> int:
             "auto_max_paste_bytes": args.max_paste_bytes,
             "candidate_paste_bytes": len(candidate_paste_payload.encode("utf-8")),
             "outbound_artifacts": outbound_artifacts,
+            **({"github": github} if github is not None else {}),
         },
         "artifacts": artifacts,
         "hashes": hashes,
@@ -1040,6 +1286,7 @@ def create_package(args: argparse.Namespace) -> int:
             "git_head_sha": git["head_sha"],
             "transport": resolved_transport,
             "outbound_artifacts": outbound_artifacts,
+            **({"github": github} if github is not None else {}),
         },
     )
     write_json(handoff_dir / "receipt.json", receipt)
@@ -1052,6 +1299,64 @@ def validate_handoff_dir(path_arg: str) -> Path:
     if not path.is_dir():
         raise HandoffError(f"Handoff directory not found: {path}")
     return path
+
+
+def verify_github_manifest(manifest: dict[str, Any], github: Any) -> dict[str, Any]:
+    if not isinstance(github, dict):
+        raise HandoffError("GitHub transport metadata is missing")
+    repository = github.get("repository")
+    repository_url = github.get("repository_url")
+    commit_sha = github.get("commit_sha")
+    commit_url = github.get("commit_url")
+    remote_name = github.get("remote_name")
+    remote_ref = github.get("remote_ref")
+    pr_number = github.get("pr_number")
+    pr_url = github.get("pr_url")
+    allowed_paths = github.get("allowed_paths")
+    selected_tree = github.get("selected_tree_sha256")
+    if not isinstance(repository, str) or not re.fullmatch(
+        r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository
+    ):
+        raise HandoffError("GitHub repository identity is invalid")
+    expected_repository_url = f"https://github.com/{repository}"
+    if repository_url != expected_repository_url:
+        raise HandoffError("GitHub repository URL does not match repository identity")
+    git = manifest.get("git", {})
+    hashes = manifest.get("hashes", {})
+    if commit_sha != str(git.get("head_sha", "")).lower() or not re.fullmatch(
+        r"[0-9a-f]{40,64}", str(commit_sha)
+    ):
+        raise HandoffError("GitHub commit does not match the packaged Git HEAD")
+    if commit_url != f"{repository_url}/commit/{commit_sha}":
+        raise HandoffError("GitHub commit URL is invalid")
+    if not isinstance(remote_name, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", remote_name):
+        raise HandoffError("GitHub remote name is invalid")
+    if not isinstance(remote_ref, str) or not remote_ref.startswith(
+        ("refs/heads/", "refs/tags/", "refs/pull/")
+    ):
+        raise HandoffError("GitHub remote ref is invalid")
+    if github.get("remote_verified") is not True:
+        raise HandoffError("GitHub remote verification flag is missing")
+    expected_paths = [entry.get("path") for entry in manifest.get("files", [])]
+    if allowed_paths != expected_paths or not all(isinstance(path, str) for path in expected_paths):
+        raise HandoffError("GitHub allowed paths do not match the packaged file list")
+    if selected_tree != hashes.get("packaged_tree_sha256"):
+        raise HandoffError("GitHub selected-tree identity does not match the package")
+    if pr_url is None:
+        if pr_number is not None or remote_ref.startswith("refs/pull/"):
+            raise HandoffError("GitHub PR identity is inconsistent")
+    else:
+        if not isinstance(pr_number, int):
+            raise HandoffError("GitHub PR number is invalid")
+        pr_repository, parsed_number, canonical_url = github_pr_identity(str(pr_url))
+        if (
+            pr_repository.lower() != repository.lower()
+            or parsed_number != pr_number
+            or canonical_url != pr_url
+            or remote_ref != f"refs/pull/{pr_number}/head"
+        ):
+            raise HandoffError("GitHub PR identity is inconsistent")
+    return github
 
 
 def verify_package(handoff_dir: Path) -> dict[str, Any]:
@@ -1112,7 +1417,7 @@ def verify_package(handoff_dir: Path) -> dict[str, Any]:
         paste_payload_path = artifact_path("paste_payload")
         expected_hashes["paste_payload_sha256"] = sha256_file(paste_payload_path)
     elif "paste_payload" in artifacts or "paste_payload_sha256" in hashes:
-        raise HandoffError("Text-file transport must not declare a paste payload")
+        raise HandoffError("Non-paste transport must not declare a paste payload")
     for key, value in expected_hashes.items():
         if key == "manifest_sha256":
             continue
@@ -1146,7 +1451,11 @@ def verify_package(handoff_dir: Path) -> dict[str, Any]:
     outbound = transport.get("outbound_artifacts")
     if not isinstance(outbound, list) or not outbound:
         raise HandoffError("Transport outbound artifact list is invalid")
-    expected_outbound_keys = ["paste_payload"] if resolved_transport == "paste" else ["prompt", "context"]
+    expected_outbound_keys = {
+        "paste": ["paste_payload"],
+        "github": ["prompt"],
+        "text-file": ["prompt", "context"],
+    }[resolved_transport]
     actual_outbound_keys = [item.get("artifact") for item in outbound if isinstance(item, dict)]
     if actual_outbound_keys != expected_outbound_keys or len(actual_outbound_keys) != len(outbound):
         raise HandoffError("Transport outbound artifact set does not match the resolved transport")
@@ -1156,6 +1465,12 @@ def verify_package(handoff_dir: Path) -> dict[str, Any]:
         hash_key = f"{artifact_key}_sha256"
         if item.get("sha256") != hashes.get(hash_key) or item.get("bytes") != path.stat().st_size:
             raise HandoffError(f"Transport metadata mismatch: {artifact_key}")
+
+    github = transport.get("github")
+    if resolved_transport == "github":
+        verify_github_manifest(manifest, github)
+    elif github is not None:
+        raise HandoffError("Non-GitHub transport must not declare GitHub metadata")
 
     if PHASES.index(state["phase"]) >= PHASES.index("response_imported"):
         response_state = state.get("response")
@@ -1299,6 +1614,7 @@ def human_handoff_instructions(
     requested_model: str,
     outbound_paths: list[dict[str, Any]],
     response_markers: dict[str, str],
+    github: dict[str, Any] | None,
 ) -> tuple[str, list[str], list[str], dict[str, Any]]:
     approved_paths = [item["path"] for item in outbound_paths]
     common_return = ["what was visibly observed", "whether the requested action was completed, declined, or blocked"]
@@ -1325,10 +1641,16 @@ def human_handoff_instructions(
             {"allowed_outcomes": ["completed", "declined", "blocked"], "automatic_retry_allowed": True},
         )
     if reason == "app-authorization":
+        github_scope = (
+            f" Scope must include `{github['repository']}`; the approved commit is `{github['commit_sha']}`."
+            if github
+            else ""
+        )
         return (
             "Connecting GitHub or another ChatGPT app is an OAuth and repository-scope decision owned by the user.",
             [
-                "Review the visible app name, account, organization, requested permissions, and repository scope.",
+                "Review the visible app name, account, organization, requested permissions, and repository scope."
+                + github_scope,
                 "Approve or decline the connection yourself; prefer only the repositories needed for this task.",
                 "Return when the intended app is visibly connected or when you decide not to connect it; do not submit the handoff.",
             ],
@@ -1402,6 +1724,17 @@ def human_handoff_instructions(
         ]
         if transport == "paste":
             steps.append(f"Paste the complete contents of the one approved message file: {approved_paths[0]}.")
+        elif transport == "github":
+            if github is None:
+                raise HandoffError("GitHub transport metadata is missing")
+            steps.extend(
+                [
+                    f"Confirm the connected GitHub app/plugin can access only the intended scope including `{github['repository']}`.",
+                    "Activate the visible GitHub app/plugin for this Chat; return for user authorization if connection or scope is requested.",
+                    f"Paste the complete contents of the one approved prompt file: {approved_paths[0]}.",
+                    f"Verify the prompt names repository `{github['repository']}` and immutable commit `{github['commit_sha']}`; attach no local file.",
+                ]
+            )
         else:
             prompt_paths = [item["path"] for item in outbound_paths if item.get("role") == "message"]
             attachment_paths = [item["path"] for item in outbound_paths if item.get("role") == "attachment"]
@@ -1496,6 +1829,7 @@ def command_status(args: argparse.Namespace) -> int:
         "totals": manifest["totals"],
         "security_findings": manifest["security_findings"],
         "warnings": manifest["warnings"],
+        "response": state.get("response"),
         "human_takeover": {
             "available": bool(human_handoff_reasons_for(state["phase"], manifest["transport"]["resolved"])),
             "read_only": True,
@@ -1527,6 +1861,7 @@ def command_human_handoff(args: argparse.Namespace) -> int:
         requested_model=str(manifest["requested_model"]),
         outbound_paths=outbound_paths,
         response_markers=manifest["response_markers"],
+        github=manifest["transport"].get("github"),
     )
     payload = {
         "status": "human_action_required",
@@ -1577,6 +1912,7 @@ def command_approve(args: argparse.Namespace) -> int:
         "manifest_sha256": verified["manifest_sha256"],
         "transport": verified["manifest"]["transport"]["resolved"],
         "outbound_artifacts": verified["outbound_artifacts"],
+        "github": verified["manifest"]["transport"].get("github"),
     }
     state["phase"] = "approved"
     state["updated_at"] = approval["approved_at"]
@@ -1610,6 +1946,16 @@ def command_mark_submitted(args: argparse.Namespace) -> int:
             "Observed model/Pro setting does not match the approved manifest; "
             "prepare a new package with an approved --requested-model instead of downgrading"
         )
+    github = verified["manifest"]["transport"].get("github")
+    if approved_transport == "github":
+        if not isinstance(github, dict):
+            raise HandoffError("GitHub transport metadata is missing")
+        if args.observed_github_repository != github["repository"]:
+            raise HandoffError("Observed GitHub repository does not match the approved manifest")
+        if args.observed_github_commit != github["commit_sha"]:
+            raise HandoffError("Observed GitHub commit does not match the approved manifest")
+    elif args.observed_github_repository or args.observed_github_commit:
+        raise HandoffError("Observed GitHub identity applies only to the github transport")
     submission = {
         "submitted_at": utc_now(),
         "destination": verified["manifest"]["destination"],
@@ -1617,6 +1963,7 @@ def command_mark_submitted(args: argparse.Namespace) -> int:
         "transport": approved_transport,
         "outbound_artifacts": verified["outbound_artifacts"],
         "thread_url": args.thread_url or None,
+        "github": github,
     }
     state["phase"] = "submitted"
     state["updated_at"] = submission["submitted_at"]
@@ -1644,6 +1991,39 @@ def extract_response(raw: str, begin: str, end: str) -> str:
     return content + "\n"
 
 
+def github_response_attestation(response: str, github: dict[str, Any]) -> dict[str, Any]:
+    prefix = "GPTPRO_GITHUB_ATTESTATION: "
+    matches = [line[len(prefix) :] for line in response.splitlines() if line.startswith(prefix)]
+    if len(matches) != 1:
+        raise HandoffError("GitHub response must contain exactly one GPTPRO_GITHUB_ATTESTATION line")
+    try:
+        attestation = json.loads(matches[0])
+    except json.JSONDecodeError as exc:
+        raise HandoffError("GitHub response attestation must contain valid compact JSON") from exc
+    if not isinstance(attestation, dict):
+        raise HandoffError("GitHub response attestation must be a JSON object")
+    status = attestation.get("status")
+    files_read = attestation.get("files_read")
+    if status not in {"accessed", "blocked"}:
+        raise HandoffError("GitHub response attestation status must be accessed or blocked")
+    if attestation.get("repository") != github["repository"]:
+        raise HandoffError("GitHub response repository does not match the approved manifest")
+    if attestation.get("commit_sha") != github["commit_sha"]:
+        raise HandoffError("GitHub response commit does not match the approved manifest")
+    if not isinstance(files_read, list) or any(not isinstance(path, str) for path in files_read):
+        raise HandoffError("GitHub response files_read must be an array of paths")
+    if len(files_read) != len(set(files_read)):
+        raise HandoffError("GitHub response files_read contains duplicates")
+    disallowed = sorted(set(files_read) - set(github["allowed_paths"]))
+    if disallowed:
+        raise HandoffError(f"GitHub response cites paths outside the approved selection: {', '.join(disallowed)}")
+    if status == "accessed" and not files_read:
+        raise HandoffError("An accessed GitHub response must list at least one approved file")
+    if status == "blocked" and files_read:
+        raise HandoffError("A blocked GitHub response must not claim files were read")
+    return attestation
+
+
 def command_import_response(args: argparse.Namespace) -> int:
     handoff_dir = validate_handoff_dir(args.handoff_dir)
     verified = verify_package(handoff_dir)
@@ -1655,6 +2035,8 @@ def command_import_response(args: argparse.Namespace) -> int:
         raise HandoffError(f"Unable to read response file: {exc}") from exc
     markers = verified["manifest"]["response_markers"]
     response = extract_response(raw, markers["begin"], markers["end"])
+    github = verified["manifest"]["transport"].get("github")
+    attestation = github_response_attestation(response, github) if isinstance(github, dict) else None
     raw_path = handoff_dir / "raw_response.md"
     response_path = handoff_dir / "response.md"
     atomic_write(raw_path, raw.encode("utf-8"))
@@ -1663,6 +2045,7 @@ def command_import_response(args: argparse.Namespace) -> int:
         "imported_at": utc_now(),
         "raw_response_sha256": sha256_file(raw_path),
         "response_sha256": sha256_file(response_path),
+        "github_attestation": attestation,
     }
     state["phase"] = "response_imported"
     state["updated_at"] = response_state["imported_at"]
@@ -1754,7 +2137,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--transport",
         choices=TRANSPORTS,
         default="auto",
-        help="Pro handoff transport; auto selects paste or a Markdown attachment",
+        help="Pro handoff transport; auto prefers a verified GitHub snapshot, then paste or Markdown",
+    )
+    prepare.add_argument(
+        "--github-remote",
+        default="origin",
+        help="Git remote whose github.com repository and advertised refs are verified for github transport",
+    )
+    prepare.add_argument(
+        "--github-pr-url",
+        help="Optional immutable-head PR locator for github transport",
     )
     prepare.add_argument("--include", action="append", default=[], help="Workspace-relative glob; repeatable")
     prepare.add_argument("--exclude", action="append", default=[], help="Workspace-relative glob; repeatable")
@@ -1767,7 +2159,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-paste-bytes",
         type=positive_int,
         default=DEFAULT_MAX_PASTE_BYTES,
-        help="Skill policy threshold used only when --transport auto",
+        help="Fallback threshold used when GitHub-first --transport auto is unavailable",
     )
     prepare.add_argument("--require-clean", action="store_true")
     prepare.add_argument("--dry-run", action="store_true")
@@ -1805,6 +2197,8 @@ def build_parser() -> argparse.ArgumentParser:
     submitted.add_argument("--handoff-dir", required=True)
     submitted.add_argument("--observed-model", required=True)
     submitted.add_argument("--observed-transport", choices=TRANSPORTS[1:], required=True)
+    submitted.add_argument("--observed-github-repository")
+    submitted.add_argument("--observed-github-commit")
     submitted.add_argument("--thread-url")
     submitted.add_argument("--confirm-sent", action="store_true")
     submitted.set_defaults(func=command_mark_submitted)

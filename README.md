@@ -30,7 +30,7 @@
 
 | Skill | Best for |
 |---|---|
-| `gptpro` | 첫 사용 환경 구성 후 로그인된 ChatGPT Pro와 승인된 repo handoff를 수행하며 필요 시 안전한 사람 takeover로 재개 |
+| `gptpro` | 검증된 GitHub SHA를 우선 사용해 로그인된 ChatGPT Pro와 승인된 repo handoff를 수행하고 필요 시 안전한 사람 takeover로 재개 |
 | `goal-research-loop` | 새 목표 지향 반복 연구 루프 설계·운영 |
 | `codex-research` | 기존 `.codex-research/` runner 상태 재개·점검 |
 | `hey-codex` | 명시 요청 시 별도 Codex CLI 인스턴스 실행 |

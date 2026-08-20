@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ import zipfile
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "gptpro.py"
+STRUCTURE_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "validate_structure.py"
 
 
 class GptProCliTests(unittest.TestCase):
@@ -54,6 +56,23 @@ class GptProCliTests(unittest.TestCase):
         self.assertEqual(expected, result.returncode, msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}")
         return result
 
+    def configure_github_remote(self, *, pr_number: int | None = None) -> Path:
+        remote = self.root / "remote.git"
+        subprocess.run(
+            ["git", "init", "--bare", str(remote)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        github_url = "https://github.com/example/repository.git"
+        self.git("config", "remote.origin.url", github_url)
+        self.git("config", f"url.{remote.resolve().as_uri()}.insteadOf", github_url)
+        self.git("push", "origin", "HEAD:refs/heads/main")
+        if pr_number is not None:
+            self.git("push", "origin", f"HEAD:refs/pull/{pr_number}/head")
+        return remote
+
     def prepare(self, mode: str = "review", *extra: str) -> Path:
         result = self.run_cli(
             "prepare",
@@ -82,6 +101,17 @@ class GptProCliTests(unittest.TestCase):
             "user",
             "--confirm-transmission",
         )
+        github = manifest["transport"].get("github")
+        github_args = (
+            [
+                "--observed-github-repository",
+                github["repository"],
+                "--observed-github-commit",
+                github["commit_sha"],
+            ]
+            if github
+            else []
+        )
         self.run_cli(
             "mark-submitted",
             "--handoff-dir",
@@ -91,6 +121,7 @@ class GptProCliTests(unittest.TestCase):
             "--observed-transport",
             manifest["transport"]["resolved"],
             "--confirm-sent",
+            *github_args,
         )
         return manifest
 
@@ -374,6 +405,206 @@ class GptProCliTests(unittest.TestCase):
         self.assertEqual(["prompt", "context"], [item["artifact"] for item in status["outbound_paths"]])
         self.assertIsNone(status["paste_payload_path"])
 
+    def test_auto_transport_prefers_verified_github_snapshot(self) -> None:
+        self.configure_github_remote()
+        handoff = self.prepare("review", "--include", "src/**")
+        manifest = self.load(handoff / "manifest.json")
+
+        self.assertEqual("auto", manifest["transport"]["requested"])
+        self.assertEqual("github", manifest["transport"]["resolved"])
+        self.assertEqual(self.head, manifest["transport"]["github"]["commit_sha"])
+        self.assertEqual(
+            ["prompt"],
+            [item["artifact"] for item in manifest["transport"]["outbound_artifacts"]],
+        )
+
+    def test_auto_transport_records_github_fallback_reason(self) -> None:
+        handoff = self.prepare("ask")
+        manifest = self.load(handoff / "manifest.json")
+
+        self.assertEqual("paste", manifest["transport"]["resolved"])
+        self.assertTrue(any("GitHub-first auto transport was unavailable" in item for item in manifest["warnings"]))
+
+    def test_github_transport_pins_remote_commit_and_sends_only_prompt(self) -> None:
+        self.configure_github_remote(pr_number=17)
+        handoff = self.prepare(
+            "review",
+            "--transport",
+            "github",
+            "--github-pr-url",
+            "https://github.com/example/repository/pull/17",
+            "--include",
+            "src/**",
+        )
+        manifest = self.load(handoff / "manifest.json")
+        status = json.loads(self.run_cli("status", "--handoff-dir", str(handoff)).stdout)
+        github = manifest["transport"]["github"]
+
+        self.assertEqual("github", manifest["transport"]["resolved"])
+        self.assertEqual("example/repository", github["repository"])
+        self.assertEqual(self.head, github["commit_sha"])
+        self.assertEqual("refs/pull/17/head", github["remote_ref"])
+        self.assertEqual(["src/main.py"], github["allowed_paths"])
+        self.assertTrue(github["remote_verified"])
+        self.assertEqual(["prompt"], [item["artifact"] for item in status["outbound_paths"]])
+        self.assertIsNone(status["paste_payload_path"])
+        prompt = (handoff / "prompt.md").read_text(encoding="utf-8")
+        self.assertIn(self.head, prompt)
+        self.assertIn("example/repository", prompt)
+        self.assertIn("GPTPRO_GITHUB_ATTESTATION", prompt)
+        self.assertNotIn("def answer():", prompt)
+
+    def test_github_transport_rejects_selected_dirty_or_unpushed_content(self) -> None:
+        self.configure_github_remote()
+        (self.repo / "src" / "main.py").write_text("def answer():\n    return 43\n", encoding="utf-8")
+        result = self.run_cli(
+            "prepare",
+            "--repo",
+            str(self.repo),
+            "--mode",
+            "review",
+            "--task",
+            "Review selected code.",
+            "--output-root",
+            str(self.output_root),
+            "--transport",
+            "github",
+            "--include",
+            "src/**",
+            expected=2,
+        )
+        self.assertIn("cannot represent selected local-only or dirty content", result.stderr)
+
+        self.git("add", "src/main.py")
+        self.git("commit", "-m", "not pushed")
+        result = self.run_cli(
+            "prepare",
+            "--repo",
+            str(self.repo),
+            "--mode",
+            "review",
+            "--task",
+            "Review selected code.",
+            "--output-root",
+            str(self.output_root),
+            "--transport",
+            "github",
+            "--include",
+            "src/**",
+            expected=2,
+        )
+        self.assertIn("not advertised by a GitHub branch or tag", result.stderr)
+
+    def test_github_submission_and_response_require_pinned_identity(self) -> None:
+        self.configure_github_remote()
+        handoff = self.prepare("debug", "--transport", "github", "--include", "src/**")
+        manifest = self.load(handoff / "manifest.json")
+        github = manifest["transport"]["github"]
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(handoff),
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        self.run_cli(
+            "mark-submitted",
+            "--handoff-dir",
+            str(handoff),
+            "--observed-model",
+            manifest["requested_model"],
+            "--observed-transport",
+            "github",
+            "--observed-github-repository",
+            github["repository"],
+            "--observed-github-commit",
+            "0" * 40,
+            "--confirm-sent",
+            expected=2,
+        )
+        self.run_cli(
+            "mark-submitted",
+            "--handoff-dir",
+            str(handoff),
+            "--observed-model",
+            manifest["requested_model"],
+            "--observed-transport",
+            "github",
+            "--observed-github-repository",
+            github["repository"],
+            "--observed-github-commit",
+            github["commit_sha"],
+            "--confirm-sent",
+        )
+        markers = manifest["response_markers"]
+        response_file = self.root / "github-response.md"
+        response_file.write_text(
+            f"{markers['begin']}\n"
+            "GPTPRO_GITHUB_ATTESTATION: "
+            + json.dumps(
+                {
+                    "status": "accessed",
+                    "repository": github["repository"],
+                    "commit_sha": github["commit_sha"],
+                    "files_read": ["src/main.py"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + f"\nPinned analysis.\n{markers['end']}\n",
+            encoding="utf-8",
+        )
+        self.run_cli(
+            "import-response",
+            "--handoff-dir",
+            str(handoff),
+            "--response-file",
+            str(response_file),
+        )
+        state = self.load(handoff / "state.json")
+        self.assertEqual("accessed", state["response"]["github_attestation"]["status"])
+        self.assertEqual(["src/main.py"], state["response"]["github_attestation"]["files_read"])
+
+    def test_github_human_handoff_names_app_scope_and_prompt_only(self) -> None:
+        self.configure_github_remote()
+        handoff = self.prepare("review", "--transport", "github", "--include", "src/**")
+        manifest = self.load(handoff / "manifest.json")
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(handoff),
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+
+        authorization = json.loads(
+            self.run_cli(
+                "human-handoff",
+                "--handoff-dir",
+                str(handoff),
+                "--reason",
+                "app-authorization",
+            ).stdout
+        )
+        manual = json.loads(
+            self.run_cli(
+                "human-handoff",
+                "--handoff-dir",
+                str(handoff),
+                "--reason",
+                "manual-transport",
+            ).stdout
+        )
+        authorization_text = "\n".join(authorization["human_steps"])
+        manual_text = "\n".join(manual["human_steps"])
+        self.assertIn(manifest["transport"]["github"]["repository"], authorization_text)
+        self.assertIn(manifest["transport"]["github"]["commit_sha"], authorization_text)
+        self.assertIn("Activate the visible GitHub app/plugin", manual_text)
+        self.assertIn("attach no local file", manual_text)
+        self.assertEqual(["prompt"], [item["artifact"] for item in manual["outbound_paths"]])
+
     def test_text_context_contains_selected_files_without_local_absolute_paths(self) -> None:
         file_list = self.root / "selected-files.txt"
         file_list.write_text("src/main.py\n", encoding="utf-8")
@@ -608,6 +839,50 @@ class GptProCliTests(unittest.TestCase):
         )
         manifest = self.load(Path(json.loads(second.stdout)["handoff_dir"]) / "manifest.json")
         self.assertFalse(any(item["path"].startswith("handoffs/") for item in manifest["files"]))
+
+
+class GptProStructureTests(unittest.TestCase):
+    def test_dependency_free_validator_checks_standalone_and_plugin_mirror(self) -> None:
+        skill_root = Path(__file__).resolve().parents[1]
+        repository_root = skill_root.parent
+        mirror = repository_root / "plugins" / "gptpro" / "skills" / "gptpro"
+        result = subprocess.run(
+            [
+                "python3",
+                str(STRUCTURE_SCRIPT),
+                "--skill-dir",
+                str(skill_root),
+                "--mirror",
+                str(mirror),
+                "--json",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["valid"])
+        self.assertIn("standalone-plugin-mirror", payload["checks"])
+
+    def test_dependency_free_validator_reports_missing_required_file(self) -> None:
+        skill_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp:
+            damaged = Path(temp) / "gptpro"
+            shutil.copytree(skill_root, damaged, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            (damaged / "references" / "security.md").unlink()
+            result = subprocess.run(
+                ["python3", str(damaged / "scripts" / "validate_structure.py"), "--json"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        self.assertEqual(1, result.returncode)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["valid"])
+        self.assertIn("Required file missing: references/security.md", payload["errors"])
 
 
 if __name__ == "__main__":

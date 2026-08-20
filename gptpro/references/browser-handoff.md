@@ -10,6 +10,7 @@ This stage is attended browser work. Local scripts intentionally stop at verifie
 4. Start a new **general Chat**, not Work, a Project, a custom GPT, or an existing unrelated conversation.
 5. Select the exact requested model and Pro/Intelligence setting recorded by `status`. If the controls are unavailable or ambiguous, stop for user direction; do not silently downgrade.
 6. Perform exactly one approved transport:
+   - `github`: activate the connected GitHub app/plugin, then paste the complete `prompt_path` content. Attach no local file. Confirm the visible prompt names the approved repository, immutable commit, optional PR, and selected paths. Follow [github-transport.md](github-transport.md).
    - `paste`: paste the complete `paste_payload_path` content into the message composer. Do not attach a file.
    - `text-file`: attach the exact `context_path`, then paste the exact `prompt_path` content into the message composer.
 7. Verify the requested model/setting, package ID, context begin/end markers, and either the complete pasted payload or exact Markdown attachment name are visibly present. Submit once.
@@ -21,11 +22,11 @@ Browser control is not required to complete this stage. When credentials, OAuth/
 
 ## Transport failure rule
 
-Do not switch from `text-file` to `paste`, from `paste` to `text-file`, or to ZIP after an upload/paste failure. A transport change alters the approved outbound artifact set. Prepare a new handoff with the desired `--transport`, show its new hashes, and obtain a new approval.
+Do not switch among `github`, `text-file`, or `paste`, or to ZIP after an app/upload/paste failure. A transport change alters the approved outbound artifact set and disclosure. Prepare a new handoff with the desired `--transport`, show its new hashes, and obtain a new approval.
 
 ## Approval and permissions
 
-ChatGPT's Chrome integration normally asks before interacting with a new site. Use the narrowest site permission suitable for `chatgpt.com`. The `text-file` path may require enabling **Allow access to file URLs** for the Codex Chrome extension; OpenAI's [Chrome extension guide](https://learn.chatgpt.com/docs/chrome-extension) documents that local-file requirement. Direct `paste` avoids local-file upload permissions.
+ChatGPT's Chrome integration normally asks before interacting with a new site. Use the narrowest site permission suitable for `chatgpt.com`. The `github` path may separately require the user to connect the GitHub app/plugin and approve repository scope; OpenAI's [Plugins documentation](https://learn.chatgpt.com/docs/plugins) explains that external services may require a connection before their tools become available. The `text-file` path may require enabling **Allow access to file URLs** for the Codex Chrome extension; OpenAI's [Chrome extension guide](https://learn.chatgpt.com/docs/chrome-extension) documents that local-file requirement. Direct `paste` avoids local-file upload permissions.
 
 Never ask the user to choose global all-site access just to complete this handoff. Never enter credentials, solve CAPTCHAs, disable browser security, or read unrelated tabs/history.
 
@@ -42,7 +43,7 @@ python3 <skill-dir>/scripts/gptpro.py human-handoff \
 The generated checklist provides the user:
 
 - resolved transport and `outbound_paths`
-- `paste_payload_path`, or `prompt_path` plus `context_path`
+- `prompt_path` plus pinned GitHub identity, `paste_payload_path`, or `prompt_path` plus `context_path`
 - requested model/Pro setting
 - exact response markers
 

@@ -51,10 +51,12 @@ Useful safeguards:
 - `--max-file-bytes`: exclude oversized individual files.
 - `--dry-run`: scan and summarize without writing a package.
 - `--requested-model`: record a user-approved alternative when the default visible ChatGPT Pro selection is not appropriate.
-- `--transport auto|paste|text-file`: choose the browser handoff. `auto` is the default.
-- `--max-paste-bytes`: set the conservative auto-selection threshold; the default 128 KiB is Skill policy, not a published ChatGPT limit.
+- `--transport auto|github|paste|text-file`: choose the browser handoff. `auto` is the GitHub-first default.
+- `--github-remote`: choose the GitHub remote verified by `auto` or `github`; default `origin`.
+- `--github-pr-url`: pin an optional GitHub PR whose remote head ref must equal current HEAD. A mismatch fails even under `auto`.
+- `--max-paste-bytes`: set the conservative fallback threshold when GitHub-first `auto` is unavailable; the default 128 KiB is Skill policy, not a published ChatGPT limit.
 
-Preparation records both `git.head_sha` and a hash of the actual packaged file set. A dirty package is not represented as the HEAD commit; dirty paths and the package tree hash remain explicit. Only valid UTF-8 files enter the text context. The generated ZIP remains local audit evidence and is not a default Pro upload.
+Preparation records both `git.head_sha` and a hash of the actual packaged file set. `auto` first attempts `github`; it succeeds only when every selected byte matches HEAD and that SHA is advertised by the chosen github.com remote. Otherwise it records the reason and resolves to `paste` or `text-file`. Explicit `github` never falls back. A dirty text package is not represented as the HEAD commit; dirty paths and the package tree hash remain explicit. Only valid UTF-8 files enter the text context. The generated ZIP remains local audit evidence and is not a default Pro upload. Read [github-transport.md](github-transport.md) for the remote and response-attestation contract.
 
 When an in-repository output root is not ignored, `prepare` adds a warning pointing to `init`; it does not change Git configuration automatically.
 
@@ -78,7 +80,7 @@ python3 <skill-dir>/scripts/gptpro.py approve \
   --confirm-transmission
 ```
 
-Approval binds to the manifest, resolved transport, and exact outbound artifact hashes. Any later artifact change makes verification fail and invalidates progression.
+Approval binds to the manifest, resolved transport, and exact outbound artifact hashes. For `github`, the manifest also binds the repository, immutable commit, optional PR locator, verified remote ref, and selected path set; only `prompt.md` is outbound. Any later artifact change makes verification fail and invalidates progression.
 
 ## Human checkpoint
 
@@ -108,6 +110,8 @@ python3 <skill-dir>/scripts/gptpro.py mark-submitted \
   --thread-url "https://chatgpt.com/c/<id>"
 ```
 
+For `github`, use `--observed-transport github` and also provide the exact approved `--observed-github-repository owner/repo` and `--observed-github-commit <sha>`. The command rejects identity drift.
+
 Omit `--thread-url` if the user does not want the URL recorded. Never mark an ambiguous or failed send as submitted. If a transport fails, prepare and approve a new handoff instead of silently falling back.
 
 ## Import
@@ -120,7 +124,7 @@ python3 <skill-dir>/scripts/gptpro.py import-response \
   --response-file /path/to/chatgpt-response.md
 ```
 
-The importer rejects missing, duplicated, reversed, or foreign-package markers. It writes `raw_response.md` and the marker-stripped `response.md`.
+The importer rejects missing, duplicated, reversed, or foreign-package markers. A GitHub response must additionally contain the package-requested `GPTPRO_GITHUB_ATTESTATION` with the exact repository/commit and either a non-empty approved `files_read` set or a truthful `blocked` status. It writes `raw_response.md` and the marker-stripped `response.md`.
 
 ## Evaluate
 

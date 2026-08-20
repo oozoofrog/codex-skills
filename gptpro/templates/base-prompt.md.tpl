@@ -10,6 +10,8 @@ Included context: {{FILE_COUNT}} files / {{TOTAL_BYTES}} bytes
 Approved transport: `{{TRANSPORT}}`
 Repository context: `{{CONTEXT_ARTIFACT}}`
 
+{{TRANSPORT_GUIDANCE}}
+
 ## Task
 
 {{TASK}}

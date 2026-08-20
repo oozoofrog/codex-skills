@@ -14,17 +14,17 @@ Important fields:
 - `security_findings`: path, detector, optional line, and exclusion action; never a secret value
 - `totals`: candidate, included, excluded, omitted, and byte counts
 - `response_markers`: package-specific begin/end lines
-- `transport`: requested/resolved transport, auto threshold, candidate paste size, and the exact outbound artifact list
+- `transport`: requested/resolved transport, auto threshold, candidate paste size, exact outbound artifact list, and optional GitHub identity
 - `artifacts`: generated prompt, structured context, optional paste payload, local audit archive, state, and receipt filenames
 - `hashes`: packaged tree, prompt, context, optional paste payload, local archive, and internal-manifest SHA-256 values
 
 The external manifest is authoritative for local verification. `context-<id>.md` carries package/context markers, sanitized Git and selection metadata, and every selected UTF-8 file. It omits the local absolute repository root and local file-list path.
 
-For `paste`, the only outbound artifact is `paste-<id>.md`, which deterministically combines the prompt and structured context. For `text-file`, the outbound artifacts are `prompt.md` and `context-<id>.md`. The ZIP contains `_gptpro/file-manifest.json` and exact source bytes for local integrity/audit, but is not in the default outbound list.
+For `github`, the only outbound artifact is `prompt.md`. `transport.github` records canonical repository/commit URLs, immutable commit SHA, verified remote/ref, optional PR identity, exact allowed paths, selected-tree hash, and preparation-time remote verification. For `paste`, the only outbound artifact is `paste-<id>.md`, which deterministically combines the prompt and structured context. For `text-file`, the outbound artifacts are `prompt.md` and `context-<id>.md`. The ZIP contains `_gptpro/file-manifest.json` and exact source bytes for local integrity/audit, but is not in the default outbound list.
 
 ## `state.json`
 
-Records the current lifecycle phase and phase-specific metadata. Artifact hashes copied into the state bind later approval and response events to the prepared package. Approval and submission events also record the resolved transport and exact outbound artifact metadata.
+Records the current lifecycle phase and phase-specific metadata. Artifact hashes copied into the state bind later approval and response events to the prepared package. Approval and submission events also record the resolved transport and exact outbound artifact metadata. GitHub submissions additionally record the approved/observed repository identity; imported GitHub responses store the parsed attestation.
 
 ## `receipt.json`
 
