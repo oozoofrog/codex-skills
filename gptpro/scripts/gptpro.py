@@ -23,6 +23,7 @@ from typing import Any
 SCHEMA_VERSION = 2
 MODES = ("plan", "ask", "review", "debug", "architecture")
 TRANSPORTS = ("auto", "paste", "text-file")
+IGNORE_SCOPES = ("local", "repository", "none")
 PHASES = ("prepared", "approved", "submitted", "response_imported", "evaluated")
 DEFAULT_REQUESTED_MODEL = "ChatGPT Pro / GPT-5.6 Sol / Intelligence: Pro"
 DESTINATION = "https://chatgpt.com/"
@@ -30,6 +31,7 @@ DEFAULT_MAX_FILES = 2_000
 DEFAULT_MAX_BYTES = 25 * 1024 * 1024
 DEFAULT_MAX_FILE_BYTES = 2 * 1024 * 1024
 DEFAULT_MAX_PASTE_BYTES = 128 * 1024
+IGNORE_COMMENT = "# gptpro local handoff artifacts"
 
 EXCLUDED_DIR_NAMES = {
     ".git",
@@ -209,6 +211,140 @@ def resolve_git_root(repo_arg: str) -> Path:
     if not root.is_dir():
         raise HandoffError(f"Git root not found: {root}")
     return root
+
+
+def resolve_output_root(root: Path, output_arg: str | None) -> tuple[Path, str | None]:
+    output_root = (
+        Path(output_arg).expanduser().resolve()
+        if output_arg
+        else root / ".gptpro" / "handoffs"
+    )
+    try:
+        output_rel = output_root.relative_to(root).as_posix()
+    except ValueError:
+        output_rel = None
+    if output_rel == ".":
+        raise HandoffError("--output-root must not be the repository root")
+    return output_root, output_rel
+
+
+def git_ignore_match(root: Path, rel_path: str) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(root), "check-ignore", "-v", "--no-index", "--", rel_path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return result.stdout.strip()
+    if result.returncode == 1:
+        return None
+    raise HandoffError(result.stderr.strip() or "git check-ignore failed")
+
+
+def git_local_exclude_path(root: Path) -> Path:
+    raw = Path(str(run_git(root, "rev-parse", "--git-path", "info/exclude")).strip())
+    return (raw if raw.is_absolute() else root / raw).resolve()
+
+
+def ignore_entry_for(output_rel: str) -> str:
+    if output_rel == ".gptpro" or output_rel.startswith(".gptpro/"):
+        return ".gptpro/"
+    return output_rel.rstrip("/") + "/"
+
+
+def append_ignore_entry(path: Path, entry: str) -> None:
+    if path.is_symlink():
+        raise HandoffError(f"Refusing to replace symlinked ignore file: {path}")
+    try:
+        existed = path.exists()
+        existing = path.read_bytes() if existed else b""
+        mode = path.stat().st_mode & 0o7777 if existed else 0o644
+    except OSError as exc:
+        raise HandoffError(f"Unable to read ignore file {path}: {exc}") from exc
+    separator = b"" if not existing or existing.endswith(b"\n") else b"\n"
+    block = f"{IGNORE_COMMENT}\n{entry}\n".encode()
+    try:
+        atomic_write(path, existing + separator + block)
+        path.chmod(mode)
+    except OSError as exc:
+        raise HandoffError(f"Unable to update ignore file {path}: {exc}") from exc
+
+
+def environment_status(root: Path, output_root: Path, output_rel: str | None, scope: str) -> dict[str, Any]:
+    if output_root.exists() and not output_root.is_dir():
+        raise HandoffError(f"Handoff output path exists but is not a directory: {output_root}")
+    ignore_entry: str | None = None
+    ignore_target: Path | None = None
+    ignore_match: str | None = None
+    if output_rel:
+        ignore_entry = ignore_entry_for(output_rel)
+        probe = f"{output_rel.rstrip('/')}/.gptpro-ignore-probe"
+        ignore_match = git_ignore_match(root, probe)
+        if scope == "local":
+            ignore_target = git_local_exclude_path(root)
+        elif scope == "repository":
+            ignore_target = root / ".gitignore"
+    actions: list[dict[str, str]] = []
+    if output_rel and not ignore_match and ignore_target is not None:
+        actions.append(
+            {
+                "action": "append-ignore-entry",
+                "path": str(ignore_target),
+                "entry": str(ignore_entry),
+            }
+        )
+    if not output_root.is_dir():
+        actions.append({"action": "create-directory", "path": str(output_root)})
+    warnings = []
+    if output_rel and not ignore_match and scope == "none":
+        warnings.append(
+            "Handoff output is inside the repository and will remain visible to Git because ignore scope is none"
+        )
+    return {
+        "repo": str(root),
+        "output_root": str(output_root),
+        "output_inside_repo": output_rel is not None,
+        "ignore_scope": scope,
+        "ignore_target": str(ignore_target) if ignore_target else None,
+        "ignore_entry": ignore_entry,
+        "ignore_effective": bool(ignore_match) if output_rel else None,
+        "ignore_match": ignore_match,
+        "directory_exists": output_root.is_dir(),
+        "actions": actions,
+        "warnings": warnings,
+    }
+
+
+def command_init(args: argparse.Namespace) -> int:
+    root = resolve_git_root(args.repo)
+    output_root, output_rel = resolve_output_root(root, args.output_root)
+    before = environment_status(root, output_root, output_rel, args.ignore_scope)
+    changes: list[dict[str, str]] = []
+    if args.apply:
+        for action in before["actions"]:
+            if action["action"] == "append-ignore-entry":
+                append_ignore_entry(Path(action["path"]), action["entry"])
+            elif action["action"] == "create-directory":
+                try:
+                    output_root.mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    raise HandoffError(f"Unable to create handoff directory {output_root}: {exc}") from exc
+            changes.append(action)
+    after = environment_status(root, output_root, output_rel, args.ignore_scope)
+    payload = {
+        "applied": args.apply,
+        "changes": changes,
+        "ready": after["directory_exists"] and (
+            not after["output_inside_repo"]
+            or bool(after["ignore_effective"])
+            or args.ignore_scope == "none"
+        ),
+        **after,
+    }
+    print(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False))
+    return 0
 
 
 def git_identity(root: Path) -> dict[str, Any]:
@@ -636,17 +772,7 @@ def create_package(args: argparse.Namespace) -> int:
         raise HandoffError("Git worktree is dirty and --require-clean was requested")
     include_patterns = [normalize_pattern(value, label="Include pattern") for value in args.include]
     exclude_patterns = [normalize_pattern(value, label="Exclude pattern") for value in args.exclude]
-    output_root = (
-        Path(args.output_root).expanduser().resolve()
-        if args.output_root
-        else root / ".gptpro" / "handoffs"
-    )
-    try:
-        output_rel = output_root.relative_to(root).as_posix()
-    except ValueError:
-        output_rel = None
-    if output_rel == ".":
-        raise HandoffError("--output-root must not be the repository root")
+    output_root, output_rel = resolve_output_root(root, args.output_root)
     if output_rel:
         exclude_patterns.extend([output_rel, f"{output_rel}/**"])
         exclude_patterns = sorted(set(exclude_patterns))
@@ -661,6 +787,13 @@ def create_package(args: argparse.Namespace) -> int:
         max_bytes=args.max_bytes,
         max_file_bytes=args.max_file_bytes,
     )
+    if output_rel:
+        probe = f"{output_rel.rstrip('/')}/.gptpro-ignore-probe"
+        if not git_ignore_match(root, probe):
+            scan["warnings"].append(
+                f"Handoff output {output_rel} is not Git-ignored; preview first-use setup with "
+                "gptpro.py init --repo <repo>"
+            )
     selected: list[SelectedFile] = scan["included"]
     package_tree_hash = tree_hash(selected)
     package_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{args.mode}-{secrets.token_hex(4)}"
@@ -745,6 +878,7 @@ def create_package(args: argparse.Namespace) -> int:
         "transport_resolved": resolved_transport,
         "paste_payload_bytes": len(candidate_paste_payload.encode("utf-8")),
         "max_paste_bytes": args.max_paste_bytes,
+        "warnings": scan["warnings"],
     }
     if args.dry_run:
         print(json.dumps(summary, sort_keys=True, indent=2))
@@ -1323,6 +1457,22 @@ def positive_int(raw: str) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    initializer = subparsers.add_parser(
+        "init", help="Preview or apply first-use handoff environment setup"
+    )
+    initializer.add_argument("--repo", default=".", help="Path inside the target Git repository")
+    initializer.add_argument(
+        "--ignore-scope",
+        choices=IGNORE_SCOPES,
+        default="local",
+        help="local uses Git info/exclude; repository writes .gitignore; none skips ignore setup",
+    )
+    initializer.add_argument(
+        "--output-root", help="Handoff parent directory; defaults to <repo>/.gptpro/handoffs"
+    )
+    initializer.add_argument("--apply", action="store_true", help="Apply the previewed setup")
+    initializer.set_defaults(func=command_init)
 
     prepare = subparsers.add_parser("prepare", help="Scan and package repository context")
     prepare.add_argument("--repo", default=".", help="Path inside the target Git repository")

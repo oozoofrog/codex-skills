@@ -12,6 +12,22 @@ prepared -> approved -> submitted -> response_imported -> evaluated
 
 Schema-1 ZIP-first handoffs are immutable legacy receipts. Do not silently reinterpret their approval as text-transmission approval; prepare and approve a schema-2 handoff instead.
 
+## First-use environment
+
+Preview setup before the first handoff in a repository:
+
+```bash
+python3 <skill-dir>/scripts/gptpro.py init --repo "$PWD"
+```
+
+Preview is read-only. It reports the output directory, ignore scope and target, effective existing ignore rule, warnings, and planned actions. The default `local` scope uses `.git/info/exclude`, keeping the setting local to the clone and out of tracked files. Show the preview and obtain approval before applying it:
+
+```bash
+python3 <skill-dir>/scripts/gptpro.py init --repo "$PWD" --apply
+```
+
+Initialization is idempotent. If `ready` is true and `actions` is empty, do not request or perform another mutation. Use `--ignore-scope repository` only after the user explicitly chooses a `.gitignore` edit. `--ignore-scope none` prepares the directory without hiding it from Git. A custom `--output-root` outside the repository needs no ignore entry.
+
 ## Prepare
 
 ```bash
@@ -39,6 +55,8 @@ Useful safeguards:
 - `--max-paste-bytes`: set the conservative auto-selection threshold; the default 128 KiB is Skill policy, not a published ChatGPT limit.
 
 Preparation records both `git.head_sha` and a hash of the actual packaged file set. A dirty package is not represented as the HEAD commit; dirty paths and the package tree hash remain explicit. Only valid UTF-8 files enter the text context. The generated ZIP remains local audit evidence and is not a default Pro upload.
+
+When an in-repository output root is not ignored, `prepare` adds a warning pointing to `init`; it does not change Git configuration automatically.
 
 ## Verify and inspect
 

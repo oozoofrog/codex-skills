@@ -108,6 +108,105 @@ class GptProCliTests(unittest.TestCase):
         self.assertNotIn(self.secret_value, manifest_text)
         self.assertEqual(0, self.run_cli("verify", "--handoff-dir", str(handoff)).returncode)
 
+    def test_init_previews_then_applies_local_git_exclude_idempotently(self) -> None:
+        preview = json.loads(
+            self.run_cli("init", "--repo", str(self.repo)).stdout
+        )
+        self.assertFalse(preview["applied"])
+        self.assertFalse(preview["ready"])
+        self.assertEqual(
+            {"create-directory", "append-ignore-entry"},
+            {item["action"] for item in preview["actions"]},
+        )
+        self.assertFalse((self.repo / ".gptpro" / "handoffs").exists())
+
+        applied = json.loads(
+            self.run_cli("init", "--repo", str(self.repo), "--apply").stdout
+        )
+        self.assertTrue(applied["applied"])
+        self.assertTrue(applied["ready"])
+        self.assertTrue(applied["ignore_effective"])
+        self.assertTrue((self.repo / ".gptpro" / "handoffs").is_dir())
+        exclude_raw = self.git("rev-parse", "--git-path", "info/exclude").stdout.strip()
+        exclude_path = Path(exclude_raw)
+        if not exclude_path.is_absolute():
+            exclude_path = self.repo / exclude_path
+        exclude_text = exclude_path.read_text(encoding="utf-8")
+        self.assertEqual(1, exclude_text.count(".gptpro/"))
+        self.assertNotIn(".gptpro", self.git("status", "--porcelain=v1").stdout)
+
+        repeated = json.loads(
+            self.run_cli("init", "--repo", str(self.repo), "--apply").stdout
+        )
+        self.assertTrue(repeated["ready"])
+        self.assertEqual([], repeated["changes"])
+        self.assertEqual(1, exclude_path.read_text(encoding="utf-8").count(".gptpro/"))
+
+    def test_init_can_write_repository_gitignore_when_explicitly_selected(self) -> None:
+        result = json.loads(
+            self.run_cli(
+                "init",
+                "--repo",
+                str(self.repo),
+                "--ignore-scope",
+                "repository",
+                "--apply",
+            ).stdout
+        )
+
+        self.assertTrue(result["ready"])
+        self.assertEqual((self.repo / ".gitignore").resolve(), Path(result["ignore_target"]))
+        gitignore = (self.repo / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("# gptpro local handoff artifacts\n.gptpro/\n", gitignore)
+        self.assertIn("?? .gitignore", self.git("status", "--porcelain=v1").stdout)
+
+    def test_init_external_output_needs_no_git_ignore_change(self) -> None:
+        external = self.root / "external-handoffs"
+        result = json.loads(
+            self.run_cli(
+                "init",
+                "--repo",
+                str(self.repo),
+                "--output-root",
+                str(external),
+                "--apply",
+            ).stdout
+        )
+
+        self.assertTrue(result["ready"])
+        self.assertFalse(result["output_inside_repo"])
+        self.assertIsNone(result["ignore_target"])
+        self.assertEqual(["create-directory"], [item["action"] for item in result["changes"]])
+        self.assertTrue(external.is_dir())
+
+    def test_prepare_warns_until_default_output_is_git_ignored(self) -> None:
+        first = self.run_cli(
+            "prepare",
+            "--repo",
+            str(self.repo),
+            "--mode",
+            "ask",
+            "--task",
+            "First-use warning check.",
+        )
+        first_manifest = self.load(Path(json.loads(first.stdout)["handoff_dir"]) / "manifest.json")
+        self.assertTrue(any("not Git-ignored" in item for item in first_manifest["warnings"]))
+
+        self.run_cli("init", "--repo", str(self.repo), "--apply")
+        second = json.loads(
+            self.run_cli(
+                "prepare",
+                "--repo",
+                str(self.repo),
+                "--mode",
+                "ask",
+                "--task",
+                "Configured warning check.",
+                "--dry-run",
+            ).stdout
+        )
+        self.assertFalse(any("not Git-ignored" in item for item in second["warnings"]))
+
     def test_all_modes_support_dry_run(self) -> None:
         for mode in ("plan", "ask", "review", "debug", "architecture"):
             with self.subTest(mode=mode):
