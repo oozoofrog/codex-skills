@@ -30,6 +30,7 @@
 
 | Skill | Best for |
 |---|---|
+| `gptpro` | 로그인된 ChatGPT Pro 일반 Chat과 안전한 repo handoff 협업 |
 | `goal-research-loop` | 새 목표 지향 반복 연구 루프 설계·운영 |
 | `codex-research` | 기존 `.codex-research/` runner 상태 재개·점검 |
 | `hey-codex` | 명시 요청 시 별도 Codex CLI 인스턴스 실행 |
@@ -80,6 +81,7 @@
 ```text
 $codex-skill-audit ~/.codex/skills를 감사해주세요.
 $agent-context-init 이 저장소에 Codex용 AGENTS.md 구조를 만들어주세요.
+$gptpro review 모드로 현재 변경을 Pro와 협업 검토해주세요.
 $goal-research-loop 이 성능 개선 목표를 5라운드 반복 연구 루프로 설계해주세요.
 $swift-master 이 SwiftUI 상태 관리와 동시성 위험을 리뷰해주세요.
 $ios-swift-orchestrator 이 iOS 작업을 어떤 하위 스킬로 진행할지 결정해주세요.
@@ -92,6 +94,23 @@ $macos-release 이번 macOS CLI 릴리스를 dry-run부터 Homebrew 반영까지
 - [`CHANGELOG.md`](./CHANGELOG.md): 태그 기준 변경 이력
 - [`docs/release-notes-template.md`](./docs/release-notes-template.md): GitHub Release 작성용 템플릿
 - [`docs/release-checklist.md`](./docs/release-checklist.md): 실제 릴리즈 절차 체크리스트
+
+## 필요한 스킬만 선택 설치
+
+설치 가능한 top-level Skill과 현재 상태를 확인합니다.
+
+```bash
+python3 scripts/manage_skills.py list
+```
+
+필요한 Skill만 설치하거나, 먼저 변경 없이 미리 봅니다.
+
+```bash
+python3 scripts/manage_skills.py install gptpro --dry-run
+python3 scripts/manage_skills.py install gptpro
+```
+
+기존 설치본과 내용이 다를 때는 검토 후 `--update`를 명시해야 합니다. 자세한 계약은 [`docs/selective-installation.md`](./docs/selective-installation.md)를 참고하세요.
 
 ## 저장소 동기화 자동화
 

@@ -6,12 +6,14 @@
 
 ## Key Files
 - [sync_repo.sh](./sync_repo.sh): fetch/rebase/add/commit/push 흐름을 묶는 핵심 동기화 스크립트
+- [manage_skills.py](./manage_skills.py): top-level Skill 목록 조회와 선택 설치/update 도구
 - [auto_sync_daemon.py](./auto_sync_daemon.py): 변경 감시와 debounce 기반 자동 동기화 실행기
 - [install_auto_sync_launchd.sh](./install_auto_sync_launchd.sh): launchd 설치 진입점
 - [uninstall_auto_sync_launchd.sh](./uninstall_auto_sync_launchd.sh): launchd 제거 진입점
 
 ## Local Rules
 - shell script는 `bash -n`, Python script는 `python3 -m py_compile`로 먼저 검증하기.
+- 선택 설치 변경은 `python3 -m unittest discover -s scripts/tests -v`와 임시 `--dest`로 검증하기.
 - 안전한 경우를 제외하면 실 repo 상태를 바꾸는 명령보다 dry-run 또는 임시 디렉토리 재현을 우선하기.
 - launchd 래퍼는 `sync_repo.sh`와 `auto_sync_daemon.py`의 경로 계약을 깨지 않게 유지하기.
 
