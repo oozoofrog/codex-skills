@@ -1,4 +1,4 @@
 interface:
   display_name: "GPT Pro Collaborator"
-  short_description: "Secure ChatGPT Pro text handoffs"
-  default_prompt: "Use $gptpro in review mode, initialize local handoff storage if needed, prepare approved repository text, consult ChatGPT Pro, and validate the advisory response."
+  short_description: "Attended ChatGPT Pro handoffs with safe human takeover"
+  default_prompt: "Use $gptpro in review mode, initialize local handoff storage if needed, prepare approved repository text, consult ChatGPT Pro with human takeover at trust or browser boundaries when needed, and validate the advisory response."

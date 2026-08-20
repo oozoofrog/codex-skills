@@ -14,6 +14,7 @@
 - `docs/release-checklist.md` 추가
 
 ### Updated
+- `gptpro`에 로그인·OAuth/app scope·권한·파일 선택·모델 확인·수동 전송·불확실한 제출·response export를 정상적인 attended human checkpoint로 다루는 read-only `human-handoff` workflow 추가
 - `gptpro` 첫 사용 시 `.gptpro/handoffs`와 Git 제외 규칙을 preview 후 선택적으로 구성하는 멱등 `init` workflow 추가
 - `gptpro` 기본 전달을 ZIP 업로드에서 `auto` 선택형 구조화 텍스트(`paste`/`text-file`)로 변경하고, 실제 전송 bytes/hash에 승인·receipt를 결속
 - 사용자 스킬 정리: 중복 discovery 제거, `macos-release` 단일화, `codex-research`를 기존 `.codex-research/` 호환 runner로 축소

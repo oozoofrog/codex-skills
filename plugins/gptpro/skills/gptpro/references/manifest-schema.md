@@ -30,6 +30,10 @@ Records the current lifecycle phase and phase-specific metadata. Artifact hashes
 
 Contains an ordered event list. Each event includes `sequence`, timestamp, type, data, previous-event hash, and its own SHA-256. `verify` checks the chain and package identity.
 
+## Read-only human handoff output
+
+`status` includes a derived `human_takeover` object with availability and valid reason names for the current phase. `human-handoff` prints a derived checklist containing approved outbound paths and hashes, human steps, expected return evidence, and retry rules. Neither output is an artifact or receipt event, and generating it does not change `state.json`.
+
 ## Response artifacts
 
 - `raw_response.md`: exact imported marked response.

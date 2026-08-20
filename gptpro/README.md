@@ -2,7 +2,7 @@
 
 `gptpro` is an attended Codex Skill for consulting a logged-in ChatGPT Pro general Chat without giving the web model direct authority over the local repository.
 
-It initializes local handoff storage, converts selected repository files into hash-verified structured Markdown, records the exact Git state, excludes likely secrets and build noise, requires transport-specific user approval, guides the visible Chrome handoff, imports only the package-marked response, and records Codex's later evaluation. A ZIP is retained locally for audit and integrity checks but is not uploaded by default.
+It initializes local handoff storage, converts selected repository files into hash-verified structured Markdown, records the exact Git state, excludes likely secrets and build noise, requires transport-specific user approval, guides the visible Chrome or human handoff, imports only the package-marked response, and records Codex's later evaluation. A ZIP is retained locally for audit and integrity checks but is not uploaded by default.
 
 ## Install
 
@@ -38,6 +38,8 @@ $gptpro review 모드로 현재 변경의 정확성과 빠진 테스트를 검�
 
 The Skill will prepare and verify local artifacts first. Transmission is a separate attended action: it must show the exact manifest summary and receive approval before pasting, attaching, or submitting to `chatgpt.com`.
 
+Human participation is expected at trust and UI boundaries. Login, MFA, CAPTCHA, ChatGPT account/workspace choice, GitHub App authorization and repository scope, Chrome permissions, an OS file chooser, ambiguous model controls, uncertain submission, or response copying may require the user to take over briefly. This is a supported workflow state, not an automation failure. The Skill prints an exact checklist and resumes only from visible evidence.
+
 ## First-use setup
 
 Preview the repository-local environment without writing anything:
@@ -69,16 +71,17 @@ This release uses manifest schema 2. A schema-1 ZIP-first handoff is not upgrade
 python3 scripts/gptpro.py prepare --repo /path/to/repo --mode plan --transport auto --task "Plan the change."
 python3 scripts/gptpro.py verify --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
 python3 scripts/gptpro.py status --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
+python3 scripts/gptpro.py human-handoff --handoff-dir /path/to/repo/.gptpro/handoffs/<id> --reason manual-transport
 ```
 
-The five modes are `plan`, `ask`, `review`, `debug`, and `architecture`. Run `python3 scripts/gptpro.py --help` for the full lifecycle.
+`human-handoff` is read-only: it verifies the package and prints the approved paths, hashes, model, user steps, expected return evidence, and retry rule. It does not change state, authorize transmission, or mark a message as sent. The five modes are `plan`, `ask`, `review`, `debug`, and `architecture`. Run `python3 scripts/gptpro.py --help` for the full lifecycle.
 
 ## Security posture
 
 - No OpenAI API key is required.
 - No private ChatGPT endpoints or headless session scraping are used.
 - Secret values are never printed in findings; matching files are excluded.
-- Chrome/browser automation stops at login, CAPTCHA, permission, model-selection, or ambiguous-submission blockers.
+- Chrome/browser automation stops for attended human takeover at login, CAPTCHA, OAuth/app scope, permission, file chooser, model-selection, response-export, or ambiguous-submission blockers.
 - Imported Pro output is advisory until Codex verifies it against current repository evidence.
 
 Generated handoffs live under `<repo>/.gptpro/handoffs/` by default. Add `.gptpro/` to the target repository's ignore rules if appropriate.
