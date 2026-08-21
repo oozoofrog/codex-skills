@@ -14,6 +14,7 @@ Pause browser automation when the next action requires the account owner's judgm
 - an unavailable browser bridge or selector drift;
 - an interrupted Send whose outcome cannot be proved;
 - response copying or download when automated extraction is incomplete.
+- launching an explicit debug-enabled ChatGPT Desktop instance or recovering a missing private Desktop capability.
 
 Do not ask the user to reveal credentials, codes, cookies, tokens, or unrelated browser content. Do not bypass an OAuth, CAPTCHA, browser, or operating-system boundary with hidden network calls or profile scraping.
 
@@ -28,7 +29,7 @@ python3 <skill-dir>/scripts/gptpro.py human-handoff \
   --details "Chrome file chooser did not open."
 ```
 
-Supported pre-submission reasons include `login`, `account-or-workspace`, `app-authorization`, `file-permission`, `file-selection`, `model-selection`, `captcha`, `site-approval`, `manual-transport`, and `submission-uncertain`. For `github`, `app-authorization` names the exact approved repository and commit, while `manual-transport` requires activating the visible GitHub app/plugin, pasting only `prompt.md`, and attaching no local file. After submission, use `response-export` when a person must save the completed marked response.
+Supported pre-submission reasons include `login`, `account-or-workspace`, `app-authorization`, `file-permission`, `file-selection`, `model-selection`, `captcha`, `site-approval`, `manual-transport`, `desktop-capability`, and `submission-uncertain`. `desktop-capability` names the explicit macOS launch command but does not launch, submit, or authorize anything. For `github`, `app-authorization` names the exact approved repository and commit. After browser/manual submission, use `response-export` when a person must save the completed marked response.
 
 The command verifies the package before printing instructions. Its JSON includes the package phase, approved model, transport, exact outbound paths and hashes, human steps, expected return evidence, and retry rule. It does not write state, append a receipt event, authorize transmission, or prove that an action occurred.
 
@@ -42,6 +43,7 @@ package_id: <id>
 reason: <reason>
 result: completed | declined | blocked | sent | not-sent | unknown
 observed_model: <visible label, when relevant>
+delivery_channel: <browser | manual | desktop-cdp>
 thread_url: <visible chatgpt.com conversation URL, when sent>
 details: <short visible evidence or blocker>
 ```
@@ -53,6 +55,7 @@ Treat this report as an attended observation, not as permission for unrelated ac
 - For login, permission, app, file-selection, or model-selection help, reacquire the same visible page and re-check the required state before continuing.
 - For a completed `manual-transport`, run `mark-submitted` only when the person reports `sent` and a matching user turn is visibly present.
 - For `submission-uncertain`, never send again automatically. Record submission only after a matching package-specific user turn is visible. Keep the phase `approved` for `not-sent` or `unknown` and ask before any new attempt.
+- For a failed Desktop capability or debug launch, rerun only `probe`. Do not run `ask` and do not switch to browser/manual without a new package and approval.
 - For `response-export`, import only the saved UTF-8 file containing both exact response markers.
 - A declined or blocked human action ends the current browser attempt without changing the approved package. Report the blocker and preserve the handoff for a later explicit decision.
 

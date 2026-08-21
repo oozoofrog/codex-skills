@@ -1,11 +1,11 @@
 # Visible ChatGPT Pro handoff
 
-This stage is attended browser work. Local scripts intentionally stop at verified artifacts and an approval receipt.
+This stage is attended browser/manual work. Use it only when `status.delivery.channel` is `browser` or `manual`. Desktop-approved packages follow [desktop-cdp.md](desktop-cdp.md) and cannot silently fall back here.
 
 ## Preferred path
 
 1. If an official Chrome-control Skill is available, read it before browser actions and use its supported visible-session path. Otherwise let the user perform the manual steps.
-2. Confirm the handoff phase is `approved` with `gptpro.py status`. Read `transport.resolved` and `outbound_paths`; these are the only approved browser payloads. `local_audit_archive_path` is never a default upload.
+2. Confirm the handoff phase is `approved` with `gptpro.py status`. Read `transport.resolved`, `delivery.channel`, and `outbound_paths`; these are the only approved browser/manual payloads. `local_audit_archive_path` is never a default upload.
 3. Open `https://chatgpt.com/` in the user's signed-in Chrome profile.
 4. Start a new **general Chat**, not Work, a Project, a custom GPT, or an existing unrelated conversation.
 5. Select the exact requested model and Pro/Intelligence setting recorded by `status`. If the controls are unavailable or ambiguous, stop for user direction; do not silently downgrade.
@@ -22,7 +22,7 @@ Browser control is not required to complete this stage. When credentials, OAuth/
 
 ## Transport failure rule
 
-Do not switch among `github`, `text-file`, or `paste`, or to ZIP after an app/upload/paste failure. A transport change alters the approved outbound artifact set and disclosure. Prepare a new handoff with the desired `--transport`, show its new hashes, and obtain a new approval.
+Do not switch among `github`, `text-file`, or `paste`, to ZIP, or to/from `desktop-cdp` after an app/upload/paste failure. A transport or delivery change alters the approved disclosure. Prepare a new handoff with the desired choices, show its hashes, and obtain a new approval.
 
 ## Approval and permissions
 

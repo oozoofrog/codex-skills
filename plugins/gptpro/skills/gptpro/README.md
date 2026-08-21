@@ -1,8 +1,8 @@
 # gptpro
 
-`gptpro` is an attended Codex Skill for consulting a logged-in ChatGPT Pro general Chat without giving the web model direct authority over the local repository.
+`gptpro` is an attended Codex Skill for consulting a logged-in ChatGPT Pro general Chat without giving the advisory model direct authority over the local repository.
 
-It initializes local handoff storage, scans and hashes selected repository files, records the exact Git state, excludes likely secrets and build noise, requires transport-specific user approval, guides the visible Chrome or human handoff, imports only the package-marked response, and records Codex's later evaluation. GitHub-first handoffs pin a remotely verified immutable commit and send only a prompt; text handoffs retain structured Markdown alternatives. A ZIP is retained locally for audit and integrity checks but is not uploaded by default.
+It initializes local handoff storage, scans and hashes selected repository files, records the exact Git state, excludes likely secrets and build noise, requires package-specific approval, delivers through an approved browser/manual path or optional macOS ChatGPT Desktop CDP runtime, imports only the package-marked response, and records Codex's later evaluation. GitHub-first handoffs pin a remotely verified immutable commit; text handoffs retain structured Markdown alternatives. A ZIP is retained locally for audit and integrity checks but is not uploaded by default.
 
 ## Install
 
@@ -56,20 +56,23 @@ python3 scripts/gptpro.py init --repo /path/to/repo --apply
 
 Use `--ignore-scope repository` to update the tracked-worktree `.gitignore` instead, or `--ignore-scope none` to create only the directory. The Skill never applies the preview automatically. `prepare` remains usable without initialization but reports a warning when an in-repository output directory is not ignored.
 
-The default `--transport auto` is GitHub-first:
+Context transport and delivery channel are separate. The default `--transport auto` is GitHub-first:
 
 - `github` when every selected file matches HEAD and that SHA is advertised by the configured github.com remote;
 - `paste` when GitHub is unavailable and the complete structured payload is at most 128 KiB;
 - `text-file` when GitHub is unavailable and the payload is larger, attaching one `context-<id>.md` and pasting `prompt.md`.
 
-Auto records the exact GitHub fallback reason. Supplying `--github-pr-url` makes a verification mismatch fatal instead of falling back. The 128 KiB cutoff is a conservative Skill policy, not a published ChatGPT limit. Override it with `--max-paste-bytes`, require GitHub with `--transport github`, or avoid app access with `--transport paste|text-file`. A transport never changes after approval because approval binds the exact outbound bytes and repository disclosure.
+Auto records the exact GitHub fallback reason. Supplying `--github-pr-url` makes a verification mismatch fatal instead of falling back. The 128 KiB cutoff is a conservative Skill policy, not a published ChatGPT limit. Override it with `--max-paste-bytes`, require GitHub with `--transport github`, or avoid app access with `--transport paste|text-file`.
 
-This release uses manifest schema 2. A schema-1 ZIP-first handoff is not upgraded in place; prepare a new handoff so the new transport and approval hashes are explicit.
+Choose delivery independently with `--delivery-channel browser|manual|desktop-cdp`; `browser` remains the default. Approval binds both axes. Neither may change after approval without a new package. Desktop phase 1 accepts `paste` and `github`; it rejects `text-file` because the runtime does not upload attachments.
+
+This release keeps manifest schema 2 with additive delivery metadata. A schema-1 ZIP-first handoff is not upgraded in place. An older schema-2 receipt without `delivery` remains verifiable, but cannot receive a new approval or submission; prepare a new handoff so transport, channel, and hashes are explicit.
 
 ## Local CLI
 
 ```bash
 python3 scripts/gptpro.py prepare --repo /path/to/repo --mode plan --transport auto --task "Plan the change."
+python3 scripts/gptpro.py prepare --repo /path/to/repo --mode review --transport paste --delivery-channel desktop-cdp --task "Review the change."
 python3 scripts/gptpro.py prepare --repo /path/to/repo --mode review --transport github --github-pr-url https://github.com/owner/repo/pull/123 --task "Review the pinned PR."
 python3 scripts/gptpro.py verify --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
 python3 scripts/gptpro.py status --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
@@ -77,6 +80,20 @@ python3 scripts/gptpro.py human-handoff --handoff-dir /path/to/repo/.gptpro/hand
 ```
 
 `human-handoff` is read-only: it verifies the package and prints the approved paths, hashes, model, user steps, expected return evidence, and retry rule. It does not change state, authorize transmission, or mark a message as sent. The five modes are `plan`, `ask`, `review`, `debug`, and `architecture`. Run `python3 scripts/gptpro.py --help` for the full lifecycle.
+
+## Optional ChatGPT Desktop delivery
+
+Phase 1 supports macOS, ChatGPT Desktop, and Node.js 22 or newer with built-in WebSocket support. The user explicitly starts a debug-enabled instance when needed; the Skill never kills or relaunches ChatGPT:
+
+```bash
+open -na "/Applications/ChatGPT.app" --args --remote-debugging-port=9222
+node scripts/chatgpt-desktop.js probe
+node scripts/chatgpt-desktop.js models
+```
+
+After the exact package and `desktop-cdp` channel are approved, resolve the human-facing model intent to one selectable live backend model, show its id/effort, and record the user's confirmation with `approve-desktop-model`. Then run `ask --handoff-dir ...` with that exact resolution and the approved message/manifest hashes. Before connecting, it asks the Python governance CLI for a read-only authorization proving the package, channel, message, model, and effort are still approved. It creates a fresh conversation, sends no local function signatures, writes the exact visible body plus a deterministic package-marked wrapper, and returns conversation/source metadata when available. `gptpro.py mark-submitted --desktop-result ...` re-verifies these artifacts before changing state. See [Desktop CDP delivery](references/desktop-cdp.md) for the complete command and security contract.
+
+The Desktop bridge and backend paths are private implementation details, not public OpenAI APIs, and can break when ChatGPT Desktop changes. CDP remains loopback-only and targets exactly `app://-/index.html`; credential, cookie, token, and session extraction is intentionally absent. The clean-room runtime uses Node's built-in WebSocket, has no npm install step, includes no Pi adapter, and vendors no third-party dependency.
 
 ## Validate Skill structure
 
@@ -95,12 +112,14 @@ python3 gptpro/scripts/validate_structure.py \
   --json
 ```
 
-It checks required files, exact `name`/`description` frontmatter, local Markdown links, prompt placeholder contract, Python syntax/executable modes, and optional mirror hashes.
+It checks required files, exact `name`/`description` frontmatter, local Markdown links, prompt placeholder contract, Python syntax/executable modes, actual `node --check` results when Node is available, and optional mirror hashes. It reports Node validation as skipped rather than passed when Node is unavailable.
 
 ## Security posture
 
 - No OpenAI API key is required.
-- No private ChatGPT endpoints or headless session scraping are used.
+- Browser/manual delivery uses no private endpoints. Optional Desktop delivery encapsulates private app contracts and fails closed when their capabilities drift.
+- Desktop CDP accepts only loopback discovery/WebSocket hosts and the exact ChatGPT renderer target; it does not extract credentials, cookies, tokens, attestation values, device identifiers, or unrelated chat data into Node/CDP output or receipts. An existing Desktop-owned `oai-did` is attached only inside the renderer request path and is never returned across the binding.
+- Phase-1 Desktop `ask` explicitly disables local function signatures and never applies advisory output to repository files.
 - Secret values are never printed in findings; matching files are excluded.
 - Chrome/browser automation stops for attended human takeover at login, CAPTCHA, OAuth/app scope, permission, file chooser, model-selection, response-export, or ambiguous-submission blockers.
 - GitHub transport refuses selected dirty/untracked content and unadvertised commits; it never commits or pushes on the user's behalf.

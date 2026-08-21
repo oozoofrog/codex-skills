@@ -2,6 +2,8 @@
 
 Use `github` when the selected repository context already exists at one immutable commit on `github.com` and the intended ChatGPT account can connect a GitHub app/plugin. ChatGPT plugins can expose connectors to services such as GitHub, and may require the user to connect the external service before tools become available; see OpenAI's [Plugins documentation](https://learn.chatgpt.com/docs/plugins).
 
+GitHub describes context disclosure, not delivery. The same pinned prompt may be delivered through an approved browser/manual channel or optional `desktop-cdp`. Desktop phase 1 does not expose a local repository read/search relay or arbitrary function signatures; the signed-in ChatGPT experience must already be able to satisfy the connected-app request. If exact access is unavailable, return the required blocked attestation rather than changing transport or delivery channel.
+
 ## Prepare
 
 ```bash
@@ -54,6 +56,7 @@ python3 <skill-dir>/scripts/gptpro.py mark-submitted \
   --confirm-sent \
   --observed-model "ChatGPT Pro / GPT-5.6 Sol / Intelligence: Pro" \
   --observed-transport github \
+  --observed-channel browser \
   --observed-github-repository owner/repository \
   --observed-github-commit <40-or-64-hex-sha> \
   --thread-url "https://chatgpt.com/c/<id>"
@@ -63,7 +66,7 @@ The app's repository authorization may be broader than the prompt's allowed path
 
 ## Response attestation
 
-Inside the package response markers, Pro must include exactly one line:
+Pro must include exactly one attestation line in the advisory response body. Browser/manual delivery places it inside the package markers; Desktop delivery captures the raw body and then adds those markers deterministically:
 
 ```text
 GPTPRO_GITHUB_ATTESTATION: {"commit_sha":"<sha>","files_read":["src/file.py"],"repository":"owner/repository","status":"accessed"}

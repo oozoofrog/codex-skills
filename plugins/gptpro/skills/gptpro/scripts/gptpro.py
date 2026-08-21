@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 SCHEMA_VERSION = 2
 MODES = ("plan", "ask", "review", "debug", "architecture")
 TRANSPORTS = ("auto", "github", "paste", "text-file")
+DELIVERY_CHANNELS = ("browser", "manual", "desktop-cdp")
 IGNORE_SCOPES = ("local", "repository", "none")
 PHASES = ("prepared", "approved", "submitted", "response_imported", "evaluated")
 HUMAN_HANDOFF_REASONS = (
@@ -38,6 +39,7 @@ HUMAN_HANDOFF_REASONS = (
     "manual-transport",
     "submission-uncertain",
     "response-export",
+    "desktop-capability",
 )
 DEFAULT_REQUESTED_MODEL = "ChatGPT Pro / GPT-5.6 Sol / Intelligence: Pro"
 DESTINATION = "https://chatgpt.com/"
@@ -723,6 +725,7 @@ def render_prompt(
     transport: str,
     context_artifact: str,
     transport_guidance: str,
+    delivery_channel: str,
 ) -> str:
     skill_root = Path(__file__).resolve().parent.parent
     base_path = skill_root / "templates" / "base-prompt.md.tpl"
@@ -749,6 +752,17 @@ def render_prompt(
         "TRANSPORT": transport,
         "CONTEXT_ARTIFACT": context_artifact,
         "TRANSPORT_GUIDANCE": transport_guidance.rstrip(),
+        "RESPONSE_CONTRACT": (
+            "Return complete advisory Markdown without package response markers. The attended Desktop "
+            "runtime captures exactly one completed assistant turn and deterministically wraps the unedited "
+            "body with the package markers before local import. Do not include either marker yourself."
+            if delivery_channel == "desktop-cdp"
+            else (
+                "Return Markdown bounded by these exact lines, each exactly once:\n\n"
+                f"{begin_marker}\n\n<your complete advisory response>\n\n{end_marker}\n\n"
+                "Do not put any response text outside those markers."
+            )
+        ),
     }
     for key, value in replacements.items():
         template = template.replace("{{" + key + "}}", value)
@@ -786,7 +800,7 @@ def github_prompt_guidance(github: dict[str, Any]) -> str:
             "",
             "Do not silently read another branch, moving ref, commit, repository, or path. The GitHub app may have broader repository-level access, but this prompt authorizes analysis only of the paths above. If the app cannot retrieve the exact commit, return a blocked response instead of inferring content from the prompt, a default branch, search snippets, or prior knowledge.",
             "",
-            "Inside the response markers, include exactly one single-line attestation beginning `GPTPRO_GITHUB_ATTESTATION: `. For successful access, use compact JSON with status `accessed`, the exact repository and commit above, and a non-empty `files_read` array containing only approved paths. Example:",
+            "In the advisory response body, include exactly one single-line attestation beginning `GPTPRO_GITHUB_ATTESTATION: `. Browser/manual delivery places it inside the requested package markers; the Desktop runtime captures the raw body before adding those markers. For successful access, use compact JSON with status `accessed`, the exact repository and commit above, and a non-empty `files_read` array containing only approved paths. Example:",
             "",
             f"`GPTPRO_GITHUB_ATTESTATION: {attestation_example}`",
             "",
@@ -917,6 +931,8 @@ def verify_receipt(receipt: dict[str, Any], package_id: str) -> None:
     for index, event in enumerate(events, start=1):
         if not isinstance(event, dict):
             raise HandoffError("Receipt contains a non-object event")
+        if event.get("type") not in {*PHASES, "desktop-model-resolved"}:
+            raise HandoffError(f"Receipt contains an unsupported event type at event {index}")
         if event.get("sequence") != index or event.get("previous_event_hash") != previous:
             raise HandoffError(f"Receipt chain mismatch at event {index}")
         actual = event_hash(event)
@@ -972,6 +988,10 @@ def create_package(args: argparse.Namespace) -> int:
         exclude_patterns = sorted(set(exclude_patterns))
     file_list_path, file_list_entries = read_file_list(args.file_list)
     task = read_task(args)
+    if args.delivery_channel == "desktop-cdp" and args.transport == "text-file":
+        raise HandoffError(
+            "desktop-cdp phase 1 cannot upload a text-file context; use paste, github, or another delivery channel"
+        )
     scan = scan_repository(
         root,
         include_patterns=include_patterns,
@@ -1021,6 +1041,7 @@ def create_package(args: argparse.Namespace) -> int:
             "Use only the inline structured context in this message. Do not use a connected app, "
             "another repository snapshot, or prior conversation memory as repository evidence."
         ),
+        delivery_channel=args.delivery_channel,
     )
     candidate_paste_payload = render_paste_payload(paste_prompt, context)
     github: dict[str, Any] | None = None
@@ -1048,6 +1069,11 @@ def create_package(args: argparse.Namespace) -> int:
             )
     else:
         resolved_transport = args.transport
+    if args.delivery_channel == "desktop-cdp" and resolved_transport == "text-file":
+        raise HandoffError(
+            "desktop-cdp phase 1 cannot upload a text-file context; choose paste/github, "
+            "increase --max-paste-bytes, or select another delivery channel"
+        )
     if args.github_pr_url and resolved_transport != "github":
         raise HandoffError("--github-pr-url requires --transport github or auto")
     if resolved_transport == "github" and github is None:
@@ -1078,6 +1104,7 @@ def create_package(args: argparse.Namespace) -> int:
             transport="github",
             context_artifact=f"connected GitHub app at {github['commit_url']}",
             transport_guidance=github_prompt_guidance(github),
+            delivery_channel=args.delivery_channel,
         )
         paste_payload = None
     else:
@@ -1098,6 +1125,7 @@ def create_package(args: argparse.Namespace) -> int:
                 "Use only the attached structured Markdown context named above. Do not use a connected app, "
                 "another repository snapshot, or prior conversation memory as repository evidence."
             ),
+            delivery_channel=args.delivery_channel,
         )
         paste_payload = None
     file_entries = [item.manifest_entry() for item in selected]
@@ -1124,6 +1152,7 @@ def create_package(args: argparse.Namespace) -> int:
         "packaged_tree_sha256": package_tree_hash,
         "transport_requested": args.transport,
         "transport_resolved": resolved_transport,
+        "delivery_channel": args.delivery_channel,
         "paste_payload_bytes": len(candidate_paste_payload.encode("utf-8")),
         "max_paste_bytes": args.max_paste_bytes,
         "github": github,
@@ -1241,6 +1270,19 @@ def create_package(args: argparse.Namespace) -> int:
             "outbound_artifacts": outbound_artifacts,
             **({"github": github} if github is not None else {}),
         },
+        "delivery": {
+            "channel": args.delivery_channel,
+            "approval_required": True,
+            **(
+                {
+                    "endpoint_policy": "loopback-only",
+                    "target_url": "app://-/index.html",
+                    "tools_enabled": False,
+                }
+                if args.delivery_channel == "desktop-cdp"
+                else {}
+            ),
+        },
         "artifacts": artifacts,
         "hashes": hashes,
     }
@@ -1285,6 +1327,7 @@ def create_package(args: argparse.Namespace) -> int:
             "packaged_tree_sha256": package_tree_hash,
             "git_head_sha": git["head_sha"],
             "transport": resolved_transport,
+            "delivery_channel": args.delivery_channel,
             "outbound_artifacts": outbound_artifacts,
             **({"github": github} if github is not None else {}),
         },
@@ -1359,6 +1402,100 @@ def verify_github_manifest(manifest: dict[str, Any], github: Any) -> dict[str, A
     return github
 
 
+def desktop_artifact_path(handoff_dir: Path, raw: Any, *, label: str) -> Path:
+    if not isinstance(raw, str) or not raw:
+        raise HandoffError(f"Desktop {label} path is missing")
+    candidate = Path(raw).expanduser()
+    candidate = candidate.resolve() if candidate.is_absolute() else (handoff_dir / candidate).resolve()
+    if candidate.parent != handoff_dir.resolve() or candidate.name != Path(raw).name:
+        raise HandoffError(f"Desktop {label} must be a file directly inside the handoff directory")
+    return candidate
+
+
+def verify_desktop_result(
+    handoff_dir: Path,
+    manifest: dict[str, Any],
+    manifest_hash: str,
+    result_path: Path,
+) -> dict[str, Any]:
+    result_path = desktop_artifact_path(handoff_dir, str(result_path), label="result")
+    result = load_json(result_path)
+    package_id = manifest.get("package_id")
+    if (
+        result.get("ok") is not True
+        or result.get("completed") is not True
+        or result.get("channel") != "desktop-cdp"
+        or result.get("package_id") != package_id
+    ):
+        raise HandoffError("Desktop result identity or completion state is invalid")
+    if result.get("manifest_sha256") != manifest_hash:
+        raise HandoffError("Desktop result does not bind the approved manifest hash")
+    message_artifacts = [
+        item for item in manifest.get("transport", {}).get("outbound_artifacts", [])
+        if isinstance(item, dict) and item.get("role") == "message"
+    ]
+    if len(message_artifacts) != 1 or result.get("prompt_sha256") != message_artifacts[0].get("sha256"):
+        raise HandoffError("Desktop result does not bind the approved outbound message hash")
+    if result.get("tools_enabled") is not False or result.get("local_function_signatures_count") != 0:
+        raise HandoffError("Desktop result does not prove phase-1 tool calling was disabled")
+    server_tool_event_count = result.get("server_tool_event_count", 0)
+    if not isinstance(server_tool_event_count, int) or server_tool_event_count < 0:
+        raise HandoffError("Desktop result server tool event count is invalid")
+    if result.get("marker_origin") != "runtime":
+        raise HandoffError("Desktop result marker origin is invalid")
+    model_id = result.get("model_id")
+    if not isinstance(model_id, str) or not model_id:
+        raise HandoffError("Desktop result model id is missing")
+    for field in ("requested_thinking_effort", "observed_thinking_effort", "conversation_id", "message_id", "parent_message_id"):
+        if result.get(field) is not None and not isinstance(result.get(field), str):
+            raise HandoffError(f"Desktop result {field} is invalid")
+    completed_at = result.get("completed_at")
+    if not isinstance(completed_at, str) or not re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.+-]+Z?", completed_at
+    ):
+        raise HandoffError("Desktop result completed_at is invalid")
+    raw_path = desktop_artifact_path(handoff_dir, result.get("raw_output"), label="raw response")
+    wrapped_path = desktop_artifact_path(handoff_dir, result.get("output"), label="wrapped response")
+    raw_hash = sha256_file(raw_path)
+    wrapped_hash = sha256_file(wrapped_path)
+    if raw_hash != result.get("raw_response_sha256") or wrapped_hash != result.get("wrapped_response_sha256"):
+        raise HandoffError("Desktop response artifact hash mismatch")
+    try:
+        raw = raw_path.read_text(encoding="utf-8")
+        wrapped = wrapped_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise HandoffError(f"Unable to read Desktop response artifacts: {exc}") from exc
+    markers = manifest.get("response_markers", {})
+    begin = markers.get("begin")
+    end = markers.get("end")
+    if not isinstance(begin, str) or not isinstance(end, str):
+        raise HandoffError("Desktop response markers are missing")
+    if not raw.strip() or begin in raw or end in raw:
+        raise HandoffError("Desktop raw response is empty or contains runtime-owned markers")
+    expected_wrapped = f"{begin}\n{raw}{'' if raw.endswith(chr(10)) else chr(10)}{end}\n"
+    if wrapped != expected_wrapped or wrapped.count(begin) != 1 or wrapped.count(end) != 1:
+        raise HandoffError("Desktop wrapper is not the deterministic package-marked response")
+    return {
+        "result_artifact": result_path.name,
+        "result_sha256": sha256_file(result_path),
+        "raw_response_artifact": raw_path.name,
+        "raw_response_sha256": raw_hash,
+        "wrapped_response_artifact": wrapped_path.name,
+        "wrapped_response_sha256": wrapped_hash,
+        "marker_origin": "runtime",
+        "model_id": model_id,
+        "requested_thinking_effort": result.get("requested_thinking_effort"),
+        "observed_thinking_effort": result.get("observed_thinking_effort"),
+        "conversation_id": result.get("conversation_id"),
+        "message_id": result.get("message_id"),
+        "parent_message_id": result.get("parent_message_id"),
+        "completed_at": completed_at,
+        "tools_enabled": False,
+        "local_function_signatures_count": 0,
+        "server_tool_event_count": server_tool_event_count,
+    }
+
+
 def verify_package(handoff_dir: Path) -> dict[str, Any]:
     manifest_path = handoff_dir / "manifest.json"
     manifest = load_json(manifest_path)
@@ -1372,7 +1509,8 @@ def verify_package(handoff_dir: Path) -> dict[str, Any]:
     if state.get("phase") not in PHASES:
         raise HandoffError(f"Unknown state phase: {state.get('phase')}")
     verify_receipt(receipt, package_id)
-    if receipt["events"][-1].get("type") != state.get("phase"):
+    lifecycle_events = [event for event in receipt["events"] if event.get("type") in PHASES]
+    if not lifecycle_events or lifecycle_events[-1].get("type") != state.get("phase"):
         raise HandoffError("Receipt's latest event does not match the current state phase")
 
     artifacts = manifest.get("artifacts")
@@ -1390,12 +1528,74 @@ def verify_package(handoff_dir: Path) -> dict[str, Any]:
     resolved_transport = transport.get("resolved")
     if requested_transport not in TRANSPORTS or resolved_transport not in TRANSPORTS[1:]:
         raise HandoffError("Manifest transport is invalid")
+    delivery = manifest.get("delivery")
+    legacy_delivery = delivery is None
+    if legacy_delivery:
+        delivery_channel = "browser"
+    elif (
+        not isinstance(delivery, dict)
+        or delivery.get("channel") not in DELIVERY_CHANNELS
+        or delivery.get("approval_required") is not True
+    ):
+        raise HandoffError("Manifest delivery channel is invalid")
+    else:
+        delivery_channel = str(delivery["channel"])
+        if delivery_channel == "desktop-cdp" and (
+            delivery.get("endpoint_policy") != "loopback-only"
+            or delivery.get("target_url") != "app://-/index.html"
+            or delivery.get("tools_enabled") is not False
+        ):
+            raise HandoffError("Desktop delivery security policy is invalid")
+        if delivery_channel == "desktop-cdp" and resolved_transport == "text-file":
+            raise HandoffError("desktop-cdp phase 1 cannot deliver text-file context")
     state_hashes = state.get("artifact_hashes")
     if not isinstance(state_hashes, dict):
         raise HandoffError("State artifact hashes are invalid")
     manifest_hash = sha256_file(manifest_path)
     if state_hashes.get("manifest_sha256") != manifest_hash:
         raise HandoffError("Manifest hash no longer matches state")
+    if PHASES.index(state["phase"]) >= PHASES.index("approved"):
+        approval = state.get("approval")
+        if not isinstance(approval, dict):
+            raise HandoffError("Approval state is missing")
+        if approval.get("manifest_sha256") != manifest_hash:
+            raise HandoffError("Approval does not bind the current manifest")
+        if approval.get("transport") != resolved_transport:
+            raise HandoffError("Approval transport does not match the manifest")
+        if not legacy_delivery and approval.get("delivery_channel") != delivery_channel:
+            raise HandoffError("Approval delivery channel does not match the manifest")
+    if PHASES.index(state["phase"]) >= PHASES.index("submitted"):
+        submission = state.get("submission")
+        if not isinstance(submission, dict):
+            raise HandoffError("Submission state is missing")
+        if submission.get("transport") != resolved_transport:
+            raise HandoffError("Submission transport does not match the manifest")
+        if not legacy_delivery and submission.get("delivery_channel") != delivery_channel:
+            raise HandoffError("Submission delivery channel does not match the manifest")
+    desktop_model_resolution = state.get("desktop_model_resolution")
+    if desktop_model_resolution is not None:
+        if delivery_channel != "desktop-cdp" or not isinstance(desktop_model_resolution, dict):
+            raise HandoffError("Desktop model resolution is invalid for this delivery channel")
+        if (
+            desktop_model_resolution.get("manifest_sha256") != manifest_hash
+            or desktop_model_resolution.get("requested_model") != manifest.get("requested_model")
+            or desktop_model_resolution.get("catalog_source") != "dynamic"
+            or not isinstance(desktop_model_resolution.get("model_id"), str)
+            or not desktop_model_resolution.get("model_id")
+            or (
+                desktop_model_resolution.get("thinking_effort") is not None
+                and not isinstance(desktop_model_resolution.get("thinking_effort"), str)
+            )
+        ):
+            raise HandoffError("Desktop model resolution does not bind the approved live selection")
+        resolution_events = [
+            event.get("data") for event in receipt.get("events", [])
+            if event.get("type") == "desktop-model-resolved"
+        ]
+        if not resolution_events or resolution_events[-1] != desktop_model_resolution:
+            raise HandoffError("Desktop model resolution does not match the receipt chain")
+    elif delivery_channel == "desktop-cdp" and PHASES.index(state["phase"]) >= PHASES.index("submitted"):
+        raise HandoffError("Desktop submission is missing an approved live model resolution")
 
     def artifact_path(key: str) -> Path:
         value = artifacts.get(key)
@@ -1495,6 +1695,19 @@ def verify_package(handoff_dir: Path) -> dict[str, Any]:
         if evaluation.get("response_sha256") != state["response"]["response_sha256"]:
             raise HandoffError("Evaluation response identity mismatch")
 
+    if PHASES.index(state["phase"]) >= PHASES.index("submitted") and delivery_channel == "desktop-cdp":
+        desktop = state.get("submission", {}).get("desktop")
+        if not isinstance(desktop, dict):
+            raise HandoffError("Desktop submission evidence is missing")
+        verified_desktop = verify_desktop_result(
+            handoff_dir,
+            manifest,
+            manifest_hash,
+            handoff_dir / str(desktop.get("result_artifact", "")),
+        )
+        if desktop != verified_desktop:
+            raise HandoffError("Desktop submission evidence does not match its result artifacts")
+
     expected_members = {str(entry.get("archive_path")): entry for entry in files}
     expected_members["_gptpro/file-manifest.json"] = None
     try:
@@ -1536,6 +1749,8 @@ def verify_package(handoff_dir: Path) -> dict[str, Any]:
         "archive_path": archive_path,
         "outbound_artifacts": outbound,
         "manifest_sha256": expected_hashes["manifest_sha256"],
+        "delivery_channel": delivery_channel,
+        "legacy_delivery": legacy_delivery,
     }
 
 
@@ -1556,6 +1771,8 @@ def command_verify(args: argparse.Namespace) -> int:
                 "git_head_sha": manifest["git"]["head_sha"],
                 "git_clean": manifest["git"]["clean"],
                 "transport": manifest["transport"]["resolved"],
+                "delivery_channel": verified["delivery_channel"],
+                "legacy_delivery": verified["legacy_delivery"],
             },
             sort_keys=True,
             indent=2,
@@ -1564,13 +1781,19 @@ def command_verify(args: argparse.Namespace) -> int:
     return 0
 
 
-def next_action(phase: str) -> str:
-    return {
-        "prepared": "show exact outbound text, hashes, and transport; obtain package-specific user approval",
-        "approved": (
+def next_action(phase: str, delivery_channel: str = "browser") -> str:
+    approved_action = (
+        "run the Desktop probe, resolve the exact live model, submit only the approved message once, "
+        "and record the generated Desktop result"
+        if delivery_channel == "desktop-cdp"
+        else (
             "perform the approved visible ChatGPT Pro general Chat transport; "
             "use human-handoff when a person must complete a trust or browser boundary"
-        ),
+        )
+    )
+    return {
+        "prepared": "show exact outbound text, hashes, and transport; obtain package-specific user approval",
+        "approved": approved_action,
         "submitted": "wait for completion and import the package-marked response",
         "response_imported": "independently validate the advisory response",
         "evaluated": "report the verified result and any separately authorized implementation",
@@ -1587,8 +1810,17 @@ def outbound_path_entries(verified: dict[str, Any]) -> list[dict[str, Any]]:
     return entries
 
 
-def human_handoff_reasons_for(phase: str, transport: str) -> list[str]:
+def human_handoff_reasons_for(phase: str, transport: str, delivery_channel: str = "browser") -> list[str]:
     if phase == "approved":
+        if delivery_channel == "desktop-cdp":
+            return [
+                "login",
+                "account-or-workspace",
+                "model-selection",
+                "captcha",
+                "desktop-capability",
+                "submission-uncertain",
+            ]
         reasons = [
             "login",
             "account-or-workspace",
@@ -1615,6 +1847,7 @@ def human_handoff_instructions(
     outbound_paths: list[dict[str, Any]],
     response_markers: dict[str, str],
     github: dict[str, Any] | None,
+    delivery_channel: str = "browser",
 ) -> tuple[str, list[str], list[str], dict[str, Any]]:
     approved_paths = [item["path"] for item in outbound_paths]
     common_return = ["what was visibly observed", "whether the requested action was completed, declined, or blocked"]
@@ -1627,6 +1860,20 @@ def human_handoff_instructions(
                 "Stop when the general Chat composer and account identity are visible; do not submit the handoff yet.",
             ],
             common_return + ["the visible account or workspace identity"],
+            {"allowed_outcomes": ["completed", "declined", "blocked"], "automatic_retry_allowed": True},
+        )
+    if reason == "desktop-capability":
+        if delivery_channel != "desktop-cdp":
+            raise HandoffError("desktop-capability applies only to desktop-cdp delivery")
+        return (
+            "ChatGPT Desktop launch, login, debug-port exposure, and private capability recovery are attended user boundaries.",
+            [
+                "Close or leave the existing ChatGPT instance unchanged; the skill must not kill or relaunch it automatically.",
+                "When ready, explicitly launch a separate instance with: open -na \"/Applications/ChatGPT.app\" --args --remote-debugging-port=9222",
+                "Confirm the intended Desktop account/workspace is visibly signed in, then rerun probe only; do not send the package yet.",
+                "If probe still fails, stop. Switching to browser or manual delivery requires a newly prepared and approved handoff.",
+            ],
+            common_return + ["whether loopback port 9222 was intentionally enabled and the probe result code"],
             {"allowed_outcomes": ["completed", "declined", "blocked"], "automatic_retry_allowed": True},
         )
     if reason == "account-or-workspace":
@@ -1811,10 +2058,15 @@ def command_status(args: argparse.Namespace) -> int:
     payload = {
         "package_id": manifest["package_id"],
         "phase": state["phase"],
-        "next_action": next_action(state["phase"]),
+        "next_action": next_action(state["phase"], verified["delivery_channel"]),
         "destination": manifest["destination"],
         "requested_model": manifest["requested_model"],
         "transport": manifest["transport"],
+        "delivery": manifest.get("delivery") or {
+            "channel": "browser",
+            "legacy_schema2_record": True,
+            "new_transitions_allowed": False,
+        },
         "outbound_paths": outbound_paths,
         "prompt_path": str(verified["prompt_path"]),
         "context_path": str(verified["context_path"]),
@@ -1829,11 +2081,12 @@ def command_status(args: argparse.Namespace) -> int:
         "totals": manifest["totals"],
         "security_findings": manifest["security_findings"],
         "warnings": manifest["warnings"],
+        "desktop_model_resolution": state.get("desktop_model_resolution"),
         "response": state.get("response"),
         "human_takeover": {
-            "available": bool(human_handoff_reasons_for(state["phase"], manifest["transport"]["resolved"])),
+            "available": bool(human_handoff_reasons_for(state["phase"], manifest["transport"]["resolved"], verified["delivery_channel"])),
             "read_only": True,
-            "reasons": human_handoff_reasons_for(state["phase"], manifest["transport"]["resolved"]),
+            "reasons": human_handoff_reasons_for(state["phase"], manifest["transport"]["resolved"], verified["delivery_channel"]),
             "command": "human-handoff",
             "state_changes_only_after_observed_completion": True,
         },
@@ -1848,7 +2101,8 @@ def command_human_handoff(args: argparse.Namespace) -> int:
     manifest = verified["manifest"]
     state = verified["state"]
     transport = str(manifest["transport"]["resolved"])
-    available = human_handoff_reasons_for(str(state["phase"]), transport)
+    delivery_channel = verified["delivery_channel"]
+    available = human_handoff_reasons_for(str(state["phase"]), transport, delivery_channel)
     if args.reason not in available:
         raise HandoffError(
             f"Human handoff reason {args.reason!r} is not valid in phase {state['phase']!r}; "
@@ -1862,6 +2116,7 @@ def command_human_handoff(args: argparse.Namespace) -> int:
         outbound_paths=outbound_paths,
         response_markers=manifest["response_markers"],
         github=manifest["transport"].get("github"),
+        delivery_channel=delivery_channel,
     )
     payload = {
         "status": "human_action_required",
@@ -1876,13 +2131,14 @@ def command_human_handoff(args: argparse.Namespace) -> int:
         "destination": manifest["destination"],
         "requested_model": manifest["requested_model"],
         "transport": transport,
+        "delivery_channel": delivery_channel,
         "outbound_paths": outbound_paths,
         "human_steps": steps,
         "return_with": return_with,
         "resume": resume,
         "safety_rules": [
             "Do not disclose credentials, MFA codes, cookies, tokens, or unrelated browser content.",
-            "Do not change the approved transport or substitute outbound files.",
+            "Do not change the approved transport or delivery channel, or substitute outbound files.",
             "Do not infer submission from a click, timeout, or missing draft; require a matching visible user turn.",
             "Do not apply ChatGPT advice until it has been imported and independently evaluated.",
         ],
@@ -1905,12 +2161,15 @@ def command_approve(args: argparse.Namespace) -> int:
     verified = verify_package(handoff_dir)
     state = verified["state"]
     require_phase(state, "prepared")
+    if verified["legacy_delivery"]:
+        raise HandoffError("Legacy schema-2 handoffs without an explicit delivery channel cannot receive a new approval")
     approval = {
         "approved_at": utc_now(),
         "approved_by": args.approved_by,
         "destination": verified["manifest"]["destination"],
         "manifest_sha256": verified["manifest_sha256"],
         "transport": verified["manifest"]["transport"]["resolved"],
+        "delivery_channel": verified["delivery_channel"],
         "outbound_artifacts": verified["outbound_artifacts"],
         "github": verified["manifest"]["transport"].get("github"),
     }
@@ -1923,29 +2182,119 @@ def command_approve(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_desktop_authorization(args: argparse.Namespace) -> int:
+    handoff_dir = validate_handoff_dir(args.handoff_dir)
+    verified = verify_package(handoff_dir)
+    state = verified["state"]
+    require_phase(state, "approved")
+    if verified["legacy_delivery"] or verified["delivery_channel"] != "desktop-cdp":
+        raise HandoffError("Desktop authorization requires an explicitly approved desktop-cdp package")
+    resolution = state.get("desktop_model_resolution")
+    if not isinstance(resolution, dict):
+        raise HandoffError("Desktop authorization requires an approved live model resolution")
+    message_entries = [item for item in outbound_path_entries(verified) if item.get("role") == "message"]
+    if len(message_entries) != 1:
+        raise HandoffError("Desktop authorization requires exactly one approved message artifact")
+    message = message_entries[0]
+    payload = {
+        "authorized": True,
+        "package_id": verified["manifest"]["package_id"],
+        "phase": "approved",
+        "delivery_channel": "desktop-cdp",
+        "transport": verified["manifest"]["transport"]["resolved"],
+        "manifest_sha256": verified["manifest_sha256"],
+        "message_path": message["path"],
+        "message_sha256": message["sha256"],
+        "target_url": verified["manifest"]["delivery"]["target_url"],
+        "model_id": resolution["model_id"],
+        "thinking_effort": resolution["thinking_effort"],
+        "tools_enabled": False,
+    }
+    print(json.dumps(payload, sort_keys=True, indent=2))
+    return 0
+
+
+def command_approve_desktop_model(args: argparse.Namespace) -> int:
+    if not args.confirm_live_catalog:
+        raise HandoffError("Desktop model selection requires --confirm-live-catalog after reviewing live models output")
+    if not args.approved_by.strip() or not args.model_id.strip():
+        raise HandoffError("--approved-by and --model-id must not be empty")
+    handoff_dir = validate_handoff_dir(args.handoff_dir)
+    verified = verify_package(handoff_dir)
+    state = verified["state"]
+    require_phase(state, "approved")
+    if verified["legacy_delivery"] or verified["delivery_channel"] != "desktop-cdp":
+        raise HandoffError("Live Desktop model selection applies only to an approved desktop-cdp package")
+    resolution = {
+        "resolved_at": utc_now(),
+        "approved_by": args.approved_by.strip(),
+        "manifest_sha256": verified["manifest_sha256"],
+        "requested_model": verified["manifest"]["requested_model"],
+        "catalog_source": "dynamic",
+        "model_id": args.model_id.strip(),
+        "thinking_effort": args.thinking_effort.strip() if args.thinking_effort else None,
+    }
+    state["updated_at"] = resolution["resolved_at"]
+    state["desktop_model_resolution"] = resolution
+    write_json(handoff_dir / "state.json", state)
+    append_receipt_event(handoff_dir, "desktop-model-resolved", resolution)
+    print(json.dumps({"package_id": state["package_id"], "phase": "approved", "desktop_model_resolution": resolution}, indent=2))
+    return 0
+
+
 def command_mark_submitted(args: argparse.Namespace) -> int:
     if not args.confirm_sent:
-        raise HandoffError("Submission recording requires --confirm-sent after visible UI confirmation")
-    if not args.observed_model.strip():
-        raise HandoffError("--observed-model must not be empty")
+        raise HandoffError("Submission recording requires --confirm-sent after confirmed channel completion")
     if args.thread_url and not args.thread_url.startswith("https://chatgpt.com/"):
         raise HandoffError("--thread-url must be an https://chatgpt.com/ URL")
     handoff_dir = validate_handoff_dir(args.handoff_dir)
     verified = verify_package(handoff_dir)
     state = verified["state"]
     require_phase(state, "approved")
+    if verified["legacy_delivery"]:
+        raise HandoffError("Legacy schema-2 handoffs without an explicit delivery channel cannot record a new submission")
     requested_model = str(verified["manifest"].get("requested_model", ""))
     approved_transport = str(verified["manifest"]["transport"]["resolved"])
+    approved_channel = verified["delivery_channel"]
     if args.observed_transport != approved_transport:
         raise HandoffError(
             "Observed transport does not match the approved manifest; prepare and approve a new package "
             "instead of falling back automatically"
         )
-    if args.observed_model.strip() != requested_model:
+    if args.observed_channel != approved_channel:
         raise HandoffError(
-            "Observed model/Pro setting does not match the approved manifest; "
-            "prepare a new package with an approved --requested-model instead of downgrading"
+            "Observed delivery channel does not match the approved manifest; prepare and approve a new package "
+            "instead of falling back automatically"
         )
+    desktop: dict[str, Any] | None = None
+    if approved_channel == "desktop-cdp":
+        if not args.desktop_result:
+            raise HandoffError("desktop-cdp submission recording requires --desktop-result")
+        desktop = verify_desktop_result(
+            handoff_dir,
+            verified["manifest"],
+            verified["manifest_sha256"],
+            Path(args.desktop_result).expanduser().resolve(),
+        )
+        observed_model = desktop["model_id"]
+        resolution = state.get("desktop_model_resolution")
+        if not isinstance(resolution, dict) or desktop["model_id"] != resolution.get("model_id"):
+            raise HandoffError("Desktop result model id does not match the approved live model resolution")
+        if desktop.get("requested_thinking_effort") != resolution.get("thinking_effort"):
+            raise HandoffError("Desktop result thinking effort does not match the approved live model resolution")
+        if args.observed_model and args.observed_model.strip() != observed_model:
+            raise HandoffError("--observed-model does not match the Desktop result model id")
+    else:
+        if args.desktop_result:
+            raise HandoffError("--desktop-result applies only to the desktop-cdp delivery channel")
+        if not args.observed_model or not args.observed_model.strip():
+            raise HandoffError("--observed-model must not be empty")
+        if args.observed_model.strip() != requested_model:
+            raise HandoffError(
+                "Observed model/Pro setting does not match the approved manifest; "
+                "prepare a new package with an approved --requested-model instead of downgrading"
+            )
+        observed_model = requested_model
     github = verified["manifest"]["transport"].get("github")
     if approved_transport == "github":
         if not isinstance(github, dict):
@@ -1959,11 +2308,13 @@ def command_mark_submitted(args: argparse.Namespace) -> int:
     submission = {
         "submitted_at": utc_now(),
         "destination": verified["manifest"]["destination"],
-        "observed_model": requested_model,
+        "observed_model": observed_model,
         "transport": approved_transport,
+        "delivery_channel": approved_channel,
         "outbound_artifacts": verified["outbound_artifacts"],
         "thread_url": args.thread_url or None,
         "github": github,
+        "desktop": desktop,
     }
     state["phase"] = "submitted"
     state["updated_at"] = submission["submitted_at"]
@@ -2029,8 +2380,18 @@ def command_import_response(args: argparse.Namespace) -> int:
     verified = verify_package(handoff_dir)
     state = verified["state"]
     require_phase(state, "submitted")
+    response_source = Path(args.response_file).expanduser().resolve()
+    if verified["delivery_channel"] == "desktop-cdp":
+        desktop = state.get("submission", {}).get("desktop", {})
+        approved_capture = desktop_artifact_path(
+            handoff_dir,
+            desktop.get("wrapped_response_artifact"),
+            label="wrapped response",
+        )
+        if response_source != approved_capture:
+            raise HandoffError("desktop-cdp import must use the wrapper bound to the submission receipt")
     try:
-        raw = Path(args.response_file).expanduser().resolve().read_text(encoding="utf-8")
+        raw = response_source.read_text(encoding="utf-8")
     except OSError as exc:
         raise HandoffError(f"Unable to read response file: {exc}") from exc
     markers = verified["manifest"]["response_markers"]
@@ -2140,6 +2501,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pro handoff transport; auto prefers a verified GitHub snapshot, then paste or Markdown",
     )
     prepare.add_argument(
+        "--delivery-channel",
+        choices=DELIVERY_CHANNELS,
+        default="browser",
+        help="Approved execution channel, separate from repository context transport",
+    )
+    prepare.add_argument(
         "--github-remote",
         default="origin",
         help="Git remote whose github.com repository and advertised refs are verified for github transport",
@@ -2193,12 +2560,32 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--confirm-transmission", action="store_true")
     approve.set_defaults(func=command_approve)
 
-    submitted = subparsers.add_parser("mark-submitted", help="Record a visibly confirmed browser submission")
+    desktop_model = subparsers.add_parser(
+        "approve-desktop-model",
+        help="Bind an explicitly reviewed live Desktop model selection to an approved handoff",
+    )
+    desktop_model.add_argument("--handoff-dir", required=True)
+    desktop_model.add_argument("--approved-by", required=True)
+    desktop_model.add_argument("--model-id", required=True)
+    desktop_model.add_argument("--thinking-effort")
+    desktop_model.add_argument("--confirm-live-catalog", action="store_true")
+    desktop_model.set_defaults(func=command_approve_desktop_model)
+
+    desktop_authorization = subparsers.add_parser(
+        "desktop-authorization",
+        help="Emit a read-only authorization for one approved desktop-cdp message",
+    )
+    desktop_authorization.add_argument("--handoff-dir", required=True)
+    desktop_authorization.set_defaults(func=command_desktop_authorization)
+
+    submitted = subparsers.add_parser("mark-submitted", help="Record a confirmed approved-channel submission")
     submitted.add_argument("--handoff-dir", required=True)
-    submitted.add_argument("--observed-model", required=True)
+    submitted.add_argument("--observed-model")
     submitted.add_argument("--observed-transport", choices=TRANSPORTS[1:], required=True)
+    submitted.add_argument("--observed-channel", choices=DELIVERY_CHANNELS, default="browser")
     submitted.add_argument("--observed-github-repository")
     submitted.add_argument("--observed-github-commit")
+    submitted.add_argument("--desktop-result")
     submitted.add_argument("--thread-url")
     submitted.add_argument("--confirm-sent", action="store_true")
     submitted.set_defaults(func=command_mark_submitted)

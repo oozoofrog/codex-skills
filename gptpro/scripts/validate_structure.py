@@ -7,6 +7,8 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -16,9 +18,11 @@ REQUIRED_FILES = (
     "README.md",
     "agents/openai.yaml",
     "scripts/gptpro.py",
+    "scripts/chatgpt-desktop.js",
     "scripts/validate_structure.py",
     "references/advisory-validation.md",
     "references/browser-handoff.md",
+    "references/desktop-cdp.md",
     "references/github-transport.md",
     "references/human-takeover.md",
     "references/manifest-schema.md",
@@ -31,20 +35,29 @@ REQUIRED_FILES = (
     "templates/mode-plan.md.tpl",
     "templates/mode-review.md.tpl",
     "tests/test_gptpro.py",
+    "tests/test_chatgpt_desktop.js",
+    "runtime/chatgpt-desktop/async-queue.js",
+    "runtime/chatgpt-desktop/cdp-client.js",
+    "runtime/chatgpt-desktop/chunked-message.js",
+    "runtime/chatgpt-desktop/conversation-client.js",
+    "runtime/chatgpt-desktop/delta-decoder.js",
+    "runtime/chatgpt-desktop/desktop-bridge.js",
+    "runtime/chatgpt-desktop/errors.js",
+    "runtime/chatgpt-desktop/index.js",
+    "runtime/chatgpt-desktop/model-catalog.js",
 )
 
 EXPECTED_FRONTMATTER_KEYS = {"name", "description"}
 EXPECTED_BASE_PLACEHOLDERS = {
-    "BEGIN_MARKER",
     "CONTEXT_ARTIFACT",
     "DIRTY_SUMMARY",
-    "END_MARKER",
     "FILE_COUNT",
     "GIT_SHA",
     "MODE",
     "MODE_INSTRUCTIONS",
     "PACKAGE_ID",
     "REQUESTED_MODEL",
+    "RESPONSE_CONTRACT",
     "TASK",
     "TOTAL_BYTES",
     "TRANSPORT",
@@ -171,10 +184,32 @@ def validate_python(skill_root: Path, errors: list[str]) -> None:
             compile(source, str(path), "exec")
         except (OSError, UnicodeDecodeError, SyntaxError) as exc:
             errors.append(f"Python validation failed for {relative}: {exc}")
-    for relative in ("scripts/gptpro.py", "scripts/validate_structure.py"):
+    for relative in ("scripts/gptpro.py", "scripts/chatgpt-desktop.js", "scripts/validate_structure.py"):
         path = skill_root / relative
         if path.exists() and path.stat().st_mode & 0o111 == 0:
             errors.append(f"Executable script lacks an execute bit: {relative}")
+
+
+def validate_javascript(skill_root: Path, errors: list[str]) -> bool:
+    node = shutil.which("node")
+    if node is None:
+        return False
+    paths = [skill_root / "scripts/chatgpt-desktop.js"]
+    paths.extend(sorted((skill_root / "runtime/chatgpt-desktop").glob("*.js")))
+    paths.append(skill_root / "tests/test_chatgpt_desktop.js")
+    for path in paths:
+        result = subprocess.run(
+            [node, "--check", str(path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            relative = path.relative_to(skill_root)
+            details = result.stderr.strip() or result.stdout.strip() or "node --check failed"
+            errors.append(f"JavaScript validation failed for {relative}: {details}")
+    return True
 
 
 def package_files(skill_root: Path) -> dict[str, str]:
@@ -199,7 +234,7 @@ def validate_mirror(skill_root: Path, mirror: Path, errors: list[str]) -> None:
             f"extra={sorted(set(mirror_files) - set(primary_files))}, "
             f"changed={sorted(path for path in set(primary_files) & set(mirror_files) if primary_files[path] != mirror_files[path])}"
         )
-    for relative in ("scripts/gptpro.py", "scripts/validate_structure.py"):
+    for relative in ("scripts/gptpro.py", "scripts/chatgpt-desktop.js", "scripts/validate_structure.py"):
         primary_mode = (skill_root / relative).stat().st_mode & 0o111
         mirror_mode = (mirror / relative).stat().st_mode & 0o111 if (mirror / relative).exists() else 0
         if primary_mode != mirror_mode:
@@ -209,6 +244,7 @@ def validate_mirror(skill_root: Path, mirror: Path, errors: list[str]) -> None:
 def validate(skill_root: Path, mirror: Path | None) -> dict[str, object]:
     root = skill_root.expanduser().resolve()
     errors: list[str] = []
+    node_checked = False
     if not root.is_dir():
         errors.append(f"Skill directory not found: {root}")
     else:
@@ -220,6 +256,7 @@ def validate(skill_root: Path, mirror: Path | None) -> dict[str, object]:
             validate_links(root, errors)
             validate_templates(root, errors)
             validate_python(root, errors)
+            node_checked = validate_javascript(root, errors)
     if mirror is not None and root.is_dir():
         validate_mirror(root, mirror.expanduser().resolve(), errors)
     return {
@@ -232,6 +269,7 @@ def validate(skill_root: Path, mirror: Path | None) -> dict[str, object]:
             "local-links",
             "prompt-placeholders",
             "python-syntax-and-mode",
+            "node-syntax" if node_checked else "node-syntax-skipped-node-unavailable",
             *(("standalone-plugin-mirror",) if mirror else ()),
         ],
         "errors": errors,

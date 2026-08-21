@@ -4,6 +4,7 @@
 
 ## [Unreleased]
 ### Added
+- `gptpro` macOS ChatGPT Desktop CDP phase-1 runtime: loopback/exact-target `probe`, selectable live `models`, explicitly bound model/effort approval, tool-disabled fresh-conversation `ask`, renderer-local chunk filtering, private bridge/delta isolation, exact-body deterministic response wrapping, Node built-in tests, and no npm install step
 - `gptpro/scripts/validate_structure.py`: PyYAML 없이 standalone/Plugin 구조, frontmatter, 링크, prompt placeholder, Python 문법·실행 모드와 mirror hash를 검증하는 표준 라이브러리 도구
 - `gptpro` Skill: plan/ask/review/debug/architecture 모드, Git SHA와 packaged-tree pinning, secret/exclude scan, manifest/archive hash 검증, 승인 gate, visible Chrome handoff, response import, receipt/state, advisory 검증 계약
 - `gptpro` skills-only Plugin과 repo Marketplace: Codex Plugin 브라우저 및 `$skill-installer` 기반 네트워크 설치 경로
@@ -15,6 +16,8 @@
 - `docs/release-checklist.md` 추가
 
 ### Updated
+- `gptpro` schema-2 governance now separates repository context transport from delivery channel, binds `desktop-cdp` approval/submission evidence to manifest and message hashes, preserves legacy receipt verification, rejects silent post-approval fallback, and documents CDP/private-contract security
+- `gptpro` standalone/Plugin structure validation now requires the Desktop runtime/reference/tests and runs real `node --check` validation when Node is available
 - `gptpro` `auto`를 GitHub-first로 확장: 선택 파일과 HEAD 바이트 일치, github.com 원격 ref/PR head의 SHA 검증, immutable commit·경로 allowlist pinning, prompt-only 전송, 사람 소유 App 권한 checkpoint, 응답 attestation 검증 및 text fallback 사유 기록
 - `gptpro`에 로그인·OAuth/app scope·권한·파일 선택·모델 확인·수동 전송·불확실한 제출·response export를 정상적인 attended human checkpoint로 다루는 read-only `human-handoff` workflow 추가
 - `gptpro` 첫 사용 시 `.gptpro/handoffs`와 Git 제외 규칙을 preview 후 선택적으로 구성하는 멱등 `init` workflow 추가

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 import subprocess
 import tempfile
@@ -124,6 +125,67 @@ class GptProCliTests(unittest.TestCase):
             *github_args,
         )
         return manifest
+
+    @staticmethod
+    def sha256(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def write_desktop_result(self, handoff: Path, *, model_id: str = "backend-pro") -> Path:
+        manifest = self.load(handoff / "manifest.json")
+        package_id = manifest["package_id"]
+        raw_path = handoff / "desktop-response.raw.md"
+        wrapped_path = handoff / "desktop-response.md"
+        raw_path.write_text("Desktop advisory answer.\n", encoding="utf-8")
+        wrapped_path.write_text(
+            f"{manifest['response_markers']['begin']}\n"
+            "Desktop advisory answer.\n"
+            f"{manifest['response_markers']['end']}\n",
+            encoding="utf-8",
+        )
+        message = next(item for item in manifest["transport"]["outbound_artifacts"] if item["role"] == "message")
+        result_path = handoff / "desktop-result.json"
+        result = {
+            "ok": True,
+            "completed": True,
+            "channel": "desktop-cdp",
+            "package_id": package_id,
+            "manifest_sha256": self.sha256(handoff / "manifest.json"),
+            "prompt_sha256": message["sha256"],
+            "model_id": model_id,
+            "requested_thinking_effort": "extended",
+            "observed_thinking_effort": "extended",
+            "conversation_id": "conversation-1",
+            "message_id": "message-1",
+            "parent_message_id": "message-1",
+            "local_function_signatures_count": 0,
+            "tools_enabled": False,
+            "marker_origin": "runtime",
+            "raw_response_sha256": self.sha256(raw_path),
+            "wrapped_response_sha256": self.sha256(wrapped_path),
+            "raw_output": str(raw_path),
+            "output": str(wrapped_path),
+            "completed_at": "2026-08-21T00:00:00.000Z",
+        }
+        result_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        return result_path
+
+    def approve_desktop_model(
+        self,
+        handoff: Path,
+        *,
+        model_id: str = "backend-pro",
+        thinking_effort: str | None = "extended",
+    ) -> dict:
+        args = [
+            "approve-desktop-model",
+            "--handoff-dir", str(handoff),
+            "--approved-by", "user",
+            "--model-id", model_id,
+            "--confirm-live-catalog",
+        ]
+        if thinking_effort is not None:
+            args.extend(["--thinking-effort", thinking_effort])
+        return json.loads(self.run_cli(*args).stdout)["desktop_model_resolution"]
 
     def test_prepare_records_git_and_excludes_detected_secrets_without_values(self) -> None:
         handoff = self.prepare()
@@ -729,6 +791,176 @@ class GptProCliTests(unittest.TestCase):
             "paste",
             "--confirm-sent",
             expected=2,
+        )
+
+    def test_desktop_delivery_is_separate_and_bound_by_approval(self) -> None:
+        handoff = self.prepare("review", "--transport", "paste", "--delivery-channel", "desktop-cdp")
+        manifest = self.load(handoff / "manifest.json")
+        prompt = (handoff / manifest["artifacts"]["paste_payload"]).read_text(encoding="utf-8")
+        status = json.loads(self.run_cli("status", "--handoff-dir", str(handoff)).stdout)
+
+        self.assertEqual("paste", manifest["transport"]["resolved"])
+        self.assertEqual("desktop-cdp", manifest["delivery"]["channel"])
+        self.assertFalse(manifest["delivery"]["tools_enabled"])
+        self.assertNotIn(manifest["response_markers"]["begin"], prompt)
+        self.assertIn("runtime", prompt)
+        self.assertEqual("desktop-cdp", status["delivery"]["channel"])
+
+        self.run_cli(
+            "desktop-authorization", "--handoff-dir", str(handoff), expected=2
+        )
+
+        self.run_cli(
+            "approve", "--handoff-dir", str(handoff), "--approved-by", "user", "--confirm-transmission"
+        )
+        self.run_cli("desktop-authorization", "--handoff-dir", str(handoff), expected=2)
+        resolution = self.approve_desktop_model(handoff)
+        self.assertEqual("backend-pro", resolution["model_id"])
+        self.assertEqual("extended", resolution["thinking_effort"])
+        self.run_cli("verify", "--handoff-dir", str(handoff))
+        status = json.loads(self.run_cli("status", "--handoff-dir", str(handoff)).stdout)
+        self.assertEqual(resolution, status["desktop_model_resolution"])
+        state = self.load(handoff / "state.json")
+        self.assertEqual("desktop-cdp", state["approval"]["delivery_channel"])
+        authorization = json.loads(
+            self.run_cli("desktop-authorization", "--handoff-dir", str(handoff)).stdout
+        )
+        message = next(item for item in manifest["transport"]["outbound_artifacts"] if item["role"] == "message")
+        self.assertTrue(authorization["authorized"])
+        self.assertEqual("backend-pro", authorization["model_id"])
+        self.assertEqual("extended", authorization["thinking_effort"])
+        self.assertEqual(message["sha256"], authorization["message_sha256"])
+        self.assertEqual(str(handoff / manifest["artifacts"][message["artifact"]]), authorization["message_path"])
+
+        self.run_cli(
+            "mark-submitted",
+            "--handoff-dir", str(handoff),
+            "--observed-transport", "paste",
+            "--observed-channel", "browser",
+            "--observed-model", manifest["requested_model"],
+            "--confirm-sent",
+            expected=2,
+        )
+        self.assertEqual("approved", self.load(handoff / "state.json")["phase"])
+
+    def test_desktop_result_records_model_conversation_and_integrity_then_imports(self) -> None:
+        handoff = self.prepare("ask", "--transport", "paste", "--delivery-channel", "desktop-cdp")
+        manifest = self.load(handoff / "manifest.json")
+        self.run_cli(
+            "approve", "--handoff-dir", str(handoff), "--approved-by", "user", "--confirm-transmission"
+        )
+        self.approve_desktop_model(handoff)
+        result_path = self.write_desktop_result(handoff)
+        self.run_cli(
+            "mark-submitted",
+            "--handoff-dir", str(handoff),
+            "--observed-transport", "paste",
+            "--observed-channel", "desktop-cdp",
+            "--observed-model", "backend-pro",
+            "--desktop-result", str(result_path),
+            "--confirm-sent",
+        )
+        state = self.load(handoff / "state.json")
+        desktop = state["submission"]["desktop"]
+        self.assertEqual("desktop-cdp", state["submission"]["delivery_channel"])
+        self.assertEqual("backend-pro", desktop["model_id"])
+        self.assertEqual("conversation-1", desktop["conversation_id"])
+        self.assertFalse(desktop["tools_enabled"])
+        self.assertEqual(0, desktop["local_function_signatures_count"])
+        self.assertEqual(0, self.run_cli("verify", "--handoff-dir", str(handoff)).returncode)
+
+        self.run_cli(
+            "import-response",
+            "--handoff-dir", str(handoff),
+            "--response-file", str(handoff / "desktop-response.md"),
+        )
+        self.assertEqual("Desktop advisory answer.\n", (handoff / "response.md").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["package_id"], self.load(handoff / "state.json")["package_id"])
+
+    def test_failed_desktop_evidence_does_not_mutate_approved_state(self) -> None:
+        handoff = self.prepare("debug", "--transport", "paste", "--delivery-channel", "desktop-cdp")
+        self.run_cli(
+            "approve", "--handoff-dir", str(handoff), "--approved-by", "user", "--confirm-transmission"
+        )
+        self.approve_desktop_model(handoff)
+        result_path = self.write_desktop_result(handoff)
+        result = self.load(result_path)
+        result["tools_enabled"] = True
+        result_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        before_state = (handoff / "state.json").read_bytes()
+        before_receipt = (handoff / "receipt.json").read_bytes()
+        self.run_cli(
+            "mark-submitted",
+            "--handoff-dir", str(handoff),
+            "--observed-transport", "paste",
+            "--observed-channel", "desktop-cdp",
+            "--desktop-result", str(result_path),
+            "--confirm-sent",
+            expected=2,
+        )
+        self.assertEqual(before_state, (handoff / "state.json").read_bytes())
+        self.assertEqual(before_receipt, (handoff / "receipt.json").read_bytes())
+
+    def test_desktop_phase1_rejects_text_file_context(self) -> None:
+        result = self.run_cli(
+            "prepare",
+            "--repo", str(self.repo),
+            "--mode", "review",
+            "--task", "Review.",
+            "--output-root", str(self.output_root),
+            "--transport", "text-file",
+            "--delivery-channel", "desktop-cdp",
+            expected=2,
+        )
+        self.assertIn("cannot upload a text-file context", result.stderr)
+
+    def test_desktop_auto_cannot_resolve_to_an_immediately_invalid_text_file(self) -> None:
+        result = self.run_cli(
+            "prepare",
+            "--repo", str(self.repo),
+            "--mode", "review",
+            "--task", "Review.",
+            "--output-root", str(self.output_root),
+            "--transport", "auto",
+            "--delivery-channel", "desktop-cdp",
+            "--max-paste-bytes", "1",
+            expected=2,
+        )
+        self.assertIn("cannot upload a text-file context", result.stderr)
+        self.assertFalse(self.output_root.exists())
+
+    def test_legacy_schema2_without_delivery_remains_verifiable_but_cannot_advance(self) -> None:
+        handoff = self.prepare("review", "--transport", "paste")
+        manifest_path = handoff / "manifest.json"
+        manifest = self.load(manifest_path)
+        manifest.pop("delivery")
+        manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        manifest_hash = self.sha256(manifest_path)
+
+        state_path = handoff / "state.json"
+        state = self.load(state_path)
+        state["artifact_hashes"]["manifest_sha256"] = manifest_hash
+        state_path.write_text(json.dumps(state, sort_keys=True, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+        receipt_path = handoff / "receipt.json"
+        receipt = self.load(receipt_path)
+        event = receipt["events"][0]
+        event["data"].pop("delivery_channel")
+        event["data"]["manifest_sha256"] = manifest_hash
+        event_payload = {key: value for key, value in event.items() if key != "event_hash"}
+        event["event_hash"] = hashlib.sha256(
+            json.dumps(event_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+        receipt_path.write_text(json.dumps(receipt, sort_keys=True, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+        verified = json.loads(self.run_cli("verify", "--handoff-dir", str(handoff)).stdout)
+        self.assertTrue(verified["legacy_delivery"])
+        self.assertEqual("browser", verified["delivery_channel"])
+        status = json.loads(self.run_cli("status", "--handoff-dir", str(handoff)).stdout)
+        self.assertFalse(status["delivery"]["new_transitions_allowed"])
+        self.run_cli(
+            "approve", "--handoff-dir", str(handoff), "--approved-by", "user",
+            "--confirm-transmission", expected=2,
         )
 
     def test_response_import_and_evaluation_complete_receipt_chain(self) -> None:

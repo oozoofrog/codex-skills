@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -40,7 +41,7 @@ class PluginDistributionTests(unittest.TestCase):
             (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
         )
         self.assertEqual("gptpro", manifest["name"])
-        self.assertEqual("0.1.0", manifest["version"])
+        self.assertRegex(manifest["version"], r"^0\.2\.0\+codex\.[a-z0-9-]+$")
         self.assertEqual("./skills/", manifest["skills"])
         self.assertEqual("GPT Pro Collaborator", manifest["interface"]["displayName"])
         self.assertTrue((PLUGIN_SKILL / "SKILL.md").is_file())
