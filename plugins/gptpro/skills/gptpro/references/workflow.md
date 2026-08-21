@@ -10,7 +10,7 @@ prepared -> approved -> submitted -> response_imported -> evaluated
 
 `verify` is read-only and may run at any phase. Every mutating transition first verifies the existing manifest, prompt, context, optional paste payload, local archive, state identity, and receipt hash chain.
 
-Schema-1 ZIP-first handoffs are immutable legacy receipts. Do not silently reinterpret their approval as text-transmission approval; prepare and approve a schema-2 handoff instead.
+Schema-1 ZIP-first handoffs are immutable legacy receipts. Do not silently reinterpret their approval as text-transmission approval; prepare and approve a schema-2 handoff instead. Schema 3 is reserved for explicit `mcp-read` maximum-disclosure approval and is never selected by `auto`; see [web-mcp.md](web-mcp.md).
 
 ## First-use environment
 
@@ -60,6 +60,8 @@ Preparation records both `git.head_sha` and a hash of the actual packaged file s
 
 When an in-repository output root is not ignored, `prepare` adds a warning pointing to `init`; it does not change Git configuration automatically.
 
+For a deliberate Web MCP foundation package, use `--transport mcp-read` plus `--tunnel-id-ref env:NAME` or an absolute owner-only mode-0600 `file:` reference, the intended app/workspace labels, and the smallest directed file set. It creates schema 3, a prompt-only outbound list, and a local immutable ZIP. It never uploads the ZIP and never makes MCP an `auto` fallback. The raw Tunnel ID/reference is not persisted. This build can verify and approve that contract but cannot activate or submit it.
+
 ## Verify and inspect
 
 ```bash
@@ -81,6 +83,18 @@ python3 <skill-dir>/scripts/gptpro.py approve \
 ```
 
 Approval binds to the manifest, resolved transport, and exact outbound artifact hashes. For `github`, the manifest also binds the repository, immutable commit, optional PR locator, verified remote ref, and selected path set; only `prompt.md` is outbound. Any later artifact change makes verification fail and invalidates progression.
+
+For schema-3 `mcp-read`, first show the exact maximum path/size/hash set, potential bytes, tool schema, limits, expiry, and connector/app/workspace labels, then require both flags:
+
+```bash
+python3 <skill-dir>/scripts/gptpro.py approve \
+  --handoff-dir <dir> \
+  --approved-by user \
+  --confirm-transmission \
+  --confirm-mcp-disclosure
+```
+
+That approval does not authorize a manually fabricated active session. A foundation-only build stops here; do not paste the prompt or record submission.
 
 ## Human checkpoint
 

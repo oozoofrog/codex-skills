@@ -1,6 +1,6 @@
 # Artifact schema
 
-The current `schema_version` is `2`.
+The verifier dispatches explicit schema versions. Existing GitHub, paste, and text-file packages use schema 2. Only an explicitly requested `mcp-read` package uses schema 3; `auto` never resolves to it.
 
 ## `manifest.json`
 
@@ -41,3 +41,20 @@ Contains an ordered event list. Each event includes `sequence`, timestamp, type,
 - `evaluation.json`: Codex verdict, summary, evidence strings, optional applied Git SHA, and imported-response hash.
 
 All JSON is UTF-8, sorted, indented, and newline-terminated. Hash values are lowercase SHA-256 hex strings.
+
+## Schema 3 `mcp-read` foundation
+
+Schema 3 changes approval meaning, so a schema-2 approval is never reinterpreted. Its only outbound artifact is `prompt.md`; `context-<id>.md` and paste payloads are not created. The ZIP remains local and stores the immutable repository members without compression for bounded on-demand reading by a future runtime.
+
+Additional manifest fields bind:
+
+- `delivery.channel = browser` separately from `transport.resolved = mcp-read`;
+- `connector.type = secure-mcp-tunnel`, a safe runtime alias, visible app/workspace labels, protocol and tool-schema hashes, and a package-specific hash of the transient Tunnel ID;
+- `repository`: public display identity, Git SHA, packaged tree hash, and dirty summary without a local absolute root;
+- `mcp_disclosure`: exact path/size/file-hash allowlist, canonical file-set hash, potential file/byte totals, static three-tool list, bounded limits, approval expiry, and future audit filename;
+- `hashes.approval_basis_sha256`: the canonical maximum-disclosure approval contract;
+- `hashes.manifest_basis_sha256`: a self-hash basis that excludes only its own two derived basis hashes.
+
+The raw Tunnel ID, its `env:` or `file:` reference, API keys, credentials, and absolute repository/file-list paths are not persisted. Schema-3 approval requires both `--confirm-transmission` and `--confirm-mcp-disclosure` and copies the approval basis into state and receipt.
+
+This foundation has no activation command. `state.mcp_session` must remain `null`, and verification rejects handwritten active-session or post-approval runtime state. A future runtime PR must add separately validated authorization, audit, and auxiliary-event contracts before schema-3 submission can succeed. See [web-mcp.md](web-mcp.md).

@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
+import importlib.util
 import json
 import re
 import sys
@@ -23,7 +25,11 @@ REQUIRED_FILES = (
     "references/human-takeover.md",
     "references/manifest-schema.md",
     "references/security.md",
+    "references/web-mcp.md",
     "references/workflow.md",
+    "runtime/__init__.py",
+    "runtime/gptpro_mcp/__init__.py",
+    "runtime/gptpro_mcp/schema.py",
     "templates/base-prompt.md.tpl",
     "templates/mode-architecture.md.tpl",
     "templates/mode-ask.md.tpl",
@@ -31,6 +37,7 @@ REQUIRED_FILES = (
     "templates/mode-plan.md.tpl",
     "templates/mode-review.md.tpl",
     "tests/test_gptpro.py",
+    "tests/test_web_mcp_foundation.py",
 )
 
 EXPECTED_FRONTMATTER_KEYS = {"name", "description"}
@@ -164,7 +171,16 @@ def validate_templates(skill_root: Path, errors: list[str]) -> None:
 
 
 def validate_python(skill_root: Path, errors: list[str]) -> None:
-    for relative in ("scripts/gptpro.py", "scripts/validate_structure.py", "tests/test_gptpro.py"):
+    python_files = (
+        "scripts/gptpro.py",
+        "scripts/validate_structure.py",
+        "runtime/__init__.py",
+        "runtime/gptpro_mcp/__init__.py",
+        "runtime/gptpro_mcp/schema.py",
+        "tests/test_gptpro.py",
+        "tests/test_web_mcp_foundation.py",
+    )
+    for relative in python_files:
         path = skill_root / relative
         try:
             source = path.read_text(encoding="utf-8")
@@ -175,6 +191,58 @@ def validate_python(skill_root: Path, errors: list[str]) -> None:
         path = skill_root / relative
         if path.exists() and path.stat().st_mode & 0o111 == 0:
             errors.append(f"Executable script lacks an execute bit: {relative}")
+
+
+def validate_mcp_foundation(skill_root: Path, errors: list[str]) -> None:
+    relative = "runtime/gptpro_mcp/schema.py"
+    path = skill_root / relative
+    try:
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+    except (OSError, UnicodeDecodeError, SyntaxError) as exc:
+        errors.append(f"Unable to inspect Web MCP schema fixture: {exc}")
+        return
+    allowed_imports = {"__future__", "hashlib", "json", "typing"}
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".", 1)[0])
+    unexpected = sorted(imported - allowed_imports)
+    if unexpected:
+        errors.append(f"Web MCP schema fixture imports non-stdlib modules: {unexpected}")
+        return
+    try:
+        spec = importlib.util.spec_from_file_location("gptpro_structure_mcp_schema", path)
+        if spec is None or spec.loader is None:
+            raise ValidationError("unable to create module specification")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        expected_names = (
+            "gptpro_package_info",
+            "gptpro_repo_read",
+            "gptpro_repo_search",
+        )
+        if module.TOOL_NAMES != expected_names:
+            errors.append(
+                "Web MCP phase-1 tool names must be the exact read-only catalog; "
+                f"found={module.TOOL_NAMES!r}"
+            )
+        for tool in module.TOOL_CATALOG:
+            annotations = tool.get("annotations", {})
+            if annotations != {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "openWorldHint": False,
+                "idempotentHint": True,
+            }:
+                errors.append(f"Web MCP tool {tool.get('name')!r} has unsafe annotations")
+        if re.fullmatch(r"[0-9a-f]{64}", module.tool_schema_sha256()) is None:
+            errors.append("Web MCP canonical tool-schema hash is invalid")
+        module.validate_limits(dict(module.DEFAULT_LIMITS))
+    except (AttributeError, TypeError, ValueError, ValidationError) as exc:
+        errors.append(f"Web MCP schema fixture validation failed: {exc}")
 
 
 def package_files(skill_root: Path) -> dict[str, str]:
@@ -220,6 +288,7 @@ def validate(skill_root: Path, mirror: Path | None) -> dict[str, object]:
             validate_links(root, errors)
             validate_templates(root, errors)
             validate_python(root, errors)
+            validate_mcp_foundation(root, errors)
     if mirror is not None and root.is_dir():
         validate_mirror(root, mirror.expanduser().resolve(), errors)
     return {
@@ -232,6 +301,7 @@ def validate(skill_root: Path, mirror: Path | None) -> dict[str, object]:
             "local-links",
             "prompt-placeholders",
             "python-syntax-and-mode",
+            "web-mcp-read-only-schema",
             *(("standalone-plugin-mirror",) if mirror else ()),
         ],
         "errors": errors,

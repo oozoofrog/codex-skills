@@ -1,7 +1,7 @@
 {
   "name": "gptpro",
   "version": "0.1.0",
-  "description": "Secure attended handoffs between Codex and logged-in ChatGPT Pro general Chat.",
+  "description": "Secure attended ChatGPT Pro handoffs with an experimental Web MCP governance foundation.",
   "author": {
     "name": "oozoofrog",
     "url": "https://github.com/oozoofrog"
@@ -17,8 +17,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "GPT Pro Collaborator",
-    "shortDescription": "GitHub-first ChatGPT Pro handoffs with human takeover",
-    "longDescription": "Prepare an approved GitHub-first, immutable-SHA repository handoff with verified text fallback for logged-in ChatGPT Pro, use narrow human takeover at trust or browser boundaries when needed, then import and validate its response as advisory evidence.",
+    "shortDescription": "ChatGPT Pro handoffs and experimental Web MCP",
+    "longDescription": "Prepare an approved GitHub-first, immutable-SHA repository handoff with verified text fallback for logged-in ChatGPT Pro. An explicit experimental schema-3 foundation can bind a future read-only Web MCP disclosure without claiming that the runtime or ChatGPT connection is available.",
     "developerName": "oozoofrog",
     "category": "Productivity",
     "capabilities": [

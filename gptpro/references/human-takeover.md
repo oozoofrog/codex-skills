@@ -8,6 +8,7 @@ Pause browser automation when the next action requires the account owner's judgm
 
 - sign-in, MFA, CAPTCHA, account switching, or workspace selection;
 - GitHub or another ChatGPT app authorization and repository-scope choice;
+- ChatGPT Developer Mode, Secure MCP Tunnel app, or exact workspace selection;
 - Chrome site permission or local-file access permission;
 - an operating-system file chooser or exact attachment selection;
 - ambiguous model or Pro/reasoning controls;
@@ -28,7 +29,7 @@ python3 <skill-dir>/scripts/gptpro.py human-handoff \
   --details "Chrome file chooser did not open."
 ```
 
-Supported pre-submission reasons include `login`, `account-or-workspace`, `app-authorization`, `file-permission`, `file-selection`, `model-selection`, `captcha`, `site-approval`, `manual-transport`, and `submission-uncertain`. For `github`, `app-authorization` names the exact approved repository and commit, while `manual-transport` requires activating the visible GitHub app/plugin, pasting only `prompt.md`, and attaching no local file. After submission, use `response-export` when a person must save the completed marked response.
+Supported pre-submission reasons include `login`, `account-or-workspace`, `app-authorization`, `file-permission`, `file-selection`, `model-selection`, `captcha`, `site-approval`, `manual-transport`, and `submission-uncertain`. For `github`, `app-authorization` names the exact approved repository and commit, while `manual-transport` requires activating the visible GitHub app/plugin, pasting only `prompt.md`, and attaching no local file. For `mcp-read`, app/workspace/Tunnel selection is also human-owned, but a checklist cannot replace a missing local runtime or active package authorization. After submission, use `response-export` when a person must save the completed marked response.
 
 The command verifies the package before printing instructions. Its JSON includes the package phase, approved model, transport, exact outbound paths and hashes, human steps, expected return evidence, and retry rule. It does not write state, append a receipt event, authorize transmission, or prove that an action occurred.
 
