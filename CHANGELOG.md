@@ -16,6 +16,7 @@
 - `docs/release-checklist.md` 추가
 
 ### Updated
+- `gptpro` Desktop response completion now accepts the ChatGPT Desktop stream-handoff path that ends with a trusted transport-complete event but omits `message_stream_complete`, while still requiring assistant-message evidence, non-empty output, and fail-closed handling for errors, cancellation, timeout, and explicit unfinished status
 - `gptpro` schema-2 governance now separates repository context transport from delivery channel, binds `desktop-cdp` approval/submission evidence to manifest and message hashes, preserves legacy receipt verification, rejects silent post-approval fallback, and documents CDP/private-contract security
 - `gptpro` standalone/Plugin structure validation now requires the Desktop runtime/reference/tests and runs real `node --check` validation when Node is available
 - `gptpro` `auto`를 GitHub-first로 확장: 선택 파일과 HEAD 바이트 일치, github.com 원격 ref/PR head의 SHA 검증, immutable commit·경로 allowlist pinning, prompt-only 전송, 사람 소유 App 권한 checkpoint, 응답 attestation 검증 및 text fallback 사유 기록

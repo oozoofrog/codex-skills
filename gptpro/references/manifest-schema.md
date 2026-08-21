@@ -29,7 +29,7 @@ Transport answers how repository context is disclosed. Delivery answers which lo
 
 Records the current lifecycle phase and phase-specific metadata. Artifact hashes copied into the state bind later approval and response events to the prepared package. Approval and submission events record the resolved transport, delivery channel, and exact outbound artifact metadata. GitHub submissions additionally record the approved/observed repository identity; imported GitHub responses store the parsed attestation.
 
-A Desktop submission additionally records the live backend model, requested/observed effort, conversation/message identifiers when available, `local_function_signatures_count: 0`, and the result/raw/wrapper artifact hashes. These values are admitted only after `gptpro.py` recomputes the approved manifest and outbound-message hashes plus the deterministic wrapper bytes.
+A Desktop submission additionally records the live backend model, requested/observed effort, conversation/message identifiers when available, `local_function_signatures_count: 0`, trusted transport completion, the completion signal, observed assistant-message evidence/status, and the result/raw/wrapper artifact hashes. These values are admitted only after `gptpro.py` validates the completion evidence and recomputes the approved manifest and outbound-message hashes plus the deterministic wrapper bytes.
 
 ## `receipt.json`
 

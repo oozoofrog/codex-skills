@@ -10,6 +10,11 @@ const { DEFAULT_ENDPOINT, DEFAULT_TARGET_URL } = require("../runtime/chatgpt-des
 const { DesktopRuntimeError, asRuntimeError, errorPayload } = require("../runtime/chatgpt-desktop/errors");
 
 const COMMANDS = new Set(["probe", "models", "ask"]);
+const DESKTOP_COMPLETION_SIGNALS = new Set([
+  "message-stream-complete",
+  "assistant-message-finished-successfully",
+  "desktop-transport-complete",
+]);
 
 function usage() {
   return `Usage:
@@ -209,8 +214,9 @@ async function runAsk(options, runtimeFactory = connectDesktopRuntime) {
   } finally { clearTimeout(timer); process.removeListener("SIGINT", cancel); }
   const begin = `BEGIN_GPTPRO_RESPONSE:${packageId}`;
   const end = `END_GPTPRO_RESPONSE:${packageId}`;
-  if (response.complete !== true) {
-    throw new DesktopRuntimeError("STREAM_INTERRUPTED", "Desktop conversation did not emit a proven completion event");
+  if (response.complete !== true || response.transport_complete !== true ||
+      response.assistant_message_observed !== true || !DESKTOP_COMPLETION_SIGNALS.has(response.completion_signal)) {
+    throw new DesktopRuntimeError("STREAM_INTERRUPTED", "Desktop conversation did not produce valid transport and assistant completion evidence");
   }
   const raw = response.text;
   if (raw.includes(begin) || raw.includes(end)) {
@@ -236,6 +242,10 @@ async function runAsk(options, runtimeFactory = connectDesktopRuntime) {
     conversation_id: response.conversation_id || null,
     message_id: response.message_id || null,
     parent_message_id: response.parent_message_id || null,
+    transport_complete: response.transport_complete === true,
+    completion_signal: response.completion_signal,
+    assistant_message_observed: response.assistant_message_observed === true,
+    assistant_message_status: response.assistant_message_status || null,
     local_function_signatures_count: 0,
     tools_enabled: false,
     server_tool_event_count: Array.isArray(response.server_tool_events) ? response.server_tool_events.length : 0,

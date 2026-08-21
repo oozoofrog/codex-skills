@@ -157,6 +157,10 @@ class GptProCliTests(unittest.TestCase):
             "conversation_id": "conversation-1",
             "message_id": "message-1",
             "parent_message_id": "message-1",
+            "transport_complete": True,
+            "completion_signal": "message-stream-complete",
+            "assistant_message_observed": True,
+            "assistant_message_status": "finished_successfully",
             "local_function_signatures_count": 0,
             "tools_enabled": False,
             "marker_origin": "runtime",
@@ -865,6 +869,10 @@ class GptProCliTests(unittest.TestCase):
         self.assertEqual("desktop-cdp", state["submission"]["delivery_channel"])
         self.assertEqual("backend-pro", desktop["model_id"])
         self.assertEqual("conversation-1", desktop["conversation_id"])
+        self.assertTrue(desktop["transport_complete"])
+        self.assertEqual("message-stream-complete", desktop["completion_signal"])
+        self.assertTrue(desktop["assistant_message_observed"])
+        self.assertEqual("finished_successfully", desktop["assistant_message_status"])
         self.assertFalse(desktop["tools_enabled"])
         self.assertEqual(0, desktop["local_function_signatures_count"])
         self.assertEqual(0, self.run_cli("verify", "--handoff-dir", str(handoff)).returncode)
@@ -886,6 +894,30 @@ class GptProCliTests(unittest.TestCase):
         result_path = self.write_desktop_result(handoff)
         result = self.load(result_path)
         result["tools_enabled"] = True
+        result_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        before_state = (handoff / "state.json").read_bytes()
+        before_receipt = (handoff / "receipt.json").read_bytes()
+        self.run_cli(
+            "mark-submitted",
+            "--handoff-dir", str(handoff),
+            "--observed-transport", "paste",
+            "--observed-channel", "desktop-cdp",
+            "--desktop-result", str(result_path),
+            "--confirm-sent",
+            expected=2,
+        )
+        self.assertEqual(before_state, (handoff / "state.json").read_bytes())
+        self.assertEqual(before_receipt, (handoff / "receipt.json").read_bytes())
+
+    def test_invalid_desktop_completion_evidence_does_not_mutate_approved_state(self) -> None:
+        handoff = self.prepare("debug", "--transport", "paste", "--delivery-channel", "desktop-cdp")
+        self.run_cli(
+            "approve", "--handoff-dir", str(handoff), "--approved-by", "user", "--confirm-transmission"
+        )
+        self.approve_desktop_model(handoff)
+        result_path = self.write_desktop_result(handoff)
+        result = self.load(result_path)
+        result["completion_signal"] = "untrusted-eof"
         result_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         before_state = (handoff / "state.json").read_bytes()
         before_receipt = (handoff / "receipt.json").read_bytes()

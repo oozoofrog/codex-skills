@@ -282,7 +282,39 @@ test("conversation request selects exact model and disables tool signatures", as
   assert.equal(result.text, "Complete answer");
   assert.equal(result.conversation_id, "conv-1");
   assert.equal(result.message_id, "msg-1");
+  assert.equal(result.transport_complete, true);
+  assert.equal(result.completion_signal, "message-stream-complete");
+  assert.equal(result.assistant_message_observed, true);
   assert.equal(result.tools_enabled, false);
+});
+
+test("conversation accepts Desktop-owned normal transport completion without a message completion event", async () => {
+  const bridge = {
+    async request(request) {
+      if (request.url.startsWith("/models")) return { status: 200, body: {
+        models: [{ slug: "backend-pro", title: "Pro" }],
+        versions: [{ intelligence_presets: [{ model_slug: "backend-pro" }] }],
+      } };
+      return { status: 200, body: { attestation_challenge: "ephemeral-challenge" } };
+    },
+    async stream() {
+      return (async function* () {
+        yield { event: "message", data: JSON.stringify({
+          conversation_id: "conv-transport",
+          message: {
+            id: "msg-transport", status: "finished_successfully",
+            author: { role: "assistant" }, recipient: "all",
+            content: { content_type: "text", parts: ["Transport-complete answer"] },
+          },
+        }) };
+      }());
+    },
+  };
+  const result = await new ChatGptDesktopConversationClient(bridge).startChat({ prompt: "Approved prompt", model: "backend-pro" });
+  assert.equal(result.text, "Transport-complete answer");
+  assert.equal(result.transport_complete, true);
+  assert.equal(result.completion_signal, "assistant-message-finished-successfully");
+  assert.equal(result.assistant_message_status, "finished_successfully");
 });
 
 test("delta decoder assembles v1 append operations and sources", () => {
@@ -337,6 +369,14 @@ test("delta decoder rejects transport EOF without message completion", () => {
   assert.throws(() => decoder.result(), (error) => error.code === "STREAM_INTERRUPTED");
 });
 
+test("delta decoder rejects transport completion with an explicit in-progress assistant status", () => {
+  const decoder = new DeltaDecoder();
+  decoder.consume({ event: "message", data: JSON.stringify({
+    message: { id: "partial", status: "in_progress", author: { role: "assistant" }, content: { parts: ["partial"] } },
+  }) });
+  assert.throws(() => decoder.result({ transportComplete: true }), (error) => error.code === "STREAM_INTERRUPTED");
+});
+
 test("delta decoder records server tool events without exposing a local tool relay", () => {
   const decoder = new DeltaDecoder();
   decoder.consume({ event: "message", data: JSON.stringify({ message: { id: "tool", author: { role: "assistant" }, recipient: "server.search", content: { content_type: "tool_call", parts: [] } } }) });
@@ -364,6 +404,10 @@ function fakeAskRuntime(responseOverrides = {}, capture = {}) {
           tools_enabled: false,
           local_function_signatures_count: 0,
           complete: true,
+          transport_complete: true,
+          completion_signal: "message-stream-complete",
+          assistant_message_observed: true,
+          assistant_message_status: "finished_successfully",
           ...responseOverrides,
         };
       },
@@ -442,7 +486,21 @@ test("ask reads a file, wraps one complete turn atomically, and records both has
   assert.equal(result.marker_origin, "runtime");
   assert.equal(result.local_function_signatures_count, 0);
   assert.equal(result.conversation_id, "conversation-1");
+  assert.equal(result.transport_complete, true);
+  assert.equal(result.completion_signal, "message-stream-complete");
+  assert.equal(result.assistant_message_observed, true);
   assert.equal(JSON.parse(fs.readFileSync(result.result_file, "utf8")).wrapped_response_sha256, result.wrapped_response_sha256);
+});
+
+test("ask refuses to write artifacts without trusted completion evidence", async () => {
+  const fixture = askFixture();
+  await assert.rejects(() => runAsk(authorizedAskOptions(fixture, {
+    promptFile: fixture.promptFile, model: "backend-pro", thinkingEffort: "extended",
+    output: fixture.output, packageId: fixture.packageId, timeoutMs: 500,
+  }), fakeAskRuntime({ transport_complete: false })), (error) => error.code === "STREAM_INTERRUPTED");
+  assert.equal(fs.existsSync(fixture.output), false);
+  assert.equal(fs.existsSync(`${fixture.output}.raw.md`), false);
+  assert.equal(fs.existsSync(`${fixture.output}.result.json`), false);
 });
 
 test("ask rejects missing, empty, mismatched, and pre-marked prompt/response data", async () => {

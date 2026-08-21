@@ -25,6 +25,11 @@ SCHEMA_VERSION = 2
 MODES = ("plan", "ask", "review", "debug", "architecture")
 TRANSPORTS = ("auto", "github", "paste", "text-file")
 DELIVERY_CHANNELS = ("browser", "manual", "desktop-cdp")
+DESKTOP_COMPLETION_SIGNALS = (
+    "message-stream-complete",
+    "assistant-message-finished-successfully",
+    "desktop-transport-complete",
+)
 IGNORE_SCOPES = ("local", "repository", "none")
 PHASES = ("prepared", "approved", "submitted", "response_imported", "evaluated")
 HUMAN_HANDOFF_REASONS = (
@@ -1438,6 +1443,15 @@ def verify_desktop_result(
         raise HandoffError("Desktop result does not bind the approved outbound message hash")
     if result.get("tools_enabled") is not False or result.get("local_function_signatures_count") != 0:
         raise HandoffError("Desktop result does not prove phase-1 tool calling was disabled")
+    if (
+        result.get("transport_complete") is not True
+        or result.get("assistant_message_observed") is not True
+        or result.get("completion_signal") not in DESKTOP_COMPLETION_SIGNALS
+    ):
+        raise HandoffError("Desktop result does not contain valid transport and assistant completion evidence")
+    assistant_message_status = result.get("assistant_message_status")
+    if assistant_message_status is not None and not isinstance(assistant_message_status, str):
+        raise HandoffError("Desktop result assistant message status is invalid")
     server_tool_event_count = result.get("server_tool_event_count", 0)
     if not isinstance(server_tool_event_count, int) or server_tool_event_count < 0:
         raise HandoffError("Desktop result server tool event count is invalid")
@@ -1489,6 +1503,10 @@ def verify_desktop_result(
         "conversation_id": result.get("conversation_id"),
         "message_id": result.get("message_id"),
         "parent_message_id": result.get("parent_message_id"),
+        "transport_complete": True,
+        "completion_signal": result.get("completion_signal"),
+        "assistant_message_observed": True,
+        "assistant_message_status": assistant_message_status,
         "completed_at": completed_at,
         "tools_enabled": False,
         "local_function_signatures_count": 0,

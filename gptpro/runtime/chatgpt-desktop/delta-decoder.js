@@ -144,6 +144,9 @@ class DeltaDecoder {
     this.sources = [];
     this.toolEvents = [];
     this.complete = false;
+    this.completionSignal = null;
+    this.assistantMessageObserved = false;
+    this.assistantMessageStatus = null;
   }
 
   consume({ event, data }) {
@@ -194,6 +197,16 @@ class DeltaDecoder {
           content_type: typeof contentType === "string" ? contentType : null,
         });
       } else {
+        if (decoded.message.author?.role === "assistant") {
+          this.assistantMessageObserved = true;
+          if (typeof decoded.message.status === "string") {
+            this.assistantMessageStatus = decoded.message.status;
+            if (decoded.message.status === "finished_successfully") {
+              this.complete = true;
+              this.completionSignal ||= "assistant-message-finished-successfully";
+            }
+          }
+        }
         this.messageId = decoded.message.id || this.messageId;
         this.parentMessageId = decoded.message.id || this.parentMessageId;
         const text = messageText(decoded.message);
@@ -201,7 +214,10 @@ class DeltaDecoder {
       }
       this._collectSources(decoded.message);
     }
-    if (event === "message_stream_complete" || decoded.type === "message_stream_complete") this.complete = true;
+    if (event === "message_stream_complete" || decoded.type === "message_stream_complete") {
+      this.complete = true;
+      this.completionSignal = "message-stream-complete";
+    }
     this._collectSources(decoded);
   }
 
@@ -228,15 +244,24 @@ class DeltaDecoder {
     }
   }
 
-  result() {
-    if (!this.complete) throw new DesktopRuntimeError("STREAM_INTERRUPTED", "Desktop conversation ended without a message completion event");
+  result({ transportComplete = false } = {}) {
+    const transportCompletionAllowed = transportComplete === true &&
+      this.assistantMessageObserved &&
+      (this.assistantMessageStatus == null || this.assistantMessageStatus === "finished_successfully");
+    if (!this.complete && !transportCompletionAllowed) {
+      throw new DesktopRuntimeError("STREAM_INTERRUPTED", "Desktop conversation ended without proven completion evidence");
+    }
     if (!this.visibleText.trim()) throw new DesktopRuntimeError("STREAM_INTERRUPTED", "Desktop conversation completed without visible assistant output");
     return {
       text: this.visibleText,
       conversation_id: this.conversationId,
       message_id: this.messageId,
       parent_message_id: this.parentMessageId,
-      complete: this.complete,
+      complete: true,
+      transport_complete: transportComplete === true,
+      completion_signal: this.completionSignal || "desktop-transport-complete",
+      assistant_message_observed: this.assistantMessageObserved,
+      assistant_message_status: this.assistantMessageStatus,
       sources: this.sources,
       server_tool_events: this.toolEvents,
     };

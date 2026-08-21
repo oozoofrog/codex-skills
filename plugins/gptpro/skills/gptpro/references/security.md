@@ -54,7 +54,7 @@ CDP discovery and its debugger WebSocket are loopback-only; URL credentials, uns
 
 The debug port grants powerful local renderer access. Never forward it through SSH, containers, a LAN, or a public interface. Enable it only for the attended session and close the debug-enabled app instance afterward. A compromised local machine can still abuse localhost.
 
-Phase-1 `ask` always sends `local_function_signatures: []`; no local shell or repository tool relay exists. The runtime does not retry interrupted or ambiguous sends. A reviewed dynamic-catalog model id/effort is hash-chain bound before CDP access, and `ask` rejects model drift before connecting. It stores the exact decoded visible body and deterministic marker wrapper with separate hashes; Python verifies these and the approved manifest/message hashes before recording submission. See [desktop-cdp.md](desktop-cdp.md).
+Phase-1 `ask` always sends `local_function_signatures: []`; no local shell or repository tool relay exists. The runtime does not retry interrupted or ambiguous sends. A reviewed dynamic-catalog model id/effort is hash-chain bound before CDP access, and `ask` rejects model drift before connecting. A normal Desktop-owned transport-complete event is accepted only with a decoded assistant message, non-empty output, and no explicit unfinished status; stream error, abrupt iterator failure, cancellation, and timeout remain failures. The completion signal and assistant evidence are recorded alongside the exact decoded visible body and deterministic marker wrapper hashes. Python verifies all of them and the approved manifest/message hashes before recording submission. See [desktop-cdp.md](desktop-cdp.md).
 
 ## Retention
 

@@ -74,7 +74,7 @@ class ChatGptDesktopConversationClient {
     });
     const decoder = new DeltaDecoder();
     for await (const event of events) decoder.consume(event);
-    const result = decoder.result();
+    const result = decoder.result({ transportComplete: true });
     return {
       ...result,
       model_id: model.id,
