@@ -758,20 +758,80 @@ class ProtocolTests(unittest.TestCase):
             self.assertIsInstance(json.loads(line), dict)
 
     def test_protocol_negotiates_legacy_revisions_and_latest_fallback(self) -> None:
-        for version in ("2025-11-25", "2025-06-18", "2025-03-26"):
+        for version in (
+            "2025-11-25",
+            "2025-06-18",
+            "2025-03-26",
+            "2024-11-05",
+        ):
             with self.subTest(version=version):
                 responses, _, _ = self.transcript([self.initialize(version)])
                 self.assertEqual(version, responses[0]["result"]["protocolVersion"])
         responses, _, _ = self.transcript([self.initialize("2026-07-28")])
         self.assertEqual("2025-11-25", responses[0]["result"]["protocolVersion"])
 
-    def test_duplicate_initialize_and_preinitialized_tools_fail(self) -> None:
-        responses, _, _ = self.transcript([self.initialize(), self.initialize(request_id=2)])
-        self.assertEqual(-32600, responses[1]["error"]["code"])
+    def test_duplicate_initialize_after_ready_is_rejected_without_closing_tools(self) -> None:
+        responses, _, _ = self.transcript([
+            self.initialize(),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+            self.initialize("2025-06-18", request_id=3),
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/list"},
+        ])
+        self.assertEqual(-32600, responses[2]["error"]["code"])
+        self.assertEqual(list(TOOL_CATALOG), responses[3]["result"]["tools"])
+
+    def test_tunnel_reinitializes_after_modern_discovery_fallback(self) -> None:
+        responses, _, _ = self.transcript([
+            self.initialize(request_id="compatibility-initialize"),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": "warm-list", "method": "tools/list"},
+            {
+                "jsonrpc": "2.0",
+                "id": "discover",
+                "method": "server/discover",
+                "params": {
+                    "_meta": {
+                        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                        "io.modelcontextprotocol/clientInfo": {
+                            "name": "connector",
+                            "version": "1",
+                        },
+                        "io.modelcontextprotocol/clientCapabilities": {},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": "closed-list", "method": "tools/list"},
+            self.initialize("2024-11-05", request_id="connector-initialize"),
+            {"jsonrpc": "2.0", "id": "pre-notification-list", "method": "tools/list"},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": "list", "method": "tools/list"},
+        ])
+        self.assertEqual(list(TOOL_CATALOG), responses[1]["result"]["tools"])
+        self.assertEqual(-32601, responses[2]["error"]["code"])
+        self.assertEqual(-32600, responses[3]["error"]["code"])
+        self.assertEqual("2024-11-05", responses[4]["result"]["protocolVersion"])
+        self.assertEqual(-32600, responses[5]["error"]["code"])
+        self.assertEqual(list(TOOL_CATALOG), responses[6]["result"]["tools"])
+
+    def test_preinitialized_tools_fail(self) -> None:
         responses, _, _ = self.transcript([
             {"jsonrpc": "2.0", "id": 7, "method": "tools/list"}
         ])
         self.assertEqual(-32600, responses[0]["error"]["code"])
+
+    def test_unknown_method_does_not_open_reinitialize_fallback(self) -> None:
+        responses, _, _ = self.transcript([
+            self.initialize(),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "unknown"},
+            self.initialize("2025-06-18", request_id=3),
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/list"},
+        ])
+        self.assertEqual(-32601, responses[1]["error"]["code"])
+        self.assertEqual(-32600, responses[2]["error"]["code"])
+        self.assertEqual(list(TOOL_CATALOG), responses[3]["result"]["tools"])
 
     def test_malformed_batch_invalid_ids_and_unknown_methods(self) -> None:
         source = io.StringIO(
@@ -949,6 +1009,33 @@ class ProtocolTests(unittest.TestCase):
 
 
 class EntrypointTests(unittest.TestCase):
+    def test_isolated_bootstrap_can_import_exact_governance_module(self) -> None:
+        script = SKILL_ROOT / "scripts/gptpro_mcp.py"
+        governance = SKILL_ROOT / "scripts/gptpro.py"
+        code = (
+            "import runpy\n"
+            "from pathlib import Path\n"
+            f"runpy.run_path({str(script)!r}, run_name='gptpro_mcp_bootstrap_test')\n"
+            "import gptpro\n"
+            f"assert Path(gptpro.__file__).resolve() == Path({str(governance)!r}).resolve()\n"
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                "-B",
+                f"-Xpycache_prefix={os.devnull}",
+                "-c",
+                code,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
     def test_tunnel_credentials_are_scrubbed_before_runtime_imports(self) -> None:
         script = SKILL_ROOT / "scripts/gptpro_mcp.py"
         spec = importlib.util.spec_from_file_location("gptpro_mcp_entrypoint_test", script)

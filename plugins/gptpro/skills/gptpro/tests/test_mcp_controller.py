@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import os
 import subprocess
 import sys
@@ -99,6 +100,10 @@ class FakeTunnel:
 
 
 class ControllerTests(unittest.TestCase):
+    def test_default_readiness_window_exceeds_one_long_poll(self) -> None:
+        default = inspect.signature(run_foreground).parameters["ready_timeout"].default
+        self.assertEqual(60.0, default)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name).resolve()

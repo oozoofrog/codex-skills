@@ -136,7 +136,7 @@ def run_foreground(
     hooks: ControllerHooks,
     profile_dir: Path | None = None,
     cwd: Path | None = None,
-    ready_timeout: float = 30.0,
+    ready_timeout: float = 60.0,
     health_poll_interval: float = 0.2,
     stop_timeout: float = 5.0,
     capability_factory: Callable[[], tuple[bytes, str, str]] = new_session_capability,

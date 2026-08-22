@@ -57,6 +57,18 @@ from runtime.gptpro_mcp.package_tx import (
     lifecycle_journal_pending,
     recover_lifecycle_pair,
 )
+from runtime.gptpro_mcp.protocol_trace import (
+    MAX_TRACE_BYTES,
+    MAX_TRACE_EVENTS,
+    SAFE_CLOSE_REASONS,
+    SAFE_TRACE_FAILURE_CODES,
+    TRACE_FILE_NAME,
+    TRACE_SCHEMA_VERSION,
+    ProtocolTrace,
+    ProtocolTraceBinding,
+    ProtocolTraceError,
+    ProtocolTraceSummary,
+)
 from runtime.gptpro_mcp.runtime_state import (
     RuntimeStateError,
     RuntimeStateStore,
@@ -64,10 +76,12 @@ from runtime.gptpro_mcp.runtime_state import (
 )
 from runtime.gptpro_mcp.supervisor import request_cooperative_stop
 from runtime.gptpro_mcp.tunnel_client import (
+    ProfileControllerLease,
     TunnelCapabilities,
     TunnelClient,
     TunnelClientError,
     bundled_mcp_target_sha256,
+    inspect_tunnel_profile,
     runtime_key_environment,
 )
 
@@ -1565,11 +1579,64 @@ def verify_schema3_mcp_session(
             raise HandoffError("Schema-3 MCP receipt has session events without package session state")
         if PHASES.index(phase) >= PHASES.index("submitted"):
             raise HandoffError("Schema-3 submitted state is missing its MCP session evidence")
+        diagnostic = state.get("mcp_protocol_trace")
+        failure_events = receipt_events(receipt, "mcp_activation_failed")
+        event_diagnostics = [
+            event["data"].get("protocol_trace")
+            for event in failure_events
+            if isinstance(event.get("data"), dict)
+            and "protocol_trace" in event["data"]
+        ]
+        if diagnostic is None:
+            if event_diagnostics:
+                raise HandoffError(
+                    "Schema-3 failed-activation trace receipt lacks package state"
+                )
+            return
+        required_diagnostic = {
+            "status",
+            "session_id_sha256",
+            "manifest_sha256",
+            "approval_event_sha256",
+            "audit_header_sha256",
+            "protocol_trace_file",
+            "protocol_trace_header_sha256",
+            "tunnel_profile_sha256",
+            "tunnel_client_binary_sha256",
+            "mcp_target_sha256",
+            "mcp_runtime_tree_sha256",
+        }
+        if (
+            not isinstance(diagnostic, dict)
+            or set(diagnostic) != required_diagnostic
+            or diagnostic.get("status") != "activation_failed"
+            or diagnostic.get("protocol_trace_file") != TRACE_FILE_NAME
+            or diagnostic.get("manifest_sha256") != manifest_sha256
+        ):
+            raise HandoffError("Schema-3 failed-activation trace binding is invalid")
+        for key in required_diagnostic - {"status", "protocol_trace_file"}:
+            require_sha256(
+                diagnostic.get(key),
+                label=f"Schema-3 failed-activation trace {key}",
+            )
+        approval_events = receipt_events(receipt, "approved")
+        if (
+            len(approval_events) != 1
+            or diagnostic.get("approval_event_sha256")
+            != approval_events[0].get("event_hash")
+            or len(event_diagnostics) != 1
+            or event_diagnostics[0] != diagnostic
+        ):
+            raise HandoffError(
+                "Schema-3 failed-activation trace differs from its receipt"
+            )
         return
     if not isinstance(session, dict) or phase == "prepared":
         raise HandoffError(
             "Schema-3 runtime sessions are not supported without verified package-local evidence"
         )
+    if state.get("mcp_protocol_trace") is not None:
+        raise HandoffError("Schema-3 active session has conflicting failed trace evidence")
     required_fields = {
         "status",
         "session_id_sha256",
@@ -1609,6 +1676,21 @@ def verify_schema3_mcp_session(
     require_sha256(
         session.get("approval_event_sha256"), label="Schema-3 MCP approval event hash"
     )
+    trace_activation_fields = {
+        "protocol_trace_file",
+        "protocol_trace_header_sha256",
+    }
+    trace_activation_present = trace_activation_fields & set(session)
+    if trace_activation_present and trace_activation_present != trace_activation_fields:
+        raise HandoffError("Schema-3 MCP protocol trace activation binding is incomplete")
+    trace_bound = bool(trace_activation_present)
+    if trace_bound:
+        if session.get("protocol_trace_file") != TRACE_FILE_NAME:
+            raise HandoffError("Schema-3 MCP protocol trace filename is invalid")
+        require_sha256(
+            session.get("protocol_trace_header_sha256"),
+            label="Schema-3 MCP protocol trace header hash",
+        )
     approval_events = receipt_events(receipt, "approved")
     if (
         len(approval_events) != 1
@@ -1666,6 +1748,15 @@ def verify_schema3_mcp_session(
         "audit_file": "mcp-audit.jsonl",
         "audit_header_sha256": session["audit_header_sha256"],
     }
+    if trace_bound:
+        expected_activation.update(
+            {
+                "protocol_trace_file": TRACE_FILE_NAME,
+                "protocol_trace_header_sha256": session[
+                    "protocol_trace_header_sha256"
+                ],
+            }
+        )
     if activation != expected_activation:
         raise HandoffError("Schema-3 MCP activation receipt differs from package session state")
     if activations[0]["sequence"] <= approval_events[0]["sequence"]:
@@ -1716,6 +1807,132 @@ def verify_schema3_mcp_session(
         ):
             if stopped.get(key) != session.get(state_key):
                 raise HandoffError("Schema-3 tunnel-stop receipt differs from final audit state")
+        if trace_bound:
+            trace_common_fields = {
+                "protocol_trace_valid",
+                "protocol_trace_closed",
+            }
+            if not trace_common_fields <= set(session):
+                raise HandoffError("Schema-3 tunnel-stop state lacks final protocol trace evidence")
+            trace_valid = session.get("protocol_trace_valid")
+            trace_final_fields = set(trace_common_fields)
+            if trace_valid is True:
+                valid_fields = {
+                    "protocol_trace_head_sha256",
+                    "protocol_trace_event_count",
+                    "protocol_trace_truncated",
+                    "protocol_trace_close_reason",
+                }
+                if not valid_fields <= set(session):
+                    raise HandoffError(
+                        "Schema-3 tunnel-stop state lacks valid protocol trace evidence"
+                    )
+                require_sha256(
+                    session.get("protocol_trace_head_sha256"),
+                    label="Schema-3 MCP protocol trace final head hash",
+                )
+                event_count = session.get("protocol_trace_event_count")
+                trace_closed = session.get("protocol_trace_closed")
+                close_reason = session.get("protocol_trace_close_reason")
+                if (
+                    isinstance(event_count, bool)
+                    or not isinstance(event_count, int)
+                    or not 0 <= event_count <= MAX_TRACE_EVENTS
+                    or not isinstance(session.get("protocol_trace_truncated"), bool)
+                    or not isinstance(trace_closed, bool)
+                    or (trace_closed and close_reason not in SAFE_CLOSE_REASONS)
+                    or (not trace_closed and close_reason is not None)
+                    or "protocol_trace_error_code" in session
+                    or "protocol_trace_artifact_identity_bound" in session
+                    or "protocol_trace_artifact_sha256" in session
+                    or "protocol_trace_artifact_bytes" in session
+                ):
+                    raise HandoffError("Schema-3 MCP protocol trace closure evidence is invalid")
+                trace_final_fields.update(valid_fields)
+            elif trace_valid is False:
+                artifact_identity_bound = session.get(
+                    "protocol_trace_artifact_identity_bound"
+                )
+                if (
+                    session.get("protocol_trace_closed") is not False
+                    or session.get("protocol_trace_error_code")
+                    not in SAFE_TRACE_FAILURE_CODES
+                    or not isinstance(artifact_identity_bound, bool)
+                    or any(
+                        key in session
+                        for key in (
+                            "protocol_trace_head_sha256",
+                            "protocol_trace_event_count",
+                            "protocol_trace_truncated",
+                            "protocol_trace_close_reason",
+                        )
+                    )
+                ):
+                    raise HandoffError("Schema-3 MCP protocol trace failure evidence is invalid")
+                trace_final_fields.update(
+                    {
+                        "protocol_trace_error_code",
+                        "protocol_trace_artifact_identity_bound",
+                    }
+                )
+                artifact_fields = {
+                    "protocol_trace_artifact_sha256",
+                    "protocol_trace_artifact_bytes",
+                }
+                if artifact_identity_bound:
+                    artifact_bytes = session.get("protocol_trace_artifact_bytes")
+                    require_sha256(
+                        session.get("protocol_trace_artifact_sha256"),
+                        label="Schema-3 MCP invalid trace artifact hash",
+                    )
+                    if (
+                        isinstance(artifact_bytes, bool)
+                        or not isinstance(artifact_bytes, int)
+                        or not 0 <= artifact_bytes <= MAX_TRACE_BYTES
+                    ):
+                        raise HandoffError(
+                            "Schema-3 MCP invalid trace artifact length is invalid"
+                        )
+                    trace_final_fields.update(artifact_fields)
+                elif any(key in session for key in artifact_fields):
+                    raise HandoffError(
+                        "Schema-3 MCP unbound trace failure has artifact identity fields"
+                    )
+            else:
+                raise HandoffError("Schema-3 MCP protocol trace validity is invalid")
+            expected_trace = {key: session.get(key) for key in trace_final_fields}
+            if any(stopped.get(key) != value for key, value in expected_trace.items()):
+                raise HandoffError("Schema-3 tunnel-stop receipt differs from final protocol trace")
+            all_trace_final_fields = {
+                "protocol_trace_valid",
+                "protocol_trace_head_sha256",
+                "protocol_trace_event_count",
+                "protocol_trace_truncated",
+                "protocol_trace_closed",
+                "protocol_trace_close_reason",
+                "protocol_trace_error_code",
+                "protocol_trace_artifact_identity_bound",
+                "protocol_trace_artifact_sha256",
+                "protocol_trace_artifact_bytes",
+            }
+            if any(key in stopped for key in all_trace_final_fields - trace_final_fields):
+                raise HandoffError("Schema-3 tunnel-stop receipt has extra protocol trace evidence")
+    elif trace_bound and any(
+        key in session
+        for key in (
+            "protocol_trace_valid",
+            "protocol_trace_head_sha256",
+            "protocol_trace_event_count",
+            "protocol_trace_truncated",
+            "protocol_trace_closed",
+            "protocol_trace_close_reason",
+            "protocol_trace_error_code",
+            "protocol_trace_artifact_identity_bound",
+            "protocol_trace_artifact_sha256",
+            "protocol_trace_artifact_bytes",
+        )
+    ):
+        raise HandoffError("Schema-3 MCP protocol trace final evidence lacks a stop receipt")
 
 
 def read_task(args: argparse.Namespace) -> str:
@@ -3007,6 +3224,13 @@ def assert_mcp_runtime_binding(
         "workspace_binding_confirmed": True,
         "audit_file": "mcp-audit.jsonl",
     }
+    if isinstance(package_session, dict) and package_session.get(
+        "protocol_trace_file"
+    ) == TRACE_FILE_NAME:
+        expected["protocol_trace_header_sha256"] = require_sha256(
+            package_session.get("protocol_trace_header_sha256"),
+            label="MCP protocol trace header hash",
+        )
     if runtime_state.get("status") not in expected_statuses:
         raise HandoffError("Machine-global MCP authorization is not in the required state")
     if any(runtime_state.get(key) != value for key, value in expected.items()):
@@ -3162,6 +3386,12 @@ def mcp_activation_preflight(
         raise HandoffError("A schema-3 package may be activated only once")
     if (verified["manifest_path"].parent / "mcp-audit.jsonl").exists():
         raise HandoffError("This package already has an MCP audit artifact; prepare a new package")
+    if any(
+        (verified["manifest_path"].parent / name).exists()
+        or (verified["manifest_path"].parent / name).is_symlink()
+        for name in (TRACE_FILE_NAME, f".{TRACE_FILE_NAME}.lock")
+    ):
+        raise HandoffError("This package already has MCP protocol trace evidence; prepare a new package")
     connector = manifest["connector"]
     if tunnel_profile != connector["tunnel_profile_alias"]:
         raise HandoffError("Tunnel profile alias differs from the approved package")
@@ -3341,7 +3571,17 @@ def begin_mcp_activation(
         header_hash = audit_log_for(
             verified, session_hash, runtime_store=runtime_store
         ).create_header()
-    except (RuntimeStateError, ToolError) as exc:
+        trace_summary = protocol_trace_for_runtime_state(
+            verified,
+            runtime_state,
+            session_id_sha256=session_hash,
+            audit_header_sha256=header_hash,
+        ).open_or_create()
+        if trace_summary.event_count != 0 or trace_summary.closed:
+            raise ProtocolTraceError(
+                "PROTOCOL_TRACE_INVALID", "The activation trace did not start from an empty header."
+            )
+    except (RuntimeStateError, ToolError, ProtocolTraceError) as exc:
         try:
             current = runtime_store.read()
             if (
@@ -3367,6 +3607,7 @@ def begin_mcp_activation(
     return {
         "runtime_state": runtime_state,
         "audit_header_sha256": header_hash,
+        "protocol_trace_header_sha256": trace_summary.header_sha256,
         "session_id_sha256": session_hash,
     }
 
@@ -3376,6 +3617,7 @@ def _activation_receipt_data(
     *,
     session_id_sha256: str,
     audit_header_sha256: str,
+    protocol_trace_header_sha256: str,
     runtime_state: dict[str, Any],
 ) -> dict[str, Any]:
     manifest = verified["manifest"]
@@ -3400,6 +3642,8 @@ def _activation_receipt_data(
         "expires_at": runtime_state["expires_at"],
         "audit_file": "mcp-audit.jsonl",
         "audit_header_sha256": audit_header_sha256,
+        "protocol_trace_file": TRACE_FILE_NAME,
+        "protocol_trace_header_sha256": protocol_trace_header_sha256,
     }
 
 
@@ -3437,11 +3681,23 @@ def complete_mcp_activation(
         raise runtime_failure(exc) from exc
     if audit_summary.header_sha256 != header_hash or audit_summary.final_sequence != 0:
         raise HandoffError("MCP audit header changed before activation completed")
+    try:
+        trace_summary = protocol_trace_for_runtime_state(
+            verified,
+            runtime_state,
+            session_id_sha256=session_hash,
+            audit_header_sha256=header_hash,
+        ).verify()
+    except ProtocolTraceError as exc:
+        raise HandoffError(f"{exc.code}: MCP protocol trace verification failed") from exc
+    if trace_summary.closed:
+        raise HandoffError("MCP protocol trace closed before activation completed")
 
     activation_data = _activation_receipt_data(
         verified,
         session_id_sha256=session_hash,
         audit_header_sha256=header_hash,
+        protocol_trace_header_sha256=trace_summary.header_sha256,
         runtime_state=runtime_state,
     )
     state = load_json(handoff_dir / "state.json")
@@ -3463,6 +3719,8 @@ def complete_mcp_activation(
         "expires_at": activation_data["expires_at"],
         "audit_file": "mcp-audit.jsonl",
         "audit_header_sha256": header_hash,
+        "protocol_trace_file": TRACE_FILE_NAME,
+        "protocol_trace_header_sha256": trace_summary.header_sha256,
     }
     state["revision"] += 1
     state["updated_at"] = utc_now()
@@ -3472,7 +3730,10 @@ def complete_mcp_activation(
             session_hash,
             "activating",
             "active",
-            updates={"audit_header_sha256": header_hash},
+            updates={
+                "audit_header_sha256": header_hash,
+                "protocol_trace_header_sha256": trace_summary.header_sha256,
+            },
         )
     except RuntimeStateError as exc:
         try:
@@ -3515,9 +3776,9 @@ def fail_mcp_activation(
     if re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", error_code) is None:
         error_code = "MCP_ACTIVATION_FAILED"
     session_hash = require_sha256(session_id_sha256, label="MCP session ID hash")
-    state = load_json(handoff_dir / "state.json")
-    receipt = load_json(handoff_dir / "receipt.json")
-    verify_receipt(receipt, state["package_id"], schema_version=SCHEMA_V3)
+    verified = verify_package(handoff_dir)
+    state = verified["state"]
+    receipt = verified["receipt"]
     if any(
         event.get("type") in {"mcp_activation_failed", "mcp_recovery_recorded"}
         and isinstance(event.get("data"), dict)
@@ -3525,29 +3786,70 @@ def fail_mcp_activation(
         for event in receipt["events"]
     ):
         return
+    current: dict[str, Any] | None = None
+    failed_trace: dict[str, Any] | None = None
     try:
         current = runtime_store.read()
-        if current is not None and current.get("session_id_sha256") == session_hash:
+    except RuntimeStateError:
+        current = None
+    if current is not None and current.get("session_id_sha256") == session_hash:
+        try:
+            audit_summary = audit_log_for(
+                verified, session_hash, runtime_store=runtime_store
+            ).verify()
+            trace_summary = protocol_trace_for_runtime_state(
+                verified,
+                current,
+                session_id_sha256=session_hash,
+                audit_header_sha256=audit_summary.header_sha256,
+            ).verify()
+            failed_trace = {
+                "status": "activation_failed",
+                "session_id_sha256": session_hash,
+                "manifest_sha256": verified["manifest_sha256"],
+                "approval_event_sha256": schema3_approval_event(verified)[
+                    "event_hash"
+                ],
+                "audit_header_sha256": audit_summary.header_sha256,
+                "protocol_trace_file": TRACE_FILE_NAME,
+                "protocol_trace_header_sha256": trace_summary.header_sha256,
+                "tunnel_profile_sha256": current["tunnel_profile_sha256"],
+                "tunnel_client_binary_sha256": current[
+                    "tunnel_client_binary_sha256"
+                ],
+                "mcp_target_sha256": current["mcp_target_sha256"],
+                "mcp_runtime_tree_sha256": current["mcp_runtime_tree_sha256"],
+            }
+        except (HandoffError, KeyError, ProtocolTraceError, RuntimeStateError, ToolError):
+            failed_trace = None
+        try:
             if current.get("status") in {"activating", "active"}:
                 runtime_store.transition(session_hash, current["status"], "faulted")
-    except RuntimeStateError:
-        pass
+        except RuntimeStateError:
+            pass
     event_type = "mcp_activation_failed"
     if isinstance(state.get("mcp_session"), dict):
         state["mcp_session"]["status"] = "faulted"
         state["revision"] += 1
         state["updated_at"] = utc_now()
         event_type = "mcp_recovery_recorded"
+    elif failed_trace is not None:
+        state["mcp_protocol_trace"] = failed_trace
+        state["revision"] += 1
+        state["updated_at"] = utc_now()
+    event_data = {
+        "phase_before": state["phase"],
+        "phase_after": state["phase"],
+        "session_id_sha256": session_hash,
+        "error_code": error_code,
+    }
+    if failed_trace is not None and event_type == "mcp_activation_failed":
+        event_data["protocol_trace"] = failed_trace
     commit_state_receipt_event(
         handoff_dir,
         state,
         event_type,
-        {
-            "phase_before": state["phase"],
-            "phase_after": state["phase"],
-            "session_id_sha256": session_hash,
-            "error_code": error_code,
-        },
+        event_data,
     )
 
 
@@ -4171,7 +4473,65 @@ def record_mcp_stopped(
         if len(existing) != 1 or existing[0]["data"].get("session_id_sha256") != session_id_sha256:
             raise HandoffError("Existing MCP tunnel-stop receipt does not match this session")
         return
+    trace_final: dict[str, Any] = {}
+    if session.get("protocol_trace_file") == TRACE_FILE_NAME:
+        trace: ProtocolTrace | None = None
+        try:
+            trace = protocol_trace_for(verified)
+            trace_summary = trace.verify()
+            if trace_summary.header_sha256 != session.get(
+                "protocol_trace_header_sha256"
+            ):
+                raise ProtocolTraceError(
+                    "PROTOCOL_TRACE_BINDING_MISMATCH",
+                    "The final protocol trace header differs from activation evidence.",
+                )
+        except ProtocolTraceError as exc:
+            code = (
+                exc.code
+                if exc.code in SAFE_TRACE_FAILURE_CODES
+                else "PROTOCOL_TRACE_UNAVAILABLE"
+            )
+            trace_final = {
+                "protocol_trace_valid": False,
+                "protocol_trace_closed": False,
+                "protocol_trace_error_code": code,
+            }
+            try:
+                if trace is None:
+                    raise ProtocolTraceError(
+                        "PROTOCOL_TRACE_UNAVAILABLE",
+                        "The protocol trace binding is unavailable.",
+                    )
+                identity = trace.fingerprint()
+            except ProtocolTraceError:
+                trace_final["protocol_trace_artifact_identity_bound"] = False
+            else:
+                trace_final.update(
+                    {
+                        "protocol_trace_artifact_identity_bound": True,
+                        "protocol_trace_artifact_sha256": identity.sha256,
+                        "protocol_trace_artifact_bytes": identity.byte_count,
+                    }
+                )
+        except HandoffError:
+            trace_final = {
+                "protocol_trace_valid": False,
+                "protocol_trace_closed": False,
+                "protocol_trace_error_code": "PROTOCOL_TRACE_UNAVAILABLE",
+                "protocol_trace_artifact_identity_bound": False,
+            }
+        else:
+            trace_final = {
+                "protocol_trace_valid": True,
+                "protocol_trace_head_sha256": trace_summary.head_sha256,
+                "protocol_trace_event_count": trace_summary.event_count,
+                "protocol_trace_truncated": trace_summary.truncated,
+                "protocol_trace_closed": trace_summary.closed,
+                "protocol_trace_close_reason": trace_summary.close_reason,
+            }
     state["mcp_session"]["tunnel_runtime_stopped"] = True
+    state["mcp_session"].update(trace_final)
     state["revision"] += 1
     state["updated_at"] = utc_now()
     commit_state_receipt_event(
@@ -4188,6 +4548,7 @@ def record_mcp_stopped(
             "audit_final_head_sha256": session.get("audit_head_sha256"),
             "tool_calls": session.get("tool_calls", 0),
             "disclosed_bytes": session.get("disclosed_bytes", 0),
+            **trace_final,
         },
     )
 
@@ -4513,6 +4874,7 @@ def command_status(args: argparse.Namespace) -> int:
         "connector": manifest.get("connector"),
         "mcp_disclosure": manifest.get("mcp_disclosure"),
         "mcp_session": state.get("mcp_session"),
+        "mcp_protocol_trace": state.get("mcp_protocol_trace"),
         "git": manifest["git"],
         "totals": manifest["totals"],
         "security_findings": manifest["security_findings"],
@@ -4559,6 +4921,7 @@ def public_runtime_authorization(state: dict[str, Any] | None) -> dict[str, Any]
         "expires_at",
         "idle_ttl_seconds",
         "audit_header_sha256",
+        "protocol_trace_header_sha256",
         "audit_final_sequence",
         "audit_final_head_sha256",
         "tool_calls",
@@ -4641,26 +5004,75 @@ def confirmed_key_bearing_tunnel_client(
     return client, capabilities
 
 
+def command_mcp_profile_check(args: argparse.Namespace) -> int:
+    """Inspect the bounded profile without resolving credentials or executing the client."""
+
+    require_web_mcp_runtime_platform()
+    try:
+        inspection = inspect_tunnel_profile(
+            args.tunnel_profile,
+            env=os.environ,
+            mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+            profile_dir=tunnel_profile_dir_for(args),
+        )
+        payload = {
+            "operation": "mcp-profile-check",
+            "ok": inspection.ready,
+            "code": inspection.code,
+            "refresh_required": inspection.refresh_required,
+            "safe_to_refresh": inspection.safe_to_refresh,
+            "tunnel_profile": args.tunnel_profile,
+            "tunnel_profile_sha256": inspection.profile_sha256,
+            "profile_dir_sha256": inspection.profile_dir_sha256,
+            "observed_mcp_command_sha256": inspection.observed_mcp_command_sha256,
+            "expected_mcp_command_sha256": inspection.expected_mcp_command_sha256,
+            "python": web_mcp_platform_report()["python"],
+            "credential_resolution": False,
+            "tunnel_client_execution": False,
+        }
+    except TunnelClientError as exc:
+        payload = {
+            "operation": "mcp-profile-check",
+            "ok": False,
+            "code": exc.code,
+            "refresh_required": False,
+            "safe_to_refresh": False,
+            "tunnel_profile": args.tunnel_profile,
+            "credential_resolution": False,
+            "tunnel_client_execution": False,
+        }
+    print(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False))
+    return 0 if payload["ok"] else 2
+
+
 def command_mcp_profile_init(args: argparse.Namespace) -> int:
     """Run the official attended profile initializer after an exact binary trust gate."""
 
     require_web_mcp_runtime_platform()
-    client, capabilities = confirmed_key_bearing_tunnel_client(args)
-    if not capabilities.supported:
-        raise HandoffError(
-            "TUNNEL_CLIENT_UNSUPPORTED: the selected Tunnel client lacks required capabilities"
-        )
+    store = runtime_store_for()
     try:
-        initialized = client.init_profile_attended(
-            args.tunnel_profile,
-            env=os.environ,
-            tunnel_id_reference=args.tunnel_id_ref,
-            control_plane_api_key_reference=args.runtime_api_key_ref,
-            mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
-            profile_dir=tunnel_profile_dir_for(args),
-        )
-    except TunnelClientError as exc:
-        raise HandoffError(f"{exc.code}: {exc.message}") from exc
+        profile_lease = ProfileControllerLease(store.root).acquire()
+    except RuntimeStateError as exc:
+        raise runtime_failure(exc) from exc
+    try:
+        try:
+            client, capabilities = confirmed_key_bearing_tunnel_client(args)
+            if not capabilities.supported:
+                raise HandoffError(
+                    "TUNNEL_CLIENT_UNSUPPORTED: the selected Tunnel client lacks required capabilities"
+                )
+            initialized = client.init_profile_attended(
+                args.tunnel_profile,
+                env=os.environ,
+                tunnel_id_reference=args.tunnel_id_ref,
+                control_plane_api_key_reference=args.runtime_api_key_ref,
+                mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+                profile_dir=tunnel_profile_dir_for(args),
+            )
+        except TunnelClientError as exc:
+            raise HandoffError(f"{exc.code}: {exc.message}") from exc
+    finally:
+        profile_lease.close()
     print(
         json.dumps(
             {
@@ -4680,6 +5092,94 @@ def command_mcp_profile_init(args: argparse.Namespace) -> int:
         )
     )
     return 0 if initialized.ok else 2
+
+
+def command_mcp_profile_refresh(args: argparse.Namespace) -> int:
+    """Explicitly replace one interpreter-path-stale owner-only Tunnel profile."""
+
+    require_web_mcp_runtime_platform()
+    if not args.confirm_profile_replacement:
+        raise HandoffError(
+            "Profile refresh requires --confirm-profile-replacement after reviewing mcp-profile-check"
+        )
+    confirmed_profile_hash = require_sha256(
+        args.confirm_current_profile_sha256,
+        label="Confirmed current Tunnel profile hash",
+    )
+    store = runtime_store_for()
+    try:
+        profile_lease = ProfileControllerLease(store.root).acquire()
+    except RuntimeStateError as exc:
+        raise runtime_failure(exc) from exc
+    refresh_lease: ControllerLease | None = None
+    try:
+        try:
+            with store.locked() as transaction:
+                current = transaction.read()
+                if current is not None:
+                    status = current.get("status")
+                    session_hash = require_sha256(
+                        current.get("session_id_sha256"), label="Current MCP session ID hash"
+                    )
+                    if status not in {"revoked", "expired"}:
+                        raise HandoffError(
+                            "PROFILE_REFRESH_BLOCKED: stop or recover the exact MCP controller before profile refresh"
+                        )
+                    try:
+                        refresh_lease = ControllerLease(
+                            store, session_hash
+                        ).acquire_existing()
+                    except RuntimeStateError as exc:
+                        if exc.code == "SESSION_CONFLICT":
+                            raise HandoffError(
+                                "PROFILE_REFRESH_BLOCKED: the exact foreground controller lease is live"
+                            ) from exc
+                        raise HandoffError(
+                            "PROFILE_REFRESH_CONTROLLER_UNRESOLVED: the terminal session lease is missing or unsafe"
+                        ) from exc
+            client, capabilities = confirmed_key_bearing_tunnel_client(args)
+            if not capabilities.supported:
+                raise HandoffError(
+                    "TUNNEL_CLIENT_UNSUPPORTED: the selected Tunnel client lacks required capabilities"
+                )
+            refreshed = client.refresh_profile_attended(
+                args.tunnel_profile,
+                env=os.environ,
+                tunnel_id_reference=args.tunnel_id_ref,
+                control_plane_api_key_reference=args.runtime_api_key_ref,
+                mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+                expected_profile_sha256=confirmed_profile_hash,
+                profile_dir=tunnel_profile_dir_for(args),
+            )
+        except RuntimeStateError as exc:
+            raise runtime_failure(exc) from exc
+        except TunnelClientError as exc:
+            raise HandoffError(f"{exc.code}: {exc.message}") from exc
+    finally:
+        if refresh_lease is not None:
+            refresh_lease.close()
+        profile_lease.close()
+    print(
+        json.dumps(
+            {
+                "operation": "mcp-profile-refresh",
+                "ok": refreshed.ok,
+                "tunnel_profile": args.tunnel_profile,
+                "previous_tunnel_profile_sha256": refreshed.previous_profile_sha256,
+                "tunnel_profile_sha256": refreshed.profile_sha256,
+                "profile_dir_sha256": refreshed.profile_dir_sha256,
+                "mcp_command_sha256": refreshed.mcp_command_sha256,
+                "tunnel_client_binary_sha256": capabilities.binary_sha256,
+                "attended": True,
+                "conversation_or_repository_disclosure": False,
+                "staging_cleanup_complete": refreshed.staging_cleanup_complete,
+            },
+            sort_keys=True,
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+    return 0
 
 
 def tunnel_profile_dir_for(args: argparse.Namespace) -> Path | None:
@@ -4778,18 +5278,59 @@ def command_mcp_activate(args: argparse.Namespace) -> int:
     require_web_mcp_runtime_platform()
     handoff_dir, verified = checked_schema3_handoff(args.handoff_dir, phase="approved")
     client, capabilities = confirmed_key_bearing_tunnel_client(args)
+    store = runtime_store_for()
+    try:
+        profile_lease = ProfileControllerLease(store.root).acquire()
+    except RuntimeStateError as exc:
+        raise runtime_failure(exc) from exc
+    try:
+        return _command_mcp_activate_with_profile_lease(
+            args,
+            handoff_dir=handoff_dir,
+            verified=verified,
+            client=client,
+            capabilities=capabilities,
+            store=store,
+        )
+    finally:
+        profile_lease.close()
+
+
+def _command_mcp_activate_with_profile_lease(
+    args: argparse.Namespace,
+    *,
+    handoff_dir: Path,
+    verified: dict[str, Any],
+    client: TunnelClient,
+    capabilities: TunnelCapabilities,
+    store: RuntimeStateStore,
+) -> int:
+    """Inspect, preflight, and run while the machine-global profile lease is held."""
+
     try:
         if not capabilities.supported or not capabilities.health_require_control_plane_poll:
             raise TunnelClientError(
                 "TUNNEL_CLIENT_UNSUPPORTED",
                 "The official tunnel-client lacks required foreground or control-plane health capabilities.",
             )
+        profile_dir = tunnel_profile_dir_for(args)
+        profile_inspection = inspect_tunnel_profile(
+            args.tunnel_profile,
+            env=os.environ,
+            mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+            profile_dir=profile_dir,
+        )
+        if not profile_inspection.ready:
+            raise TunnelClientError(
+                profile_inspection.code or "TUNNEL_PROFILE_UNSAFE",
+                "Run mcp-profile-check and explicitly refresh the stale Tunnel profile before activation.",
+            )
         env = runtime_key_environment(args.runtime_api_key_ref)
         manifest = verified["manifest"]
         check = client.doctor(
             args.tunnel_profile,
             env=env,
-            profile_dir=tunnel_profile_dir_for(args),
+            profile_dir=profile_dir,
             package_id=manifest["package_id"],
             expected_tunnel_binding_sha256=manifest["connector"]["tunnel_id_binding_sha256"],
             expected_mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
@@ -4815,7 +5356,6 @@ def command_mcp_activate(args: argparse.Namespace) -> int:
         profile_binding_verification=check.profile_binding_verification,
         workspace_binding_confirmed=args.confirm_workspace_binding,
     )
-    store = runtime_store_for()
     try:
         current = store.read()
     except RuntimeStateError as exc:
@@ -4972,6 +5512,217 @@ def command_mcp_verify_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def protocol_trace_for_runtime_state(
+    verified: dict[str, Any],
+    runtime_identity: dict[str, Any],
+    *,
+    session_id_sha256: str,
+    audit_header_sha256: str,
+) -> ProtocolTrace:
+    """Resolve the fixed package-local trace from already verified bindings."""
+
+    session_hash = require_sha256(session_id_sha256, label="MCP session ID hash")
+    audit_header_hash = require_sha256(
+        audit_header_sha256, label="MCP audit header hash"
+    )
+    manifest = verified["manifest"]
+    approval = schema3_approval_event(verified)
+    try:
+        binding = ProtocolTraceBinding(
+            package_id=manifest["package_id"],
+            session_id_sha256=session_hash,
+            manifest_sha256=verified["manifest_sha256"],
+            approval_event_sha256=approval["event_hash"],
+            archive_sha256=manifest["hashes"]["archive_sha256"],
+            file_set_sha256=manifest["mcp_disclosure"]["file_set_sha256"],
+            tool_schema_sha256=manifest["connector"]["tool_schema_sha256"],
+            audit_header_sha256=audit_header_hash,
+            tunnel_profile_sha256=runtime_identity["tunnel_profile_sha256"],
+            tunnel_client_binary_sha256=runtime_identity[
+                "tunnel_client_binary_sha256"
+            ],
+            mcp_target_sha256=runtime_identity["mcp_target_sha256"],
+            mcp_runtime_tree_sha256=runtime_identity["mcp_runtime_tree_sha256"],
+        )
+        return ProtocolTrace(verified["manifest_path"].parent, binding)
+    except (KeyError, ProtocolTraceError, ValueError) as exc:
+        raise HandoffError("PROTOCOL_TRACE_UNSAFE: protocol trace binding is invalid") from exc
+
+
+def protocol_trace_for(verified: dict[str, Any]) -> ProtocolTrace:
+    session = verified["state"].get("mcp_session")
+    if not isinstance(session, dict):
+        session = verified["state"].get("mcp_protocol_trace")
+    if not isinstance(session, dict):
+        raise HandoffError("This package has no bound MCP protocol trace to verify")
+    if session.get("protocol_trace_file") != TRACE_FILE_NAME:
+        raise HandoffError("This package has no bound MCP protocol trace")
+    return protocol_trace_for_runtime_state(
+        verified,
+        session,
+        session_id_sha256=session.get("session_id_sha256"),
+        audit_header_sha256=session.get("audit_header_sha256"),
+    )
+
+
+def verify_bound_protocol_trace(
+    verified: dict[str, Any],
+) -> tuple[ProtocolTrace, ProtocolTraceSummary | None, str | None, bool]:
+    """Verify trace bytes and compare them with activation/final package evidence."""
+
+    active_or_terminal_session = verified["state"].get("mcp_session")
+    session = active_or_terminal_session
+    if not isinstance(session, dict):
+        session = verified["state"].get("mcp_protocol_trace")
+    if not isinstance(session, dict):
+        raise HandoffError("This package has no bound MCP protocol trace to verify")
+    trace = protocol_trace_for(verified)
+    stopped = session.get("tunnel_runtime_stopped") is True
+    try:
+        summary = trace.verify()
+    except ProtocolTraceError as exc:
+        if (
+            stopped
+            and session.get("protocol_trace_valid") is False
+            and session.get("protocol_trace_closed") is False
+            and session.get("protocol_trace_error_code") == exc.code
+            and exc.code in SAFE_TRACE_FAILURE_CODES
+        ):
+            identity_bound = session.get(
+                "protocol_trace_artifact_identity_bound"
+            ) is True
+            if identity_bound:
+                try:
+                    identity = trace.fingerprint()
+                except ProtocolTraceError as fingerprint_error:
+                    raise HandoffError(
+                        f"{fingerprint_error.code}: invalid trace artifact identity is unavailable"
+                    ) from fingerprint_error
+                if (
+                    identity.sha256
+                    != session.get("protocol_trace_artifact_sha256")
+                    or identity.byte_count
+                    != session.get("protocol_trace_artifact_bytes")
+                ):
+                    raise HandoffError(
+                        "Invalid MCP protocol trace bytes differ from tunnel-stop evidence"
+                    )
+            return trace, None, exc.code, identity_bound
+        raise HandoffError(
+            f"{exc.code}: protocol trace verification differs from package evidence"
+        ) from exc
+    if summary.header_sha256 != session.get("protocol_trace_header_sha256"):
+        raise HandoffError("MCP protocol trace header differs from activation evidence")
+    if stopped:
+        expected = {
+            "protocol_trace_valid": True,
+            "protocol_trace_head_sha256": summary.head_sha256,
+            "protocol_trace_event_count": summary.event_count,
+            "protocol_trace_truncated": summary.truncated,
+            "protocol_trace_closed": summary.closed,
+            "protocol_trace_close_reason": summary.close_reason,
+        }
+        if any(session.get(key) != value for key, value in expected.items()) or (
+            "protocol_trace_error_code" in session
+        ):
+            raise HandoffError("MCP protocol trace differs from final tunnel-stop evidence")
+    # Activation evidence binds only the trace header. The current artifact
+    # remains appendable until exact-child stop records and cross-verifies its
+    # final head/count/closure evidence. This also keeps failed activation and
+    # revoked-but-not-stopped snapshots explicitly lifecycle-unbound.
+    return trace, summary, None, stopped
+
+
+def protocol_trace_summary_payload(summary: ProtocolTraceSummary) -> dict[str, Any]:
+    allowed_event_fields = (
+        "sequence",
+        "method",
+        "stage",
+        "outcome",
+        "readiness_before",
+        "readiness_after",
+        "requested_version_class",
+        "requested_version",
+        "negotiated_version",
+    )
+    return {
+        "valid": True,
+        "trace_schema_version": TRACE_SCHEMA_VERSION,
+        "max_events": MAX_TRACE_EVENTS,
+        "event_count": summary.event_count,
+        "truncated": summary.truncated,
+        "closed": summary.closed,
+        "close_reason": summary.close_reason,
+        "header_sha256": summary.header_sha256,
+        "head_sha256": summary.head_sha256,
+        "events": [
+            {key: event[key] for key in allowed_event_fields if key in event}
+            for event in summary.events
+        ],
+    }
+
+
+def bound_protocol_trace_payload(
+    verified: dict[str, Any],
+) -> tuple[ProtocolTrace, dict[str, Any]]:
+    trace, summary, recorded_error, lifecycle_bound = verify_bound_protocol_trace(
+        verified
+    )
+    if summary is None:
+        return trace, {
+            "valid": False,
+            "artifact_valid": False,
+            "artifact_identity_bound": lifecycle_bound,
+            "header_binding_valid": False,
+            "lifecycle_binding_valid": lifecycle_bound,
+            "recorded_error_code": recorded_error,
+            "trace_schema_version": TRACE_SCHEMA_VERSION,
+            "max_events": MAX_TRACE_EVENTS,
+        }
+    payload = protocol_trace_summary_payload(summary)
+    payload["artifact_valid"] = True
+    payload["artifact_identity_bound"] = lifecycle_bound
+    payload["header_binding_valid"] = True
+    payload["lifecycle_binding_valid"] = lifecycle_bound
+    return trace, payload
+
+
+def command_mcp_protocol_trace(args: argparse.Namespace) -> int:
+    """Verify and print sanitized sequence evidence plus independent audit totals."""
+
+    _, verified = checked_schema3_handoff(args.handoff_dir)
+    trace, trace_payload = bound_protocol_trace_payload(verified)
+    session = verified["state"].get("mcp_session") or verified["state"].get(
+        "mcp_protocol_trace"
+    )
+    if not isinstance(session, dict):
+        raise HandoffError("This package has no bound MCP protocol trace")
+    if isinstance(verified["state"].get("mcp_session"), dict):
+        disclosure_audit = mcp_audit_status(verified)
+    else:
+        try:
+            audit_summary = audit_log_for(
+                verified, session["session_id_sha256"]
+            ).verify()
+        except (KeyError, ToolError) as exc:
+            raise HandoffError("Failed-activation disclosure audit is unavailable") from exc
+        disclosure_audit = {"valid": True, **audit_summary_payload(audit_summary)}
+    payload = {
+        "package_id": verified["manifest"]["package_id"],
+        "session_id_sha256": session["session_id_sha256"],
+        "session_status": session["status"],
+        "artifact": {
+            "file": trace.path.name,
+            "required_owner_only_mode": "0600",
+            "package_local": True,
+        },
+        "protocol_trace": trace_payload,
+        "disclosure_audit": disclosure_audit,
+    }
+    print(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False))
+    return 0
+
+
 def command_mcp_status(args: argparse.Namespace) -> int:
     store = runtime_store_for()
     try:
@@ -5084,6 +5835,25 @@ def command_mcp_status(args: argparse.Namespace) -> int:
         if isinstance(session, dict) and session.get("status") in {"activating", "active", "revoking"}:
             payload["split_brain"] = True
             payload["recovery_actions"].append("revoke_or_recover_missing_global_authorization")
+    if verified is not None:
+        trace_session = verified["state"].get("mcp_session") or verified[
+            "state"
+        ].get("mcp_protocol_trace")
+        if (
+            isinstance(trace_session, dict)
+            and trace_session.get("protocol_trace_file") == TRACE_FILE_NAME
+        ):
+            try:
+                _, payload["protocol_trace"] = bound_protocol_trace_payload(verified)
+            except HandoffError:
+                payload["protocol_trace"] = {
+                    "valid": False,
+                    "artifact_valid": False,
+                    "lifecycle_binding_valid": False,
+                    "code": "PROTOCOL_TRACE_OR_STATE_MISMATCH",
+                }
+                payload["split_brain"] = True
+                payload["recovery_actions"].append("inspect_mcp_protocol_trace")
     package_session = (
         verified["state"].get("mcp_session") if verified is not None else None
     )
@@ -5781,6 +6551,17 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_probe.add_argument("--json", action="store_true", help="Compatibility flag; output is always JSON")
     mcp_probe.set_defaults(func=command_mcp_probe)
 
+    mcp_profile_check = subparsers.add_parser(
+        "mcp-profile-check",
+        help="Inspect the Tunnel profile for interpreter drift without resolving credentials",
+    )
+    mcp_profile_check.add_argument("--tunnel-profile", required=True)
+    mcp_profile_check.add_argument("--profile-dir")
+    mcp_profile_check.add_argument(
+        "--json", action="store_true", help="Compatibility flag; output is always JSON"
+    )
+    mcp_profile_check.set_defaults(func=command_mcp_profile_check)
+
     mcp_profile_init = subparsers.add_parser(
         "mcp-profile-init",
         help="Initialize one attended Tunnel profile after confirming the exact probed binary hash",
@@ -5804,6 +6585,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mcp_profile_init.set_defaults(func=command_mcp_profile_init)
 
+    mcp_profile_refresh = subparsers.add_parser(
+        "mcp-profile-refresh",
+        help="Atomically refresh only a confirmed interpreter-path-stale Tunnel profile",
+    )
+    mcp_profile_refresh.add_argument("--tunnel-profile", required=True)
+    mcp_profile_refresh.add_argument("--tunnel-id-ref", required=True)
+    mcp_profile_refresh.add_argument("--runtime-api-key-ref", required=True)
+    mcp_profile_refresh.add_argument(
+        "--confirm-current-profile-sha256",
+        required=True,
+        help="Exact tunnel_profile_sha256 emitted by mcp-profile-check",
+    )
+    mcp_profile_refresh.add_argument("--confirm-profile-replacement", action="store_true")
+    mcp_profile_refresh.add_argument(
+        "--tunnel-client",
+        required=True,
+        help="Explicit absolute path previously inspected with mcp-probe",
+    )
+    mcp_profile_refresh.add_argument(
+        "--confirm-tunnel-client-sha256",
+        required=True,
+        help="Exact binary_sha256 emitted by the no-secret mcp-probe command",
+    )
+    mcp_profile_refresh.add_argument("--profile-dir")
+    mcp_profile_refresh.add_argument(
+        "--json", action="store_true", help="Compatibility flag; output is always JSON"
+    )
+    mcp_profile_refresh.set_defaults(func=command_mcp_profile_refresh)
+
     mcp_activate = subparsers.add_parser(
         "mcp-activate",
         help="Run the exact approved package through an attended foreground Tunnel activation",
@@ -5823,7 +6633,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exact binary_sha256 emitted by the no-secret mcp-probe command",
     )
     mcp_activate.add_argument("--profile-dir")
-    mcp_activate.add_argument("--ready-timeout", type=positive_int, default=30)
+    mcp_activate.add_argument("--ready-timeout", type=positive_int, default=60)
     mcp_activate.add_argument("--json", action="store_true", help="Compatibility flag; output is always JSON")
     mcp_activate.set_defaults(func=command_mcp_activate)
 
@@ -5858,6 +6668,16 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_verify_audit.add_argument("--handoff-dir", required=True)
     mcp_verify_audit.add_argument("--json", action="store_true", help="Compatibility flag; output is always JSON")
     mcp_verify_audit.set_defaults(func=command_mcp_verify_audit)
+
+    mcp_protocol_trace = subparsers.add_parser(
+        "mcp-protocol-trace",
+        help="Verify one package/session-bound sanitized MCP handshake sequence trace",
+    )
+    mcp_protocol_trace.add_argument("--handoff-dir", required=True)
+    mcp_protocol_trace.add_argument(
+        "--json", action="store_true", help="Compatibility flag; output is always JSON"
+    )
+    mcp_protocol_trace.set_defaults(func=command_mcp_protocol_trace)
 
     human_handoff = subparsers.add_parser(
         "human-handoff",

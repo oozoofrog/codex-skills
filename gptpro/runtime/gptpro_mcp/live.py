@@ -398,7 +398,15 @@ class ControllerLease:
         self._descriptor: int | None = None
 
     def acquire(self) -> "ControllerLease":
-        descriptor = open_private_regular(self.path, flags=os.O_RDWR, create=True)
+        return self._acquire(create=True)
+
+    def acquire_existing(self) -> "ControllerLease":
+        """Acquire only a pre-existing safe lease file; never infer absence as unlocked."""
+
+        return self._acquire(create=False)
+
+    def _acquire(self, *, create: bool) -> "ControllerLease":
+        descriptor = open_private_regular(self.path, flags=os.O_RDWR, create=create)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:

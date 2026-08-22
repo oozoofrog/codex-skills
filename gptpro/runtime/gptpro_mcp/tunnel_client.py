@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import base64
 import errno
+import fcntl
 import hashlib
 import ipaddress
 import json
 import os
 import re
 import selectors
+import secrets
 import shlex
 import shutil
 import socket
@@ -222,6 +224,65 @@ class TunnelInitResult:
     profile_sha256: str
     profile_dir_sha256: str | None
     mcp_command_sha256: str
+
+
+@dataclass(frozen=True)
+class TunnelProfileInspection:
+    ready: bool
+    code: str | None
+    refresh_required: bool
+    safe_to_refresh: bool
+    profile_sha256: str
+    profile_dir_sha256: str
+    observed_mcp_command_sha256: str
+    expected_mcp_command_sha256: str
+
+
+@dataclass(frozen=True)
+class TunnelProfileRefreshResult:
+    ok: bool
+    previous_profile_sha256: str
+    profile_sha256: str
+    profile_dir_sha256: str
+    mcp_command_sha256: str
+    staging_cleanup_complete: bool
+
+
+class ProfileControllerLease:
+    """Machine-global flock serializing profile mutation and foreground use."""
+
+    def __init__(self, runtime_root: Path) -> None:
+        self.path = Path(runtime_root) / "profile-controller.lock"
+        self._descriptor: int | None = None
+
+    def acquire(self) -> "ProfileControllerLease":
+        descriptor = open_private_regular(self.path, flags=os.O_RDWR, create=True)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            os.close(descriptor)
+            raise RuntimeStateError(
+                "PROFILE_OPERATION_CONFLICT",
+                "Another profile mutation or foreground controller operation is in progress.",
+            ) from exc
+        self._descriptor = descriptor
+        return self
+
+    def close(self) -> None:
+        if self._descriptor is None:
+            return
+        try:
+            fcntl.flock(self._descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(self._descriptor)
+            self._descriptor = None
+
+    def __enter__(self) -> "ProfileControllerLease":
+        return self.acquire()
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        del exc_type, exc, traceback
+        self.close()
 
 
 @dataclass(frozen=True)
@@ -621,8 +682,9 @@ def _restricted_profile_values(document: str) -> dict[tuple[str, ...], str]:
     return scalars
 
 
-def _validate_restricted_profile(document: str, *, expected_mcp_command: str) -> None:
-    scalars = _restricted_profile_values(document)
+def _validate_bounded_profile_values(
+    scalars: Mapping[tuple[str, ...], str],
+) -> None:
     if set(scalars) != _OFFICIAL_PROFILE_REQUIRED_SCALARS:
         raise TunnelClientError(
             "TUNNEL_PROFILE_UNSAFE", "The Tunnel profile differs from the bounded gptpro init shape."
@@ -637,7 +699,6 @@ def _validate_restricted_profile(document: str, *, expected_mcp_command: str) ->
         ("log", "level"): "info",
         ("log", "format"): "json",
         ("mcp", "commands", "channel"): "main",
-        ("mcp", "commands", "command"): expected_mcp_command,
     }
     if any(scalars.get(path) != value for path, value in expected.items()):
         raise TunnelClientError(
@@ -649,12 +710,16 @@ def _validate_restricted_profile(document: str, *, expected_mcp_command: str) ->
         )
 
 
-def _profile_security_snapshot(
-    name: str,
-    directory: Path,
-    *,
-    expected_mcp_command: str,
-) -> ProfileSecuritySnapshot:
+def _validate_restricted_profile(document: str, *, expected_mcp_command: str) -> None:
+    scalars = _restricted_profile_values(document)
+    _validate_bounded_profile_values(scalars)
+    if scalars.get(("mcp", "commands", "command")) != expected_mcp_command:
+        raise TunnelClientError(
+            "TUNNEL_PROFILE_UNSAFE", "The Tunnel profile changes the bounded MCP command."
+        )
+
+
+def _read_profile_document(name: str, directory: Path) -> tuple[bytes, str]:
     path = directory / f"{name}.yaml"
     descriptor = -1
     try:
@@ -687,9 +752,19 @@ def _profile_security_snapshot(
         if descriptor >= 0:
             os.close(descriptor)
     try:
-        document = payload.decode("utf-8")
+        return payload, payload.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise TunnelClientError("TUNNEL_PROFILE_UNSAFE", "The Tunnel profile is not UTF-8.") from exc
+
+
+def _profile_security_snapshot(
+    name: str,
+    directory: Path,
+    *,
+    expected_mcp_command: str,
+) -> ProfileSecuritySnapshot:
+    path = directory / f"{name}.yaml"
+    payload, document = _read_profile_document(name, directory)
     _validate_restricted_profile(document, expected_mcp_command=expected_mcp_command)
     return ProfileSecuritySnapshot(
         directory=directory,
@@ -803,6 +878,186 @@ def _bundled_mcp_command() -> str:
 
     skill_root = Path(__file__).resolve().parents[2]
     return _exact_mcp_command(skill_root / "scripts" / "gptpro_mcp.py", sys.executable)
+
+
+def inspect_tunnel_profile(
+    profile: str,
+    *,
+    env: Mapping[str, str],
+    mcp_script: Path,
+    profile_dir: Path | None = None,
+    python_executable: Path | str | None = None,
+) -> TunnelProfileInspection:
+    """Classify an exact profile or a refreshable interpreter-path-only drift."""
+
+    name = _profile(profile)
+    directory = _resolved_profile_directory(profile_dir, env)
+    payload, document = _read_profile_document(name, directory)
+    scalars = _restricted_profile_values(document)
+    _validate_bounded_profile_values(scalars)
+    observed_command = scalars[("mcp", "commands", "command")]
+    expected_command = _exact_mcp_command(mcp_script, python_executable)
+    snapshot = ProfileSecuritySnapshot(
+        directory=directory,
+        path=directory / f"{name}.yaml",
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+    identity = _profile_identity_sha256(name, snapshot)
+    common = {
+        "profile_sha256": identity,
+        "profile_dir_sha256": hashlib.sha256(str(directory).encode("utf-8")).hexdigest(),
+        "observed_mcp_command_sha256": hashlib.sha256(
+            observed_command.encode("utf-8")
+        ).hexdigest(),
+        "expected_mcp_command_sha256": hashlib.sha256(
+            expected_command.encode("utf-8")
+        ).hexdigest(),
+    }
+    if secrets.compare_digest(observed_command, expected_command):
+        return TunnelProfileInspection(
+            ready=True,
+            code=None,
+            refresh_required=False,
+            safe_to_refresh=False,
+            **common,
+        )
+    try:
+        observed_arguments = shlex.split(observed_command, posix=True)
+        expected_arguments = shlex.split(expected_command, posix=True)
+    except ValueError as exc:
+        raise TunnelClientError(
+            "TUNNEL_PROFILE_UNSAFE", "The Tunnel profile MCP command is malformed."
+        ) from exc
+    interpreter = observed_arguments[0] if observed_arguments else ""
+    refreshable = (
+        len(observed_arguments) == len(expected_arguments)
+        and len(observed_arguments) >= 2
+        and observed_arguments[1:] == expected_arguments[1:]
+        and Path(interpreter).is_absolute()
+        and not any(ord(character) < 32 for character in interpreter)
+        and observed_command == shlex.join(observed_arguments)
+    )
+    if not refreshable:
+        raise TunnelClientError(
+            "TUNNEL_PROFILE_UNSAFE",
+            "The Tunnel profile differs by more than the pinned Python interpreter path.",
+        )
+    return TunnelProfileInspection(
+        ready=False,
+        code="MCP_INTERPRETER_PATH_DRIFT",
+        refresh_required=True,
+        safe_to_refresh=True,
+        **common,
+    )
+
+
+def _atomic_move_staged_profile(
+    source_name: str,
+    destination_name: str,
+    staging: Path,
+    destination: Path,
+) -> None:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory_flag is None:
+        raise TunnelClientError(
+            "RUNTIME_STATE_UNSAFE", "Atomic profile replacement requires safe directory handles."
+        )
+    flags = os.O_RDONLY | nofollow | directory_flag | getattr(os, "O_CLOEXEC", 0)
+    source_descriptor = -1
+    destination_descriptor = -1
+    try:
+        source_descriptor = os.open(staging, flags)
+        destination_descriptor = os.open(destination, flags)
+        os.replace(
+            source_name,
+            destination_name,
+            src_dir_fd=source_descriptor,
+            dst_dir_fd=destination_descriptor,
+        )
+        os.fsync(source_descriptor)
+        os.fsync(destination_descriptor)
+    except OSError as exc:
+        raise TunnelClientError(
+            "TUNNEL_PROFILE_REFRESH_FAILED", "Unable to atomically replace the Tunnel profile."
+        ) from exc
+    finally:
+        if source_descriptor >= 0:
+            os.close(source_descriptor)
+        if destination_descriptor >= 0:
+            os.close(destination_descriptor)
+
+
+def _write_profile_backup(path: Path, payload: bytes) -> None:
+    """Write an owner-only, synced byte-for-byte rollback copy in the stage."""
+
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory_flag is None:
+        raise TunnelClientError(
+            "RUNTIME_STATE_UNSAFE", "Profile rollback requires safe directory handles."
+        )
+    directory_descriptor = -1
+    descriptor = -1
+    try:
+        directory_descriptor = os.open(
+            path.parent,
+            os.O_RDONLY | nofollow | directory_flag | getattr(os, "O_CLOEXEC", 0),
+        )
+        metadata = os.fstat(directory_descriptor)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise TunnelClientError(
+                "RUNTIME_STATE_UNSAFE", "The profile refresh stage is not owner-only."
+            )
+        descriptor = os.open(
+            path.name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | nofollow
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=directory_descriptor,
+        )
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short profile backup write")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.fsync(directory_descriptor)
+    except TunnelClientError:
+        raise
+    except OSError as exc:
+        raise TunnelClientError(
+            "TUNNEL_PROFILE_REFRESH_FAILED",
+            "Unable to create the byte-for-byte profile rollback copy.",
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if directory_descriptor >= 0:
+            os.close(directory_descriptor)
+
+
+def _cleanup_profile_refresh_stage(staging: Path, *files: Path) -> bool:
+    complete = True
+    for path in files:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            complete = False
+    try:
+        staging.rmdir()
+    except OSError:
+        complete = False
+    return complete
 
 
 def _mcp_target_identity(arguments: list[str]) -> tuple[str, list[str]]:
@@ -1523,6 +1778,205 @@ class TunnelClient:
             profile_sha256=profile_sha256,
             profile_dir_sha256=hashlib.sha256(str(directory).encode("utf-8")).hexdigest(),
             mcp_command_sha256=hashlib.sha256(command.encode("utf-8")).hexdigest(),
+        )
+
+    def refresh_profile_attended(
+        self,
+        profile: str,
+        *,
+        env: Mapping[str, str],
+        tunnel_id_reference: str,
+        control_plane_api_key_reference: str,
+        mcp_script: Path,
+        expected_profile_sha256: str,
+        profile_dir: Path | None = None,
+        python_executable: Path | str | None = None,
+    ) -> TunnelProfileRefreshResult:
+        """Replace only an interpreter-path-stale profile through a validated stage."""
+
+        capabilities = self._capabilities or self.probe()
+        if not capabilities.init_profile:
+            raise TunnelClientError(
+                "TUNNEL_CLIENT_UNSUPPORTED", "The tunnel-client lacks required profile-init flags."
+            )
+        if re.fullmatch(r"[0-9a-f]{64}", expected_profile_sha256) is None:
+            raise TunnelClientError(
+                "MCP_INVALID_ARGUMENT", "The confirmed current Tunnel profile hash is invalid."
+            )
+        name = _profile(profile)
+        directory = _resolved_profile_directory(profile_dir, env)
+        inspection = inspect_tunnel_profile(
+            name,
+            env=env,
+            mcp_script=mcp_script,
+            profile_dir=directory,
+            python_executable=python_executable,
+        )
+        if not secrets.compare_digest(inspection.profile_sha256, expected_profile_sha256):
+            raise TunnelClientError(
+                "TUNNEL_PROFILE_CHANGED", "The Tunnel profile changed after attended inspection."
+            )
+        if inspection.ready:
+            raise TunnelClientError(
+                "TUNNEL_PROFILE_CURRENT", "The Tunnel profile already uses the current interpreter."
+            )
+        if not inspection.refresh_required or not inspection.safe_to_refresh:
+            raise TunnelClientError(
+                "TUNNEL_PROFILE_UNSAFE", "The Tunnel profile is not safe for interpreter refresh."
+            )
+
+        profile_payload, document = _read_profile_document(name, directory)
+        current_snapshot = ProfileSecuritySnapshot(
+            directory=directory,
+            path=directory / f"{name}.yaml",
+            sha256=hashlib.sha256(profile_payload).hexdigest(),
+        )
+        if not secrets.compare_digest(
+            _profile_identity_sha256(name, current_snapshot), expected_profile_sha256
+        ):
+            raise TunnelClientError(
+                "TUNNEL_PROFILE_CHANGED", "The Tunnel profile changed before secret resolution."
+            )
+        scalars = _restricted_profile_values(document)
+        _validate_bounded_profile_values(scalars)
+        referenced_tunnel_id = _resolve_reference(tunnel_id_reference, env)
+        if _TUNNEL_ID.fullmatch(referenced_tunnel_id) is None:
+            raise TunnelClientError(
+                "TUNNEL_NOT_ASSOCIATED", "The Tunnel identity reference is invalid."
+            )
+        existing_tunnel_id = scalars[("control_plane", "tunnel_id")]
+        if not secrets.compare_digest(referenced_tunnel_id, existing_tunnel_id):
+            referenced_tunnel_id = ""
+            existing_tunnel_id = ""
+            raise TunnelClientError(
+                "TUNNEL_NOT_ASSOCIATED",
+                "The replacement Tunnel identity differs from the existing profile.",
+            )
+        expected_tunnel_id_sha256 = hashlib.sha256(
+            existing_tunnel_id.encode("utf-8")
+        ).hexdigest()
+        referenced_tunnel_id = ""
+        existing_tunnel_id = ""
+
+        staging = _profile_directory(
+            directory / f".gptpro-refresh-{secrets.token_hex(16)}",
+            create=True,
+        )
+        staging_profile = staging / f"{name}.yaml"
+        backup_profile = staging / ".previous-profile.yaml"
+        replacement_attempted = False
+        refreshed: TunnelProfileInspection | None = None
+        try:
+            initialized = self.init_profile_attended(
+                name,
+                env=env,
+                tunnel_id_reference=tunnel_id_reference,
+                control_plane_api_key_reference=control_plane_api_key_reference,
+                mcp_script=mcp_script,
+                profile_dir=staging,
+                python_executable=python_executable,
+            )
+            if not initialized.ok:
+                raise TunnelClientError(
+                    "TUNNEL_PROFILE_REFRESH_FAILED",
+                    "The official Tunnel profile initializer failed during staged refresh.",
+                )
+            expected_command = _exact_mcp_command(mcp_script, python_executable)
+            _, staged_document = _read_profile_document(name, staging)
+            staged_scalars = _restricted_profile_values(staged_document)
+            _validate_bounded_profile_values(staged_scalars)
+            staged_tunnel_id_sha256 = hashlib.sha256(
+                staged_scalars[("control_plane", "tunnel_id")].encode("utf-8")
+            ).hexdigest()
+            if not secrets.compare_digest(
+                staged_tunnel_id_sha256, expected_tunnel_id_sha256
+            ):
+                raise TunnelClientError(
+                    "TUNNEL_NOT_ASSOCIATED",
+                    "The staged Tunnel profile changed the existing Tunnel identity.",
+                )
+            _profile_security_snapshot(
+                name,
+                staging,
+                expected_mcp_command=expected_command,
+            )
+            latest = inspect_tunnel_profile(
+                name,
+                env=env,
+                mcp_script=mcp_script,
+                profile_dir=directory,
+                python_executable=python_executable,
+            )
+            if not secrets.compare_digest(latest.profile_sha256, expected_profile_sha256):
+                raise TunnelClientError(
+                    "TUNNEL_PROFILE_CHANGED",
+                    "The Tunnel profile changed while its replacement was staged.",
+                )
+            _write_profile_backup(backup_profile, profile_payload)
+            replacement_attempted = True
+            _atomic_move_staged_profile(
+                staging_profile.name,
+                f"{name}.yaml",
+                staging,
+                directory,
+            )
+            refreshed = inspect_tunnel_profile(
+                name,
+                env=env,
+                mcp_script=mcp_script,
+                profile_dir=directory,
+                python_executable=python_executable,
+            )
+            if not refreshed.ready:
+                raise TunnelClientError(
+                    "TUNNEL_PROFILE_REFRESH_FAILED",
+                    "The refreshed Tunnel profile did not bind the current interpreter.",
+                )
+        except BaseException as failure:
+            rollback_error: TunnelClientError | None = None
+            if replacement_attempted:
+                try:
+                    _atomic_move_staged_profile(
+                        backup_profile.name,
+                        f"{name}.yaml",
+                        staging,
+                        directory,
+                    )
+                    restored_payload, _ = _read_profile_document(name, directory)
+                    if not secrets.compare_digest(restored_payload, profile_payload):
+                        raise TunnelClientError(
+                            "TUNNEL_PROFILE_ROLLBACK_FAILED",
+                            "The original Tunnel profile bytes were not restored.",
+                        )
+                except TunnelClientError as exc:
+                    rollback_error = exc
+            if rollback_error is not None:
+                raise TunnelClientError(
+                    "TUNNEL_PROFILE_ROLLBACK_FAILED",
+                    "The atomic profile refresh failed, its original bytes could not be restored, and the private stage was retained for attended recovery.",
+                ) from failure
+            if not _cleanup_profile_refresh_stage(
+                staging, staging_profile, backup_profile
+            ):
+                raise TunnelClientError(
+                    "TUNNEL_PROFILE_STAGE_CLEANUP_REQUIRED",
+                    "The refresh failed and its owner-only private stage could not be removed; attended local cleanup is required before retrying.",
+                ) from failure
+            raise
+        if refreshed is None:
+            raise TunnelClientError(
+                "TUNNEL_PROFILE_REFRESH_FAILED", "The Tunnel profile refresh produced no result."
+            )
+        cleanup_complete = _cleanup_profile_refresh_stage(
+            staging, staging_profile, backup_profile
+        )
+        return TunnelProfileRefreshResult(
+            ok=True,
+            previous_profile_sha256=inspection.profile_sha256,
+            profile_sha256=refreshed.profile_sha256,
+            profile_dir_sha256=refreshed.profile_dir_sha256,
+            mcp_command_sha256=refreshed.expected_mcp_command_sha256,
+            staging_cleanup_complete=cleanup_complete,
         )
 
     def doctor(

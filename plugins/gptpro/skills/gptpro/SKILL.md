@@ -36,7 +36,7 @@ Choose exactly one mode:
 3. Run `scripts/gptpro.py verify --handoff-dir <dir>` and `status`. Inspect `manifest.json`, especially Git identity, dirty paths, included files, exclusions, secret findings, warnings, resolved transport, exact outbound paths, hashes, and any GitHub repository/commit/PR identity. The ZIP is a local audit artifact, not a default upload.
 4. Tell the user the destination, purpose, resolved transport, exact outbound artifacts, included count/bytes, Git SHA, dirty-state summary, and all security findings. Ask for approval to transmit those exact bytes. Stop and wait.
 5. Only after explicit approval, run `scripts/gptpro.py approve ... --approved-by user --confirm-transmission`. Schema-3 `mcp-read` additionally requires `--confirm-mcp-disclosure` after the user reviews the exact maximum path/hash set, limits, connector labels, and expiry.
-6. Read [references/browser-handoff.md](references/browser-handoff.md). For `github`, also read [references/github-transport.md](references/github-transport.md). For `mcp-read`, follow [references/web-mcp.md](references/web-mcp.md): create/select the intended Tunnel before package preparation, run the secretless capability probe only with a user-reviewed trusted `tunnel-client`, require the official profile `doctor` preflight, explicitly confirm the intended ChatGPT app/workspace binding, then start the foreground activation. The first probe may create the canonical owner-only runtime directory and lock file and executes bounded version/help subprocesses; the gptpro wrapper sends no prompt or repository content and resolves no credentials, but cannot make an arbitrary external binary trustworthy. The health/admin surface must use the activation-owned owner-only Unix socket, never a TCP listener. Treat the session as active only after the private PID file agrees with the exact owned child and that PID passes `health --url-file ... --pid <owned-pid> --require-control-plane-poll --json`; `doctor`, `/healthz`, or `/readyz` alone is insufficient. Keep that controller in the foreground while the approved prompt is sent. Use only the approved transport; never fall back automatically.
+6. Read [references/browser-handoff.md](references/browser-handoff.md). For `github`, also read [references/github-transport.md](references/github-transport.md). For `mcp-read`, follow [references/web-mcp.md](references/web-mcp.md): create/select the intended Tunnel before package preparation, run the secretless capability probe only with a user-reviewed trusted `tunnel-client`, and run the secretless profile check before activation. If only the pinned Python path drifted after an interpreter update, show the exact current profile hash and obtain separate approval before the attended atomic profile refresh; never refresh automatically. Require the official profile `doctor` preflight, explicitly confirm the intended ChatGPT app/workspace binding, then start the foreground activation. The first probe may create the canonical owner-only runtime directory and lock file and executes bounded version/help subprocesses; the gptpro wrapper sends no prompt or repository content and resolves no credentials, but cannot make an arbitrary external binary trustworthy. The health/admin surface must use the activation-owned owner-only Unix socket, never a TCP listener. Treat the session as active only after the private PID file agrees with the exact owned child and that PID passes `health --url-file ... --pid <owned-pid> --require-control-plane-poll --json`; `doctor`, `/healthz`, or `/readyz` alone is insufficient. Keep that controller in the foreground while the approved prompt is sent. Use only the approved transport; never fall back automatically.
 7. Use an available official Chrome-control skill for visible web steps, or give the user the manual handoff. Developer Mode, ChatGPT app/workspace selection, login, OAuth/key creation, and visible prompt submission remain attended human actions. If a person must act, read [references/human-takeover.md](references/human-takeover.md) and run the read-only `human-handoff` command for an exact phase-aware checklist. Submit once, then record the observed transport and required identity evidence with `mark-submitted`.
 8. For `mcp-read`, keep the activation controller running until the response is complete. Stop by revoking content authorization first and asking that exact controller to shut down cooperatively. Never use process-name scans or broad kills. If the controller is missing, preserve revoked authorization and report the stop failure.
 9. Import the completed, package-marked response with `import-response`. Do not accept a response from a different package or an unsubmitted handoff.
@@ -99,6 +99,20 @@ python3 <skill-dir>/scripts/gptpro.py mcp-profile-init \
   --tunnel-client /absolute/path/to/tunnel-client \
   --confirm-tunnel-client-sha256 <binary_sha256-from-probe> \
   --json
+python3 <skill-dir>/scripts/gptpro.py mcp-profile-check \
+  --tunnel-profile gptpro-web \
+  --json
+# Only after the check reports interpreter-path-only drift and the user approves
+# replacement of its exact tunnel_profile_sha256:
+python3 <skill-dir>/scripts/gptpro.py mcp-profile-refresh \
+  --tunnel-profile gptpro-web \
+  --tunnel-id-ref env:GPTPRO_TUNNEL_ID \
+  --runtime-api-key-ref env:CONTROL_PLANE_API_KEY \
+  --tunnel-client /absolute/path/to/tunnel-client \
+  --confirm-tunnel-client-sha256 <binary_sha256-from-probe> \
+  --confirm-current-profile-sha256 <tunnel_profile_sha256-from-check> \
+  --confirm-profile-replacement \
+  --json
 python3 <skill-dir>/scripts/gptpro.py mcp-activate \
   --handoff-dir .gptpro/handoffs/<package-id> \
   --tunnel-profile gptpro-web \
@@ -110,6 +124,9 @@ python3 <skill-dir>/scripts/gptpro.py mcp-activate \
 # From another terminal/controller while activation remains foreground:
 python3 <skill-dir>/scripts/gptpro.py mcp-status --handoff-dir .gptpro/handoffs/<package-id> --json
 python3 <skill-dir>/scripts/gptpro.py mcp-stop --handoff-dir .gptpro/handoffs/<package-id> --json
+# After stopping a failed or ambiguous connector attempt, verify the package-local
+# sanitized sequence and its stop-receipt binding; never retry the consumed package.
+python3 <skill-dir>/scripts/gptpro.py mcp-protocol-trace --handoff-dir .gptpro/handoffs/<package-id> --json
 ```
 
 `init` defaults to repository-local Git metadata (`.git/info/exclude`) so it does not change tracked files. Use `--ignore-scope repository` only when the user explicitly wants `.gitignore` updated, or `--ignore-scope none` to create storage without Git exclusion. The prepare command prints the created handoff directory. Keep `.gptpro/` out of commits unless the user explicitly requests preserving a receipt artifact.

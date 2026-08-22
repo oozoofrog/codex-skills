@@ -139,6 +139,24 @@ python3 scripts/gptpro.py mcp-profile-init \
   --confirm-tunnel-client-sha256 <binary_sha256-from-probe> \
   --json
 
+# Secretless: detects an exact profile or interpreter-path-only drift after a
+# Homebrew/Python update. It does not execute tunnel-client or resolve keys.
+python3 scripts/gptpro.py mcp-profile-check \
+  --tunnel-profile gptpro-web \
+  --json
+
+# Run only after reviewing the check output and approving replacement of its
+# exact current profile hash. Other profile changes fail closed.
+python3 scripts/gptpro.py mcp-profile-refresh \
+  --tunnel-profile gptpro-web \
+  --tunnel-id-ref env:GPTPRO_TUNNEL_ID \
+  --runtime-api-key-ref env:CONTROL_PLANE_API_KEY \
+  --tunnel-client /absolute/path/to/tunnel-client \
+  --confirm-tunnel-client-sha256 <binary_sha256-from-probe> \
+  --confirm-current-profile-sha256 <tunnel_profile_sha256-from-check> \
+  --confirm-profile-replacement \
+  --json
+
 # Foreground: keep this process running during the consultation.
 python3 scripts/gptpro.py mcp-activate \
   --handoff-dir /path/to/repo/.gptpro/handoffs/<id> \
@@ -164,9 +182,16 @@ python3 scripts/gptpro.py mcp-recover \
 python3 scripts/gptpro.py mcp-verify-audit \
   --handoff-dir /path/to/repo/.gptpro/handoffs/<id> \
   --json
+# Verify the package-local sanitized protocol trace, its available lifecycle
+# binding scope, and independent disclosure-audit totals.
+python3 scripts/gptpro.py mcp-protocol-trace \
+  --handoff-dir /path/to/repo/.gptpro/handoffs/<id> \
+  --json
 ```
 
-PATH discovery is probe-only. Key-bearing `mcp-profile-init` and `mcp-activate` require an explicit absolute `--tunnel-client` plus the exact `--confirm-tunnel-client-sha256` copied from the no-secret probe. `--profile-dir` is an explicit installation/test override; never point it at shared or untrusted state. All lifecycle commands use one canonical owner-only per-user runtime slot with no CLI root override, so a second root cannot create a second active authorization. Runtime state and receipts bind the validated profile SHA-256, Tunnel binary SHA-256, exact MCP target SHA-256, and bundled MCP runtime-tree SHA-256.
+PATH discovery is probe-only. Key-bearing `mcp-profile-init`, `mcp-profile-refresh`, and `mcp-activate` require an explicit absolute `--tunnel-client` plus the exact `--confirm-tunnel-client-sha256` copied from the no-secret probe. `--profile-dir` is an explicit installation/test override; never point it at shared or untrusted state. All lifecycle commands use one canonical owner-only per-user runtime slot with no CLI root override, so a second root cannot create a second active authorization. Runtime state and receipts bind the validated profile SHA-256, Tunnel binary SHA-256, exact MCP target SHA-256, bundled MCP runtime-tree SHA-256, and package-local protocol-trace header. The final trace summary is additionally bound after exact child stop for a successfully activated session. A pre-active failure currently binds only the header because its failure callback runs before exact child termination; diagnostics therefore report `header_binding_valid: true` but `lifecycle_binding_valid: false` rather than claiming final-byte integrity. A missing footer or corrupt trace is reported honestly after exact stop and never replaces the independent disclosure audit.
+
+`mcp-profile-refresh` preserves the same Tunnel and bounded profile settings and permits only the first command argument—the absolute Python interpreter path—to change. A machine-global owner-only profile/controller flock serializes attended init, the full foreground activation lifetime, and the full refresh transaction. Refresh additionally requires either no authorization or a terminal session whose pre-existing safe controller lease is exclusively held through cleanup; missing, unsafe, unresolved, or live terminal leases are rejected. It generates a new owner-only profile through the official initializer, validates it, and atomically replaces the stale file. A byte-for-byte private backup restores the old profile if replacement or post-replacement validation fails; after a valid commit, `staging_cleanup_complete` reports cleanup separately. If cleanup is incomplete, do not print the private stage, activate, or retry; inspect and remove only its `.gptpro-refresh-*` child under the selected profile directory, then rerun `mcp-profile-check`. It never runs automatically from `mcp-activate`; a changed flag, entrypoint, Tunnel, endpoint, or unreviewed profile hash is rejected. The flock coordinates only this gptpro version, so stop controllers started by older or unmanaged code before refreshing.
 
 `human-handoff` is read-only: it verifies the package and prints the approved paths, hashes, model, user steps, expected return evidence, and retry rule. It does not change state, authorize transmission, or mark a message as sent. The five modes are `plan`, `ask`, `review`, `debug`, and `architecture`. Run `python3 scripts/gptpro.py --help` for the full lifecycle.
 

@@ -10,9 +10,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-SKILL_ROOT = Path(__file__).resolve().parent.parent
-if str(SKILL_ROOT) not in sys.path:
-    sys.path.insert(0, str(SKILL_ROOT))
+SCRIPTS_ROOT = Path(__file__).resolve().parent
+SKILL_ROOT = SCRIPTS_ROOT.parent
+for trusted_root in (SKILL_ROOT, SCRIPTS_ROOT):
+    if str(trusted_root) not in sys.path:
+        sys.path.insert(0, str(trusted_root))
 
 _INHERITED_SECRET_ENV = (
     "CONTROL_PLANE_API_KEY",
@@ -50,7 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _runtime_from_environment() -> tuple[Any, Any | None, type[Any]]:
+def _runtime_from_environment() -> tuple[Any, Any | None, Any]:
     # Consume the only permitted capability values and remove inherited Tunnel
     # credentials before importing any bundled runtime module. This keeps
     # import-time code outside the control-plane secret boundary.
@@ -68,6 +70,7 @@ def _runtime_from_environment() -> tuple[Any, Any | None, type[Any]]:
             decode_session_capability,
         )
         from runtime.gptpro_mcp.protocol import LegacyMcpServer
+        from runtime.gptpro_mcp.protocol_trace import ProtocolTraceError
         from runtime.gptpro_mcp.runtime_state import RuntimeStateError, RuntimeStateStore
         from runtime.gptpro_mcp.tools import ToolRuntime
     except ImportError as exc:
@@ -129,11 +132,31 @@ def _runtime_from_environment() -> tuple[Any, Any | None, type[Any]]:
                 runtime_store=store,
             ),
         )
+        verified = governance.verify_package(
+            Path(str(state.get("handoff_dir", ""))), recover_lifecycle=False
+        )
+        audit_summary = governance.audit_log_for(
+            verified, session_hash, runtime_store=store
+        ).verify()
+        if audit_summary.footer:
+            raise RuntimeBootstrapError("The active disclosure audit is already closed.")
+        trace = governance.protocol_trace_for_runtime_state(
+            verified,
+            state,
+            session_id_sha256=session_hash,
+            audit_header_sha256=audit_summary.header_sha256,
+        )
+        trace_summary = trace.verify()
+        if trace_summary.closed:
+            raise RuntimeBootstrapError("The active protocol trace is already closed.")
         lease = RuntimeServerLease(store, session_hash).acquire()
-        return ToolRuntime(context, committer=context), lease, LegacyMcpServer
+        server_factory = functools.partial(LegacyMcpServer, trace=trace)
+        return ToolRuntime(context, committer=context), lease, server_factory
     except RuntimeBootstrapError:
         raise
-    except (ImportError, RuntimeStateError, ValueError) as exc:
+    except (ImportError, RuntimeStateError, ProtocolTraceError, ValueError) as exc:
+        raise RuntimeBootstrapError("The active authorization could not be bootstrapped.") from exc
+    except Exception as exc:
         raise RuntimeBootstrapError("The active authorization could not be bootstrapped.") from exc
 
 

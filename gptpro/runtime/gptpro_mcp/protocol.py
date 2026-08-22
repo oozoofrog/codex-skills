@@ -10,11 +10,23 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TextIO
 
 from .errors import CancelledError, ToolError
+from .protocol_trace import (
+    ProtocolTrace,
+    ProtocolTraceError,
+    classify_method,
+    classify_requested_version,
+    safe_requested_version,
+)
 from .schema import SERVER_INSTRUCTIONS, SERVER_NAME, SERVER_VERSION, TOOL_CATALOG, TOOL_NAMES
 from .tools import ToolRuntime, error_result
 
 JSONRPC_VERSION = "2.0"
-SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
+SUPPORTED_PROTOCOL_VERSIONS = (
+    "2025-11-25",
+    "2025-06-18",
+    "2025-03-26",
+    "2024-11-05",
+)
 PREFERRED_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 MAX_INPUT_FRAME_CHARS = 262_144
 MAX_INFLIGHT_REQUESTS = 1
@@ -51,8 +63,15 @@ def _request_key(value: Any) -> tuple[str, Any]:
 class LegacyMcpServer:
     """Line-framed server with an independent reader and cancellable workers."""
 
-    def __init__(self, tools: ToolRuntime, *, max_workers: int = 1) -> None:
+    def __init__(
+        self,
+        tools: ToolRuntime,
+        *,
+        max_workers: int = 1,
+        trace: ProtocolTrace | None = None,
+    ) -> None:
         self._tools = tools
+        self._trace = trace
         self._state_lock = threading.Lock()
         self._writer_lock = threading.Lock()
         self._initialize_seen = False
@@ -77,43 +96,117 @@ class LegacyMcpServer:
                 if len(line) > MAX_INPUT_FRAME_CHARS:
                     while line and not line.endswith("\n"):
                         line = input_stream.readline(MAX_INPUT_FRAME_CHARS + 1)
-                    self._write(
+                    if not self._record_trace(
+                        "invalid_frame",
+                        "frame_too_large",
+                        readiness_before=self._readiness(),
+                        readiness_after=self._readiness(),
+                    ):
+                        break
+                    self._write_traced(
                         _rpc_error(
                             None,
                             -32600,
                             "Invalid Request",
                             stable_code="MCP_FRAME_TOO_LARGE",
-                        )
+                        ),
+                        "invalid_frame",
                     )
                     continue
                 self.process_line(line)
         finally:
             self._executor.shutdown(wait=True, cancel_futures=False)
+            if self._trace is not None:
+                try:
+                    self._trace.close(
+                        "protocol_broken" if self._broken.is_set() else "stdio_eof"
+                    )
+                except (ProtocolTraceError, ValueError):
+                    self._broken.set()
+                    self._log("MCP_PROTOCOL_TRACE_FAILED")
         return 0 if not self._broken.is_set() else 1
 
     def process_line(self, line: str) -> None:
         try:
             message = json.loads(line)
         except (json.JSONDecodeError, UnicodeError, ValueError, RecursionError):
-            self._write(_rpc_error(None, -32700, "Parse error", stable_code="MCP_PROTOCOL_ERROR"))
+            readiness = self._readiness()
+            if not self._record_trace(
+                "invalid_frame",
+                "parse_error",
+                readiness_before=readiness,
+                readiness_after=readiness,
+            ):
+                return
+            self._write_traced(
+                _rpc_error(None, -32700, "Parse error", stable_code="MCP_PROTOCOL_ERROR"),
+                "invalid_frame",
+            )
             return
         if not isinstance(message, dict):
-            self._write(_rpc_error(None, -32600, "Invalid Request", stable_code="MCP_PROTOCOL_ERROR"))
+            readiness = self._readiness()
+            if not self._record_trace(
+                "invalid_frame",
+                "invalid_request",
+                readiness_before=readiness,
+                readiness_after=readiness,
+            ):
+                return
+            self._write_traced(
+                _rpc_error(None, -32600, "Invalid Request", stable_code="MCP_PROTOCOL_ERROR"),
+                "invalid_frame",
+            )
             return
         if message.get("jsonrpc") != JSONRPC_VERSION or not isinstance(message.get("method"), str):
             request_id = message.get("id") if _valid_id(message.get("id")) else None
-            self._write(_rpc_error(request_id, -32600, "Invalid Request", stable_code="MCP_PROTOCOL_ERROR"))
+            readiness = self._readiness()
+            if not self._record_trace(
+                classify_method(message.get("method")),
+                "invalid_request",
+                readiness_before=readiness,
+                readiness_after=readiness,
+            ):
+                return
+            self._write_traced(
+                _rpc_error(request_id, -32600, "Invalid Request", stable_code="MCP_PROTOCOL_ERROR"),
+                classify_method(message.get("method")),
+            )
             return
         has_id = "id" in message
         request_id = message.get("id")
         if has_id and not _valid_id(request_id):
-            self._write(_rpc_error(None, -32600, "Invalid Request", stable_code="MCP_PROTOCOL_ERROR"))
+            readiness = self._readiness()
+            if not self._record_trace(
+                classify_method(message.get("method")),
+                "invalid_request",
+                readiness_before=readiness,
+                readiness_after=readiness,
+            ):
+                return
+            self._write_traced(
+                _rpc_error(None, -32600, "Invalid Request", stable_code="MCP_PROTOCOL_ERROR"),
+                classify_method(message.get("method")),
+            )
             return
         params = message.get("params", {})
         if not isinstance(params, dict):
+            readiness = self._readiness()
+            if not self._record_trace(
+                classify_method(message.get("method")),
+                "invalid_params",
+                readiness_before=readiness,
+                readiness_after=readiness,
+            ):
+                return
             if has_id:
-                self._write(
-                    _rpc_error(request_id, -32602, "Invalid params", stable_code="MCP_INVALID_ARGUMENT")
+                self._write_traced(
+                    _rpc_error(
+                        request_id,
+                        -32602,
+                        "Invalid params",
+                        stable_code="MCP_INVALID_ARGUMENT",
+                    ),
+                    classify_method(message.get("method")),
                 )
             return
         method = message["method"]
@@ -125,67 +218,197 @@ class LegacyMcpServer:
     def _notification(self, method: str, params: dict[str, Any]) -> None:
         if method == "notifications/initialized":
             with self._state_lock:
-                if self._initialize_seen:
+                before = self._readiness_locked()
+                accepted = self._initialize_seen
+                if accepted:
                     self._initialized = True
+                after = self._readiness_locked()
+            if not self._record_trace(
+                "initialized_notification",
+                "accepted" if accepted else "ignored",
+                stage="processed",
+                readiness_before=before,
+                readiness_after=after,
+            ):
+                return
             return
         if method == "notifications/cancelled":
             request_id = params.get("requestId")
+            event: threading.Event | None = None
             if _valid_id(request_id):
                 with self._state_lock:
                     event = self._inflight.get(_request_key(request_id))
-                if event is not None:
-                    event.set()
+            readiness = self._readiness()
+            if event is not None:
+                event.set()
+            if not self._record_trace(
+                "cancelled_notification",
+                "accepted" if event is not None else "ignored",
+                stage="processed",
+                readiness_before=readiness,
+                readiness_after=readiness,
+            ):
+                return
             return
         # Unknown notifications are intentionally ignored without a response.
+        readiness = self._readiness()
+        self._record_trace(
+            "unknown",
+            "ignored",
+            stage="processed",
+            readiness_before=readiness,
+            readiness_after=readiness,
+        )
 
     def _request(self, request_id: Any, method: str, params: dict[str, Any]) -> None:
         if method == "ping":
-            self._write(_rpc_result(request_id, {}))
+            readiness = self._readiness()
+            if not self._record_trace(
+                "ping",
+                "pong",
+                readiness_before=readiness,
+                readiness_after=readiness,
+            ):
+                return
+            self._write_traced(_rpc_result(request_id, {}), "ping")
             return
         if method == "initialize":
             self._initialize(request_id, params)
             return
+        if method == "server/discover":
+            # This server intentionally remains legacy-only.  Mark one explicit
+            # fallback handshake as pending before returning Method not found.
+            # The persistent Tunnel stdio child may already have completed an
+            # earlier legacy lifecycle, so close readiness immediately.
+            metadata = params.get("_meta")
+            discover_requested = (
+                metadata.get("io.modelcontextprotocol/protocolVersion")
+                if isinstance(metadata, dict)
+                else None
+            )
+            discover_version_class = classify_requested_version(
+                discover_requested,
+                supported_versions=SUPPORTED_PROTOCOL_VERSIONS,
+                preferred_version=PREFERRED_PROTOCOL_VERSION,
+            )
+            with self._state_lock:
+                before = self._readiness_locked()
+            if not self._record_trace(
+                "server_discover",
+                "method_not_supported",
+                readiness_before=before,
+                readiness_after="uninitialized",
+                requested_version_class=discover_version_class,
+                requested_version=safe_requested_version(discover_requested),
+            ):
+                return
+            with self._state_lock:
+                self._initialize_seen = False
+                self._initialized = False
+                self._protocol_version = None
+            self._write_traced(
+                _rpc_error(
+                    request_id,
+                    -32601,
+                    "Method not found",
+                    stable_code="MCP_METHOD_NOT_SUPPORTED",
+                ),
+                "server_discover",
+            )
+            return
         if method in {"notifications/initialized", "notifications/cancelled"}:
-            self._write(
-                _rpc_error(request_id, -32601, "Method not found", stable_code="MCP_METHOD_NOT_SUPPORTED")
+            readiness = self._readiness()
+            if not self._record_trace(
+                classify_method(method),
+                "method_not_supported",
+                readiness_before=readiness,
+                readiness_after=readiness,
+            ):
+                return
+            self._write_traced(
+                _rpc_error(
+                    request_id,
+                    -32601,
+                    "Method not found",
+                    stable_code="MCP_METHOD_NOT_SUPPORTED",
+                ),
+                classify_method(method),
             )
             return
         with self._state_lock:
             ready = self._initialized
         if method in {"tools/list", "tools/call"} and not ready:
-            self._write(
+            readiness = self._readiness()
+            if not self._record_trace(
+                classify_method(method),
+                "not_initialized",
+                readiness_before=readiness,
+                readiness_after=readiness,
+            ):
+                return
+            self._write_traced(
                 _rpc_error(
                     request_id,
                     -32600,
                     "Client is not initialized",
                     stable_code="MCP_PROTOCOL_ERROR",
-                )
+                ),
+                classify_method(method),
             )
             return
         if method == "tools/list":
             if params:
-                self._write(
+                readiness = self._readiness()
+                if not self._record_trace(
+                    "tools_list",
+                    "invalid_params",
+                    readiness_before=readiness,
+                    readiness_after=readiness,
+                ):
+                    return
+                self._write_traced(
                     _rpc_error(
                         request_id,
                         -32602,
                         "Invalid params",
                         stable_code="MCP_INVALID_ARGUMENT",
-                    )
+                    ),
+                    "tools_list",
                 )
                 return
-            self._write(_rpc_result(request_id, {"tools": copy.deepcopy(list(TOOL_CATALOG))}))
+            readiness = self._readiness()
+            if not self._record_trace(
+                "tools_list",
+                "tools_listed",
+                readiness_before=readiness,
+                readiness_after=readiness,
+            ):
+                return
+            self._write_traced(
+                _rpc_result(request_id, {"tools": copy.deepcopy(list(TOOL_CATALOG))}),
+                "tools_list",
+            )
             return
         if method == "tools/call":
             name = params.get("name")
             arguments = params.get("arguments", {})
             if set(params) != {"name", "arguments"} or name not in TOOL_NAMES or not isinstance(arguments, dict):
-                self._write(
+                readiness = self._readiness()
+                if not self._record_trace(
+                    "tools_call",
+                    "invalid_params",
+                    readiness_before=readiness,
+                    readiness_after=readiness,
+                ):
+                    return
+                self._write_traced(
                     _rpc_error(
                         request_id,
                         -32602,
                         "Invalid params",
                         stable_code="MCP_INVALID_ARGUMENT",
-                    )
+                    ),
+                    "tools_call",
                 )
                 return
             key = _request_key(request_id)
@@ -196,54 +419,146 @@ class LegacyMcpServer:
                 if not duplicate and not busy:
                     self._inflight[key] = cancel
             if duplicate:
-                self._write(
+                readiness = self._readiness()
+                if not self._record_trace(
+                    "tools_call",
+                    "invalid_request",
+                    readiness_before=readiness,
+                    readiness_after=readiness,
+                ):
+                    return
+                self._write_traced(
                     _rpc_error(
                         request_id,
                         -32600,
                         "Duplicate request id",
                         stable_code="MCP_PROTOCOL_ERROR",
-                    )
+                    ),
+                    "tools_call",
                 )
                 return
             if busy:
-                self._write(
+                readiness = self._readiness()
+                if not self._record_trace(
+                    "tools_call",
+                    "server_busy",
+                    readiness_before=readiness,
+                    readiness_after=readiness,
+                ):
+                    return
+                self._write_traced(
                     _rpc_error(
                         request_id,
                         -32000,
                         "Server busy",
                         stable_code="MCP_SERVER_BUSY",
-                    )
+                    ),
+                    "tools_call",
                 )
+                return
+            readiness = self._readiness()
+            if not self._record_trace(
+                "tools_call",
+                "tool_dispatched",
+                readiness_before=readiness,
+                readiness_after=readiness,
+            ):
+                with self._state_lock:
+                    self._inflight.pop(key, None)
+                cancel.set()
                 return
             self._executor.submit(self._tool_worker, key, request_id, name, arguments, cancel)
             return
-        self._write(
-            _rpc_error(request_id, -32601, "Method not found", stable_code="MCP_METHOD_NOT_SUPPORTED")
+        readiness = self._readiness()
+        if not self._record_trace(
+            "unknown",
+            "method_not_supported",
+            readiness_before=readiness,
+            readiness_after=readiness,
+        ):
+            return
+        self._write_traced(
+            _rpc_error(
+                request_id,
+                -32601,
+                "Method not found",
+                stable_code="MCP_METHOD_NOT_SUPPORTED",
+            ),
+            "unknown",
         )
 
     def _initialize(self, request_id: Any, params: dict[str, Any]) -> None:
         requested = params.get("protocolVersion")
+        requested_class = classify_requested_version(
+            requested,
+            supported_versions=SUPPORTED_PROTOCOL_VERSIONS,
+            preferred_version=PREFERRED_PROTOCOL_VERSION,
+        )
         if not isinstance(requested, str):
-            self._write(
-                _rpc_error(request_id, -32602, "Invalid params", stable_code="MCP_INVALID_ARGUMENT")
+            readiness = self._readiness()
+            if not self._record_trace(
+                "initialize",
+                "invalid_params",
+                readiness_before=readiness,
+                readiness_after=readiness,
+                requested_version_class=requested_class,
+                requested_version=safe_requested_version(requested),
+            ):
+                return
+            self._write_traced(
+                _rpc_error(
+                    request_id,
+                    -32602,
+                    "Invalid params",
+                    stable_code="MCP_INVALID_ARGUMENT",
+                ),
+                "initialize",
             )
             return
         with self._state_lock:
-            if self._initialize_seen:
-                duplicate = True
-            else:
-                duplicate = False
-                self._initialize_seen = True
-                self._protocol_version = (
-                    requested if requested in SUPPORTED_PROTOCOL_VERSIONS else PREFERRED_PROTOCOL_VERSION
+            before = self._readiness_locked()
+            duplicate = self._initialize_seen
+            if not duplicate:
+                negotiated = (
+                    requested
+                    if requested in SUPPORTED_PROTOCOL_VERSIONS
+                    else PREFERRED_PROTOCOL_VERSION
                 )
-                negotiated = self._protocol_version
         if duplicate:
-            self._write(
-                _rpc_error(request_id, -32600, "Duplicate initialize", stable_code="MCP_PROTOCOL_ERROR")
+            if not self._record_trace(
+                "initialize",
+                "duplicate_initialize",
+                readiness_before=before,
+                readiness_after=before,
+                requested_version_class=requested_class,
+                requested_version=safe_requested_version(requested),
+            ):
+                return
+            self._write_traced(
+                _rpc_error(
+                    request_id,
+                    -32600,
+                    "Duplicate initialize",
+                    stable_code="MCP_PROTOCOL_ERROR",
+                ),
+                "initialize",
             )
             return
-        self._write(
+        if not self._record_trace(
+            "initialize",
+            "accepted",
+            readiness_before=before,
+            readiness_after="initialize_acknowledged",
+            requested_version_class=requested_class,
+            requested_version=safe_requested_version(requested),
+            negotiated_version=negotiated,
+        ):
+            return
+        with self._state_lock:
+            self._initialize_seen = True
+            self._initialized = False
+            self._protocol_version = negotiated
+        self._write_traced(
             _rpc_result(
                 request_id,
                 {
@@ -252,7 +567,8 @@ class LegacyMcpServer:
                     "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
                     "instructions": SERVER_INSTRUCTIONS,
                 },
-            )
+            ),
+            "initialize",
         )
 
     def _tool_worker(
@@ -275,21 +591,22 @@ class LegacyMcpServer:
             self._log("MCP_INTERNAL_ERROR")
             if cancel.is_set():
                 return
-            self._write(
+            self._write_traced(
                 _rpc_error(
                     request_id,
                     -32603,
                     "Internal error",
                     stable_code="MCP_PROTOCOL_ERROR",
-                )
+                ),
+                "tools_call",
             )
             return
         finally:
             with self._state_lock:
                 self._inflight.pop(key, None)
-        self._write(_rpc_result(request_id, result))
+        self._write_traced(_rpc_result(request_id, result), "tools_call")
 
-    def _write(self, message: dict[str, Any]) -> None:
+    def _write_traced(self, message: dict[str, Any], method: str) -> None:
         if self._broken.is_set() or self._output is None:
             return
         encoded = json.dumps(
@@ -300,9 +617,19 @@ class LegacyMcpServer:
             allow_nan=False,
         )
         try:
+            # Keep the local flush and its sanitized evidence in one ordering
+            # critical section so concurrent workers cannot invert them.
             with self._writer_lock:
                 self._output.write(encoded + "\n")
                 self._output.flush()
+                readiness = self._readiness()
+                self._record_trace(
+                    method,
+                    "response_flushed",
+                    stage="response",
+                    readiness_before=readiness,
+                    readiness_after=readiness,
+                )
         except (BrokenPipeError, OSError, UnicodeError):
             self._broken.set()
             with self._state_lock:
@@ -310,6 +637,52 @@ class LegacyMcpServer:
             for event in events:
                 event.set()
             self._log("MCP_BROKEN_PIPE")
+
+    def _readiness(self) -> str:
+        with self._state_lock:
+            return self._readiness_locked()
+
+    def _readiness_locked(self) -> str:
+        if self._initialized:
+            return "ready"
+        if self._initialize_seen:
+            return "initialize_acknowledged"
+        return "uninitialized"
+
+    def _record_trace(
+        self,
+        method: str,
+        outcome: str,
+        *,
+        stage: str = "decision",
+        readiness_before: str,
+        readiness_after: str,
+        requested_version_class: str | None = None,
+        requested_version: str | None = None,
+        negotiated_version: str | None = None,
+    ) -> bool:
+        if self._trace is None:
+            return True
+        try:
+            self._trace.record(
+                method=method,
+                stage=stage,
+                outcome=outcome,
+                readiness_before=readiness_before,
+                readiness_after=readiness_after,
+                requested_version_class=requested_version_class,
+                requested_version=requested_version,
+                negotiated_version=negotiated_version,
+            )
+            return True
+        except (ProtocolTraceError, ValueError):
+            self._broken.set()
+            with self._state_lock:
+                events = list(self._inflight.values())
+            for event in events:
+                event.set()
+            self._log("MCP_PROTOCOL_TRACE_FAILED")
+            return False
 
     def _log(self, stable_code: str) -> None:
         if self._stderr is None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -38,11 +39,13 @@ from runtime.gptpro_mcp.runtime_state import (
 from runtime.gptpro_mcp.schema import DEFAULT_LIMITS, PROTOCOL_PROFILE, tool_schema_sha256
 from runtime.gptpro_mcp.supervisor import ForegroundSupervisor, request_cooperative_stop
 from runtime.gptpro_mcp.tunnel_client import (
+    ProfileControllerLease,
     TunnelCapabilities,
     TunnelCheck,
     TunnelClient,
     TunnelClientError,
     TunnelRuntimeFiles,
+    inspect_tunnel_profile,
     loopback_url_from_file,
     prepare_runtime_files,
     runtime_key_environment,
@@ -705,6 +708,18 @@ else:
         path.chmod(0o600)
         return path
 
+    def drift_profile_interpreter(self, path: Path, value: str = "/missing/python3") -> str:
+        arguments = shlex.split(self.expected_mcp_command)
+        arguments[0] = value
+        drifted = shlex.join(arguments)
+        document = path.read_text(encoding="utf-8").replace(
+            json.dumps(self.expected_mcp_command),
+            json.dumps(drifted),
+        )
+        path.write_text(document, encoding="utf-8")
+        path.chmod(0o600)
+        return drifted
+
     def test_capability_doctor_binding_health_and_run_argv_are_exact(self) -> None:
         client = TunnelClient(self.binary)
         with mock.patch.dict(os.environ, self.env, clear=True):
@@ -971,6 +986,372 @@ else:
         self.assertEqual("", result.stderr)
         self.assertNotIn(self.raw_tunnel, result.stdout + result.stderr)
         self.assertNotIn(self.raw_runtime_key, result.stdout + result.stderr)
+
+    def test_profile_check_classifies_only_interpreter_path_drift(self) -> None:
+        profile_dir = self.root / "check-profile"
+        path = self.write_profile("check", directory=profile_dir)
+        current = inspect_tunnel_profile(
+            "check",
+            env=self.env,
+            mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+            profile_dir=profile_dir,
+        )
+        self.assertTrue(current.ready)
+        self.assertFalse(current.refresh_required)
+
+        drifted = self.drift_profile_interpreter(path)
+        inspection = inspect_tunnel_profile(
+            "check",
+            env=self.env,
+            mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+            profile_dir=profile_dir,
+        )
+        self.assertFalse(inspection.ready)
+        self.assertEqual("MCP_INTERPRETER_PATH_DRIFT", inspection.code)
+        self.assertTrue(inspection.refresh_required)
+        self.assertTrue(inspection.safe_to_refresh)
+        self.assertNotIn(drifted, repr(inspection))
+        self.assertNotIn(self.raw_tunnel, repr(inspection))
+
+        unsafe_arguments = shlex.split(drifted)
+        unsafe_arguments[1] = "-E"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                json.dumps(drifted), json.dumps(shlex.join(unsafe_arguments))
+            ),
+            encoding="utf-8",
+        )
+        path.chmod(0o600)
+        with self.assertRaises(TunnelClientError) as raised:
+            inspect_tunnel_profile(
+                "check",
+                env=self.env,
+                mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+                profile_dir=profile_dir,
+            )
+        self.assertEqual("TUNNEL_PROFILE_UNSAFE", raised.exception.code)
+
+    def test_profile_controller_lease_is_owner_only_cloexec_and_exclusive(self) -> None:
+        runtime_root = self.root / "profile-controller-runtime"
+        runtime_root.mkdir(mode=0o700)
+        first = ProfileControllerLease(runtime_root).acquire()
+        try:
+            self.assertEqual(0o600, stat.S_IMODE(first.path.stat().st_mode))
+            self.assertIsNotNone(first._descriptor)
+            descriptor_flags = fcntl.fcntl(first._descriptor, fcntl.F_GETFD)
+            self.assertTrue(descriptor_flags & fcntl.FD_CLOEXEC)
+            with self.assertRaises(RuntimeStateError) as conflict:
+                ProfileControllerLease(runtime_root).acquire()
+            self.assertEqual("PROFILE_OPERATION_CONFLICT", conflict.exception.code)
+        finally:
+            first.close()
+        second = ProfileControllerLease(runtime_root).acquire()
+        second.close()
+
+        lock_path = runtime_root / "profile-controller.lock"
+        lock_path.chmod(0o644)
+        with self.assertRaises(RuntimeStateError) as unsafe:
+            ProfileControllerLease(runtime_root).acquire()
+        self.assertEqual("RUNTIME_STATE_UNSAFE", unsafe.exception.code)
+
+    def test_profile_refresh_atomically_replaces_interpreter_only_drift(self) -> None:
+        profile_dir = self.root / "refresh-profile"
+        path = self.write_profile("refresh", directory=profile_dir)
+        self.drift_profile_interpreter(path)
+        before = path.read_bytes()
+        inspection = inspect_tunnel_profile(
+            "refresh",
+            env=self.env,
+            mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+            profile_dir=profile_dir,
+        )
+        client = TunnelClient(self.binary)
+        self.assertTrue(client.probe().supported)
+        refreshed = client.refresh_profile_attended(
+            "refresh",
+            env=self.env,
+            tunnel_id_reference="env:FAKE_TUNNEL_ID",
+            control_plane_api_key_reference="env:FAKE_RUNTIME_KEY",
+            mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+            expected_profile_sha256=inspection.profile_sha256,
+            profile_dir=profile_dir,
+        )
+        self.assertTrue(refreshed.ok)
+        self.assertTrue(refreshed.staging_cleanup_complete)
+        self.assertNotEqual(before, path.read_bytes())
+        self.assertEqual(0o600, stat.S_IMODE(path.stat().st_mode))
+        self.assertFalse(any(profile_dir.glob(".gptpro-refresh-*")))
+        final = inspect_tunnel_profile(
+            "refresh",
+            env=self.env,
+            mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+            profile_dir=profile_dir,
+        )
+        self.assertTrue(final.ready)
+        self.assertEqual(final.profile_sha256, refreshed.profile_sha256)
+        self.assertNotIn(self.raw_tunnel, repr(refreshed))
+        self.assertNotIn(self.raw_runtime_key, repr(refreshed))
+        invocations = [
+            json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()
+        ]
+        refresh_init = [
+            arguments
+            for arguments in invocations
+            if arguments and arguments[0] == "init" and "refresh" in arguments
+        ][-1]
+        staged_dir = Path(refresh_init[refresh_init.index("--profile-dir") + 1])
+        self.assertNotEqual(profile_dir, staged_dir)
+        self.assertEqual(profile_dir, staged_dir.parent)
+
+    def test_profile_refresh_rejects_hash_and_tunnel_drift_without_mutation(self) -> None:
+        profile_dir = self.root / "rejected-refresh"
+        path = self.write_profile("rejected", directory=profile_dir)
+        self.drift_profile_interpreter(path)
+        original = path.read_bytes()
+        inspection = inspect_tunnel_profile(
+            "rejected",
+            env=self.env,
+            mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+            profile_dir=profile_dir,
+        )
+        client = TunnelClient(self.binary)
+        self.assertTrue(client.probe().supported)
+        before_calls = len(self.log.read_text(encoding="utf-8").splitlines())
+        with self.assertRaises(TunnelClientError) as changed:
+            client.refresh_profile_attended(
+                "rejected",
+                env={**self.env, "FAKE_RUNTIME_KEY": ""},
+                tunnel_id_reference="env:FAKE_TUNNEL_ID",
+                control_plane_api_key_reference="env:FAKE_RUNTIME_KEY",
+                mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+                expected_profile_sha256="0" * 64,
+                profile_dir=profile_dir,
+            )
+        self.assertEqual("TUNNEL_PROFILE_CHANGED", changed.exception.code)
+        self.assertEqual(before_calls, len(self.log.read_text(encoding="utf-8").splitlines()))
+        self.assertEqual(original, path.read_bytes())
+
+        other_tunnel = "tunnel_" + "z" * 32
+        with self.assertRaises(TunnelClientError) as mismatch:
+            client.refresh_profile_attended(
+                "rejected",
+                env={**self.env, "OTHER_TUNNEL": other_tunnel},
+                tunnel_id_reference="env:OTHER_TUNNEL",
+                control_plane_api_key_reference="env:FAKE_RUNTIME_KEY",
+                mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+                expected_profile_sha256=inspection.profile_sha256,
+                profile_dir=profile_dir,
+            )
+        self.assertEqual("TUNNEL_NOT_ASSOCIATED", mismatch.exception.code)
+        self.assertEqual(before_calls, len(self.log.read_text(encoding="utf-8").splitlines()))
+        self.assertEqual(original, path.read_bytes())
+
+    def test_profile_refresh_failure_preserves_original_and_removes_stage(self) -> None:
+        profile_dir = self.root / "failed-refresh"
+        path = self.write_profile("failed", directory=profile_dir)
+        self.drift_profile_interpreter(path)
+        original = path.read_bytes()
+        inspection = inspect_tunnel_profile(
+            "failed",
+            env=self.env,
+            mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+            profile_dir=profile_dir,
+        )
+        client = TunnelClient(self.binary)
+        self.assertTrue(client.probe().supported)
+        failed_result = mock.Mock(ok=False)
+        with (
+            mock.patch.object(client, "init_profile_attended", return_value=failed_result),
+            self.assertRaises(TunnelClientError) as raised,
+        ):
+            client.refresh_profile_attended(
+                "failed",
+                env=self.env,
+                tunnel_id_reference="env:FAKE_TUNNEL_ID",
+                control_plane_api_key_reference="env:FAKE_RUNTIME_KEY",
+                mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+                expected_profile_sha256=inspection.profile_sha256,
+                profile_dir=profile_dir,
+            )
+        self.assertEqual("TUNNEL_PROFILE_REFRESH_FAILED", raised.exception.code)
+        self.assertEqual(original, path.read_bytes())
+        self.assertFalse(any(profile_dir.glob(".gptpro-refresh-*")))
+
+    def test_profile_refresh_rejects_staged_tunnel_change_without_mutation(self) -> None:
+        profile_dir = self.root / "wrong-staged-tunnel"
+        path = self.write_profile("wrong-staged", directory=profile_dir)
+        self.drift_profile_interpreter(path)
+        original = path.read_bytes()
+        inspection = inspect_tunnel_profile(
+            "wrong-staged",
+            env=self.env,
+            mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+            profile_dir=profile_dir,
+        )
+        client = TunnelClient(self.binary)
+        self.assertTrue(client.probe().supported)
+
+        def write_wrong_tunnel_profile(*args: object, **kwargs: object) -> mock.Mock:
+            del args
+            staging = Path(kwargs["profile_dir"])
+            staged_path = self.write_profile("wrong-staged", directory=staging)
+            staged_path.write_text(
+                staged_path.read_text(encoding="utf-8").replace(
+                    self.raw_tunnel, "tunnel_" + "z" * 32
+                ),
+                encoding="utf-8",
+            )
+            staged_path.chmod(0o600)
+            return mock.Mock(ok=True)
+
+        with (
+            mock.patch.object(
+                client,
+                "init_profile_attended",
+                side_effect=write_wrong_tunnel_profile,
+            ),
+            self.assertRaises(TunnelClientError) as raised,
+        ):
+            client.refresh_profile_attended(
+                "wrong-staged",
+                env=self.env,
+                tunnel_id_reference="env:FAKE_TUNNEL_ID",
+                control_plane_api_key_reference="env:FAKE_RUNTIME_KEY",
+                mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+                expected_profile_sha256=inspection.profile_sha256,
+                profile_dir=profile_dir,
+            )
+        self.assertEqual("TUNNEL_NOT_ASSOCIATED", raised.exception.code)
+        self.assertEqual(original, path.read_bytes())
+        self.assertFalse(any(profile_dir.glob(".gptpro-refresh-*")))
+
+    def test_profile_refresh_post_replace_failure_rolls_back_exact_bytes(self) -> None:
+        profile_dir = self.root / "post-replace-failure"
+        path = self.write_profile("post-replace", directory=profile_dir)
+        self.drift_profile_interpreter(path)
+        original = path.read_bytes()
+        inspection = inspect_tunnel_profile(
+            "post-replace",
+            env=self.env,
+            mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+            profile_dir=profile_dir,
+        )
+        client = TunnelClient(self.binary)
+        self.assertTrue(client.probe().supported)
+        calls = 0
+        real_inspect = inspect_tunnel_profile
+
+        def fail_final_inspection(*args: object, **kwargs: object) -> object:
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise TunnelClientError(
+                    "TUNNEL_PROFILE_REFRESH_FAILED", "injected post-replace failure"
+                )
+            return real_inspect(*args, **kwargs)
+
+        with (
+            mock.patch(
+                "runtime.gptpro_mcp.tunnel_client.inspect_tunnel_profile",
+                side_effect=fail_final_inspection,
+            ),
+            self.assertRaises(TunnelClientError) as raised,
+        ):
+            client.refresh_profile_attended(
+                "post-replace",
+                env=self.env,
+                tunnel_id_reference="env:FAKE_TUNNEL_ID",
+                control_plane_api_key_reference="env:FAKE_RUNTIME_KEY",
+                mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+                expected_profile_sha256=inspection.profile_sha256,
+                profile_dir=profile_dir,
+            )
+        self.assertEqual("TUNNEL_PROFILE_REFRESH_FAILED", raised.exception.code)
+        self.assertEqual(original, path.read_bytes())
+        self.assertFalse(any(profile_dir.glob(".gptpro-refresh-*")))
+
+    def test_profile_refresh_reports_cleanup_separately_after_commit(self) -> None:
+        profile_dir = self.root / "cleanup-reporting"
+        path = self.write_profile("cleanup", directory=profile_dir)
+        self.drift_profile_interpreter(path)
+        original = path.read_bytes()
+        inspection = inspect_tunnel_profile(
+            "cleanup",
+            env=self.env,
+            mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+            profile_dir=profile_dir,
+        )
+        client = TunnelClient(self.binary)
+        self.assertTrue(client.probe().supported)
+        with mock.patch(
+            "runtime.gptpro_mcp.tunnel_client._cleanup_profile_refresh_stage",
+            return_value=False,
+        ):
+            refreshed = client.refresh_profile_attended(
+                "cleanup",
+                env=self.env,
+                tunnel_id_reference="env:FAKE_TUNNEL_ID",
+                control_plane_api_key_reference="env:FAKE_RUNTIME_KEY",
+                mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+                expected_profile_sha256=inspection.profile_sha256,
+                profile_dir=profile_dir,
+            )
+        self.assertTrue(refreshed.ok)
+        self.assertFalse(refreshed.staging_cleanup_complete)
+        self.assertNotEqual(original, path.read_bytes())
+        self.assertTrue(any(profile_dir.glob(".gptpro-refresh-*")))
+
+    def test_profile_refresh_failure_reports_retained_private_stage_without_secrets(self) -> None:
+        profile_dir = self.root / "failed-cleanup-reporting"
+        path = self.write_profile("failed-cleanup", directory=profile_dir)
+        self.drift_profile_interpreter(path)
+        original = path.read_bytes()
+        inspection = inspect_tunnel_profile(
+            "failed-cleanup",
+            env=self.env,
+            mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+            profile_dir=profile_dir,
+        )
+        client = TunnelClient(self.binary)
+        self.assertTrue(client.probe().supported)
+
+        def leave_sensitive_stage(*args: object, **kwargs: object) -> mock.Mock:
+            del args
+            self.write_profile("failed-cleanup", directory=Path(kwargs["profile_dir"]))
+            return mock.Mock(ok=False)
+
+        with (
+            mock.patch.object(
+                client,
+                "init_profile_attended",
+                side_effect=leave_sensitive_stage,
+            ),
+            mock.patch(
+                "runtime.gptpro_mcp.tunnel_client._cleanup_profile_refresh_stage",
+                return_value=False,
+            ),
+            self.assertRaises(TunnelClientError) as raised,
+        ):
+            client.refresh_profile_attended(
+                "failed-cleanup",
+                env=self.env,
+                tunnel_id_reference="env:FAKE_TUNNEL_ID",
+                control_plane_api_key_reference="env:FAKE_RUNTIME_KEY",
+                mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+                expected_profile_sha256=inspection.profile_sha256,
+                profile_dir=profile_dir,
+            )
+        self.assertEqual(
+            "TUNNEL_PROFILE_STAGE_CLEANUP_REQUIRED", raised.exception.code
+        )
+        rendered_error = repr(raised.exception)
+        self.assertNotIn(self.raw_tunnel, rendered_error)
+        self.assertNotIn(self.raw_runtime_key, rendered_error)
+        self.assertNotIn(str(profile_dir), rendered_error)
+        self.assertEqual(original, path.read_bytes())
+        retained = list(profile_dir.glob(".gptpro-refresh-*"))
+        self.assertEqual(1, len(retained))
+        self.assertIn(self.raw_tunnel, (retained[0] / "failed-cleanup.yaml").read_text())
 
     def test_profile_init_timeout_is_bounded_and_fails_closed(self) -> None:
         client = TunnelClient(self.binary)

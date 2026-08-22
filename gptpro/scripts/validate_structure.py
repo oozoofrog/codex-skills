@@ -41,6 +41,7 @@ REQUIRED_FILES = (
     "runtime/gptpro_mcp/package_lock.py",
     "runtime/gptpro_mcp/package_tx.py",
     "runtime/gptpro_mcp/protocol.py",
+    "runtime/gptpro_mcp/protocol_trace.py",
     "runtime/gptpro_mcp/runtime_state.py",
     "runtime/gptpro_mcp/schema.py",
     "runtime/gptpro_mcp/server.py",
@@ -60,6 +61,7 @@ REQUIRED_FILES = (
     "tests/test_mcp_package_tx.py",
     "tests/test_mcp_controller.py",
     "tests/test_mcp_server.py",
+    "tests/test_protocol_trace.py",
     "tests/test_web_mcp_foundation.py",
     "tests/test_web_mcp_runtime.py",
 )

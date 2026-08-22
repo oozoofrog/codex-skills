@@ -382,6 +382,7 @@ def validate_active_state(state: Mapping[str, Any]) -> dict[str, Any]:
         "tunnel_client_binary_sha256",
         "mcp_target_sha256",
         "mcp_runtime_tree_sha256",
+        "protocol_trace_header_sha256",
     ):
         if key in value and _SHA256.fullmatch(str(value[key])) is None:
             raise RuntimeStateError("RUNTIME_STATE_UNSAFE", f"Runtime binding {key} is invalid.")

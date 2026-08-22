@@ -121,6 +121,22 @@ python3 <skill-dir>/scripts/gptpro.py mcp-profile-init \
   --confirm-tunnel-client-sha256 <binary_sha256-from-probe> \
   --json
 
+python3 <skill-dir>/scripts/gptpro.py mcp-profile-check \
+  --tunnel-profile gptpro-web \
+  --json
+
+# Only when the check reports MCP_INTERPRETER_PATH_DRIFT, after separate
+# approval of the exact current profile hash:
+python3 <skill-dir>/scripts/gptpro.py mcp-profile-refresh \
+  --tunnel-profile gptpro-web \
+  --tunnel-id-ref env:GPTPRO_TUNNEL_ID \
+  --runtime-api-key-ref env:CONTROL_PLANE_API_KEY \
+  --tunnel-client /absolute/path/to/tunnel-client \
+  --confirm-tunnel-client-sha256 <binary_sha256-from-probe> \
+  --confirm-current-profile-sha256 <tunnel_profile_sha256-from-check> \
+  --confirm-profile-replacement \
+  --json
+
 python3 <skill-dir>/scripts/gptpro.py mcp-activate \
   --handoff-dir <dir> \
   --tunnel-profile gptpro-web \
@@ -130,6 +146,8 @@ python3 <skill-dir>/scripts/gptpro.py mcp-activate \
   --confirm-workspace-binding \
   --json
 ```
+
+The profile check is local and secretless. Refresh is an attended local configuration mutation, not transmission approval: it accepts only interpreter-path-only drift, requires the exact checked profile hash and same Tunnel reference, refuses a live/faulted controller state, stages the official init output under owner-only permissions, and atomically replaces the profile after validation. Activation never performs this repair implicitly.
 
 ```bash
 tunnel-client health \
@@ -154,9 +172,12 @@ python3 <skill-dir>/scripts/gptpro.py mcp-recover \
   --confirm-controller-lost \
   --json
 python3 <skill-dir>/scripts/gptpro.py mcp-verify-audit --handoff-dir <dir> --json
+python3 <skill-dir>/scripts/gptpro.py mcp-protocol-trace --handoff-dir <dir> --json
 ```
 
 Never use `mcp-recover` while the exact controller lease is live. It is a fail-closed authorization recovery path, not process discovery or a substitute for `mcp-stop`.
+
+The protocol trace is package-local, owner-only, and bounded to 64 sanitized events. Successful and failed activation receipts bind its header; an active-session exact-child-stop receipt additionally binds the final trace. A pre-active failure is snapshotted before exact child termination, so it honestly reports header binding but `artifact_identity_bound: false` and `lifecycle_binding_valid: false` until a future failed-stop receipt exists. Its `decision`, notification `processed`, and `response_flushed` stages do not claim remote delivery. A forced stop can legitimately leave `closed: false`; corrupt evidence is retained as `artifact_valid: false` with a stable code so it cannot erase the separate disclosure audit or stop receipt. Safely readable invalid bytes bind SHA-256 plus length; unsafe/unavailable artifacts report `artifact_identity_bound: false` and never claim lifecycle binding. After an active-session stop, either a self-consistent or same-error malformed rewrite fails the final receipt comparison.
 
 Advanced `--tunnel-client`, `--profile-dir`, and `--ready-timeout` options exist for explicit installation and attended diagnostics. The authorization lifecycle always uses the canonical owner-only per-user runtime slot; there is no CLI runtime-root override because a second namespace would violate the one-active-package invariant.
 

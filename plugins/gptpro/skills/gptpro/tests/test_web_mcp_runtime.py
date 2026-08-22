@@ -218,6 +218,12 @@ class WebMcpRuntimeTests(unittest.TestCase):
         )
         return store, session_hash, completed
 
+    def close_protocol_trace(self, handoff: Path, reason: str = "stdio_eof") -> object:
+        """Model the exact MCP stdio child closing after its input reaches EOF."""
+
+        verified = self.module.verify_package(handoff)
+        return self.module.protocol_trace_for(verified).close(reason)
+
     def interrupt_before_audit_header(
         self, handoff: Path, *, runtime_root: Path | None = None
     ) -> tuple[object, str]:
@@ -271,9 +277,24 @@ class WebMcpRuntimeTests(unittest.TestCase):
         )
         self.assertEqual("faulted", store.read()["status"])
         receipt = self.load(handoff / "receipt.json")
-        self.assertEqual("approved", self.load(handoff / "state.json")["phase"])
+        failed_state = self.load(handoff / "state.json")
+        self.assertEqual("approved", failed_state["phase"])
+        self.assertEqual(
+            "activation_failed", failed_state["mcp_protocol_trace"]["status"]
+        )
         self.assertEqual(1, sum(event["type"] == "mcp_activation_failed" for event in receipt["events"]))
         self.run_cli("verify", "--handoff-dir", str(handoff))
+        trace = json.loads(
+            self.run_cli(
+                "mcp-protocol-trace", "--handoff-dir", str(handoff), "--json"
+            ).stdout
+        )
+        self.assertEqual("activation_failed", trace["session_status"])
+        self.assertTrue(trace["protocol_trace"]["header_binding_valid"])
+        self.assertFalse(trace["protocol_trace"]["artifact_identity_bound"])
+        self.assertFalse(trace["protocol_trace"]["lifecycle_binding_valid"])
+        self.assertEqual(0, trace["disclosure_audit"]["tool_calls"])
+        self.assertEqual(0, trace["disclosure_audit"]["disclosed_bytes"])
 
     def test_content_verification_fails_closed_without_inverting_package_lock_order(self) -> None:
         handoff = self.prepare_and_approve()
@@ -396,6 +417,16 @@ class WebMcpRuntimeTests(unittest.TestCase):
             profile_dir=None,
             ready_timeout=1,
         )
+        refresh_arguments = SimpleNamespace(
+            tunnel_profile=TUNNEL_PROFILE,
+            tunnel_id_ref="env:MUST_NOT_BE_READ",
+            runtime_api_key_ref="env:MUST_NOT_BE_READ",
+            tunnel_client="/must/not/run",
+            confirm_tunnel_client_sha256="0" * 64,
+            confirm_current_profile_sha256="0" * 64,
+            confirm_profile_replacement=True,
+            profile_dir=None,
+        )
         unsupported_cases = (
             ("linux", self.module.WEB_MCP_MINIMUM_PYTHON),
             ("darwin", (99, 0)),
@@ -422,10 +453,318 @@ class WebMcpRuntimeTests(unittest.TestCase):
                     with self.assertRaisesRegex(
                         self.module.HandoffError, "RUNTIME_UNSUPPORTED_PLATFORM"
                     ):
+                        self.module.command_mcp_profile_refresh(refresh_arguments)
+                    with self.assertRaisesRegex(
+                        self.module.HandoffError, "RUNTIME_UNSUPPORTED_PLATFORM"
+                    ):
                         self.module.command_mcp_activate(activate_arguments)
                 tunnel_constructor.assert_not_called()
                 package_resolver.assert_not_called()
                 secret_resolver.assert_not_called()
+
+    def test_profile_check_is_secretless_and_machine_readable(self) -> None:
+        arguments = SimpleNamespace(tunnel_profile=TUNNEL_PROFILE, profile_dir=None)
+        inspection = SimpleNamespace(
+            ready=False,
+            code="MCP_INTERPRETER_PATH_DRIFT",
+            refresh_required=True,
+            safe_to_refresh=True,
+            profile_sha256="1" * 64,
+            profile_dir_sha256="2" * 64,
+            observed_mcp_command_sha256="3" * 64,
+            expected_mcp_command_sha256="4" * 64,
+        )
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                self.module, "inspect_tunnel_profile", return_value=inspection
+            ) as inspect,
+            mock.patch.object(self.module, "runtime_key_environment") as secret_resolver,
+            mock.patch.object(self.module, "TunnelClient") as tunnel_client,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(2, self.module.command_mcp_profile_check(arguments))
+        payload = json.loads(output.getvalue())
+        self.assertEqual("MCP_INTERPRETER_PATH_DRIFT", payload["code"])
+        self.assertTrue(payload["refresh_required"])
+        self.assertTrue(payload["safe_to_refresh"])
+        self.assertFalse(payload["credential_resolution"])
+        self.assertFalse(payload["tunnel_client_execution"])
+        inspect.assert_called_once()
+        secret_resolver.assert_not_called()
+        tunnel_client.assert_not_called()
+
+    def test_profile_refresh_blocks_live_controller_before_profile_mutation(self) -> None:
+        arguments = SimpleNamespace(
+            tunnel_profile=TUNNEL_PROFILE,
+            tunnel_id_ref="env:MUST_NOT_BE_READ",
+            runtime_api_key_ref="env:MUST_NOT_BE_READ",
+            tunnel_client="/trusted/tunnel-client",
+            confirm_tunnel_client_sha256="0" * 64,
+            confirm_current_profile_sha256="1" * 64,
+            confirm_profile_replacement=True,
+            profile_dir=None,
+        )
+        client = mock.Mock()
+        capabilities = SimpleNamespace(supported=True, binary_sha256="0" * 64)
+        transaction = mock.Mock()
+        transaction.read.return_value = {
+            "status": "active",
+            "session_id_sha256": "2" * 64,
+        }
+        locked = mock.MagicMock()
+        locked.__enter__.return_value = transaction
+        store = mock.Mock()
+        lease_root = self.root / "active-profile-refresh"
+        lease_root.mkdir(mode=0o700)
+        store.root = lease_root
+        store.locked.return_value = locked
+        with (
+            mock.patch.object(
+                self.module,
+                "confirmed_key_bearing_tunnel_client",
+                return_value=(client, capabilities),
+            ),
+            mock.patch.object(self.module, "runtime_store_for", return_value=store),
+            self.assertRaisesRegex(self.module.HandoffError, "PROFILE_REFRESH_BLOCKED"),
+        ):
+            self.module.command_mcp_profile_refresh(arguments)
+        client.refresh_profile_attended.assert_not_called()
+
+    def test_profile_refresh_rejects_terminal_missing_or_unsafe_lease(self) -> None:
+        arguments = SimpleNamespace(
+            tunnel_profile=TUNNEL_PROFILE,
+            tunnel_id_ref="env:MUST_NOT_BE_READ",
+            runtime_api_key_ref="env:MUST_NOT_BE_READ",
+            tunnel_client="/trusted/tunnel-client",
+            confirm_tunnel_client_sha256="0" * 64,
+            confirm_current_profile_sha256="1" * 64,
+            confirm_profile_replacement=True,
+            profile_dir=None,
+        )
+        client = mock.Mock()
+        capabilities = SimpleNamespace(supported=True, binary_sha256="0" * 64)
+        session_hash = "2" * 64
+        for status, unsafe in (("revoked", False), ("expired", True)):
+            with self.subTest(status=status, unsafe=unsafe):
+                lease_root = self.root / f"lease-{status}"
+                lease_root.mkdir(mode=0o700)
+                if unsafe:
+                    lease_path = lease_root / f"controller-{session_hash}.lock"
+                    lease_path.write_bytes(b"")
+                    lease_path.chmod(0o644)
+                transaction = mock.Mock()
+                transaction.read.return_value = {
+                    "status": status,
+                    "session_id_sha256": session_hash,
+                }
+                locked = mock.MagicMock()
+                locked.__enter__.return_value = transaction
+                store = mock.Mock()
+                store.root = lease_root
+                store.locked.return_value = locked
+                with (
+                    mock.patch.object(
+                        self.module,
+                        "confirmed_key_bearing_tunnel_client",
+                        return_value=(client, capabilities),
+                    ),
+                    mock.patch.object(
+                        self.module, "runtime_store_for", return_value=store
+                    ),
+                    self.assertRaisesRegex(
+                        self.module.HandoffError,
+                        "PROFILE_REFRESH_CONTROLLER_UNRESOLVED",
+                    ),
+                ):
+                    self.module.command_mcp_profile_refresh(arguments)
+                client.refresh_profile_attended.assert_not_called()
+
+    def test_profile_refresh_holds_existing_terminal_lease_until_complete(self) -> None:
+        arguments = SimpleNamespace(
+            tunnel_profile=TUNNEL_PROFILE,
+            tunnel_id_ref="env:MUST_NOT_BE_READ",
+            runtime_api_key_ref="env:MUST_NOT_BE_READ",
+            tunnel_client="/trusted/tunnel-client",
+            confirm_tunnel_client_sha256="0" * 64,
+            confirm_current_profile_sha256="1" * 64,
+            confirm_profile_replacement=True,
+            profile_dir=None,
+        )
+        session_hash = "2" * 64
+        lease_root = self.root / "lease-held"
+        lease_root.mkdir(mode=0o700)
+        lease_path = lease_root / f"controller-{session_hash}.lock"
+        lease_path.write_bytes(b"")
+        lease_path.chmod(0o600)
+        transaction = mock.Mock()
+        transaction.read.return_value = {
+            "status": "revoked",
+            "session_id_sha256": session_hash,
+        }
+        locked = mock.MagicMock()
+        locked.__enter__.return_value = transaction
+        store = mock.Mock()
+        store.root = lease_root
+        store.locked.return_value = locked
+        client = mock.Mock()
+        capabilities = SimpleNamespace(supported=True, binary_sha256="0" * 64)
+
+        def refresh_while_lease_is_held(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            self.assertTrue(locked.__exit__.called)
+            with self.assertRaises(self.module.RuntimeStateError) as raised:
+                self.module.ControllerLease(store, session_hash).acquire_existing()
+            self.assertEqual("SESSION_CONFLICT", raised.exception.code)
+            with self.assertRaises(self.module.RuntimeStateError) as global_lease:
+                self.module.ProfileControllerLease(store.root).acquire()
+            self.assertEqual("PROFILE_OPERATION_CONFLICT", global_lease.exception.code)
+            return SimpleNamespace(
+                ok=True,
+                previous_profile_sha256="1" * 64,
+                profile_sha256="3" * 64,
+                profile_dir_sha256="4" * 64,
+                mcp_command_sha256="5" * 64,
+                staging_cleanup_complete=True,
+            )
+
+        client.refresh_profile_attended.side_effect = refresh_while_lease_is_held
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                self.module,
+                "confirmed_key_bearing_tunnel_client",
+                return_value=(client, capabilities),
+            ),
+            mock.patch.object(self.module, "runtime_store_for", return_value=store),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(0, self.module.command_mcp_profile_refresh(arguments))
+        self.assertTrue(json.loads(output.getvalue())["staging_cleanup_complete"])
+        released = self.module.ControllerLease(store, session_hash).acquire_existing()
+        released.close()
+
+    def test_profile_global_gate_blocks_refresh_before_client_or_state_probe(self) -> None:
+        arguments = SimpleNamespace(
+            tunnel_profile=TUNNEL_PROFILE,
+            tunnel_id_ref="env:MUST_NOT_BE_READ",
+            runtime_api_key_ref="env:MUST_NOT_BE_READ",
+            tunnel_client="/must/not/run",
+            confirm_tunnel_client_sha256="0" * 64,
+            confirm_current_profile_sha256="1" * 64,
+            confirm_profile_replacement=True,
+            profile_dir=None,
+        )
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        held = self.module.ProfileControllerLease(store.root).acquire()
+        client_probe = mock.Mock()
+        try:
+            with (
+                mock.patch.object(self.module, "runtime_store_for", return_value=store),
+                mock.patch.object(
+                    self.module,
+                    "confirmed_key_bearing_tunnel_client",
+                    client_probe,
+                ),
+                self.assertRaisesRegex(
+                    self.module.HandoffError, "PROFILE_OPERATION_CONFLICT"
+                ),
+            ):
+                self.module.command_mcp_profile_refresh(arguments)
+        finally:
+            held.close()
+        client_probe.assert_not_called()
+
+    def test_profile_global_gate_blocks_activation_before_profile_or_key_access(self) -> None:
+        arguments = SimpleNamespace(
+            handoff_dir="/approved/handoff",
+            tunnel_profile=TUNNEL_PROFILE,
+            runtime_api_key_ref="env:MUST_NOT_BE_READ",
+            tunnel_client="/trusted/tunnel-client",
+            confirm_tunnel_client_sha256="0" * 64,
+            confirm_workspace_binding=True,
+            profile_dir=None,
+            ready_timeout=1,
+        )
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        held = self.module.ProfileControllerLease(store.root).acquire()
+        inspect = mock.Mock()
+        secret_resolver = mock.Mock()
+        client = mock.Mock()
+        capabilities = SimpleNamespace(
+            supported=True,
+            health_require_control_plane_poll=True,
+        )
+        try:
+            with (
+                mock.patch.object(
+                    self.module,
+                    "checked_schema3_handoff",
+                    return_value=(Path("/approved/handoff"), {"manifest": {}}),
+                ),
+                mock.patch.object(
+                    self.module,
+                    "confirmed_key_bearing_tunnel_client",
+                    return_value=(client, capabilities),
+                ),
+                mock.patch.object(self.module, "runtime_store_for", return_value=store),
+                mock.patch.object(self.module, "inspect_tunnel_profile", inspect),
+                mock.patch.object(
+                    self.module, "runtime_key_environment", secret_resolver
+                ),
+                self.assertRaisesRegex(
+                    self.module.HandoffError, "PROFILE_OPERATION_CONFLICT"
+                ),
+            ):
+                self.module.command_mcp_activate(arguments)
+        finally:
+            held.close()
+        inspect.assert_not_called()
+        secret_resolver.assert_not_called()
+        client.doctor.assert_not_called()
+
+    def test_mcp_activate_detects_profile_drift_before_runtime_key_resolution(self) -> None:
+        arguments = SimpleNamespace(
+            handoff_dir="/approved/handoff",
+            tunnel_profile=TUNNEL_PROFILE,
+            runtime_api_key_ref="env:MUST_NOT_BE_READ",
+            tunnel_client="/trusted/tunnel-client",
+            confirm_tunnel_client_sha256="0" * 64,
+            confirm_workspace_binding=True,
+            profile_dir=None,
+            ready_timeout=1,
+        )
+        client = mock.Mock()
+        capabilities = SimpleNamespace(
+            supported=True,
+            health_require_control_plane_poll=True,
+        )
+        inspection = SimpleNamespace(
+            ready=False,
+            code="MCP_INTERPRETER_PATH_DRIFT",
+        )
+        with (
+            mock.patch.object(
+                self.module,
+                "checked_schema3_handoff",
+                return_value=(Path("/approved/handoff"), {"manifest": {}}),
+            ),
+            mock.patch.object(
+                self.module,
+                "confirmed_key_bearing_tunnel_client",
+                return_value=(client, capabilities),
+            ),
+            mock.patch.object(
+                self.module, "inspect_tunnel_profile", return_value=inspection
+            ),
+            mock.patch.object(self.module, "runtime_key_environment") as secret_resolver,
+            self.assertRaisesRegex(
+                self.module.HandoffError, "MCP_INTERPRETER_PATH_DRIFT"
+            ),
+        ):
+            self.module.command_mcp_activate(arguments)
+        secret_resolver.assert_not_called()
+        client.doctor.assert_not_called()
 
     def test_lifecycle_cli_has_no_runtime_root_override(self) -> None:
         parser = self.module.build_parser()
@@ -436,6 +775,8 @@ class WebMcpRuntimeTests(unittest.TestCase):
         ).choices
         for command in (
             "mcp-probe",
+            "mcp-profile-check",
+            "mcp-profile-refresh",
             "mcp-activate",
             "mcp-status",
             "mcp-stop",
@@ -459,6 +800,25 @@ class WebMcpRuntimeTests(unittest.TestCase):
         )
         self.assertIn("unrecognized arguments", rejected.stderr)
         self.assertFalse(attempted.exists())
+
+    def test_mcp_activate_default_ready_timeout_exceeds_one_long_poll(self) -> None:
+        parser = self.module.build_parser()
+        arguments = parser.parse_args(
+            [
+                "mcp-activate",
+                "--handoff-dir",
+                "/tmp/handoff",
+                "--tunnel-profile",
+                TUNNEL_PROFILE,
+                "--runtime-api-key-ref",
+                "env:CONTROL_PLANE_API_KEY",
+                "--tunnel-client",
+                "/tmp/tunnel-client",
+                "--confirm-tunnel-client-sha256",
+                "0" * 64,
+            ]
+        )
+        self.assertEqual(60, arguments.ready_timeout)
 
     def test_path_discovered_probe_never_receives_runtime_key_or_unrelated_secrets(self) -> None:
         fake_bin = self.root / "fake-bin"
@@ -532,6 +892,19 @@ class WebMcpRuntimeTests(unittest.TestCase):
             self.assertEqual(expected, store.read()[key])
             self.assertEqual(expected, state["mcp_session"][key])
             self.assertEqual(expected, activation[0]["data"][key])
+        trace_header = state["mcp_session"]["protocol_trace_header_sha256"]
+        self.assertEqual(trace_header, store.read()["protocol_trace_header_sha256"])
+        self.assertEqual(trace_header, activation[0]["data"]["protocol_trace_header_sha256"])
+        self.assertEqual("mcp-protocol-trace.jsonl", activation[0]["data"]["protocol_trace_file"])
+        trace_path = handoff / "mcp-protocol-trace.jsonl"
+        self.assertEqual(0o600, trace_path.stat().st_mode & 0o777)
+        trace_status = json.loads(
+            self.run_cli(
+                "mcp-protocol-trace", "--handoff-dir", str(handoff), "--json"
+            ).stdout
+        )
+        self.assertEqual(trace_header, trace_status["protocol_trace"]["header_sha256"])
+        self.assertFalse(trace_status["protocol_trace"]["closed"])
         self.assertFalse(completed["audit"]["footer"])
         self.run_cli("verify", "--handoff-dir", str(handoff))
         self.run_cli("mcp-verify-audit", "--handoff-dir", str(handoff))
@@ -662,6 +1035,20 @@ class WebMcpRuntimeTests(unittest.TestCase):
                 expected_statuses={"active"},
             )
 
+        runtime_state = store.read()
+        runtime_state["tunnel_profile_sha256"] = TUNNEL_PROFILE_HASH
+        runtime_state["protocol_trace_header_sha256"] = "5" * 64
+        store.active_path.write_text(
+            json.dumps(runtime_state, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(self.module.HandoffError, "does not match"):
+            self.module.assert_mcp_runtime_binding(
+                verified,
+                store.read(),
+                session_id_sha256=session_hash,
+                expected_statuses={"active"},
+            )
+
         package_state = self.load(handoff / "state.json")
         package_state["mcp_session"]["mcp_runtime_tree_sha256"] = "4" * 64
         self.module.write_json(handoff / "state.json", package_state)
@@ -726,13 +1113,23 @@ class WebMcpRuntimeTests(unittest.TestCase):
             binary_sha256=TUNNEL_BINARY_HASH,
             supported=True,
         )
-        fake_client.init_profile_attended.return_value = SimpleNamespace(
+        initialized = SimpleNamespace(
             ok=True,
             code=None,
             profile_sha256=TUNNEL_PROFILE_HASH,
             profile_dir_sha256=None,
             mcp_command_sha256=MCP_TARGET_HASH,
         )
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+
+        def init_while_profile_gate_is_held(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            with self.assertRaises(self.module.RuntimeStateError) as conflict:
+                self.module.ProfileControllerLease(store.root).acquire()
+            self.assertEqual("PROFILE_OPERATION_CONFLICT", conflict.exception.code)
+            return initialized
+
+        fake_client.init_profile_attended.side_effect = init_while_profile_gate_is_held
         arguments = SimpleNamespace(
             tunnel_profile=TUNNEL_PROFILE,
             tunnel_id_ref="env:ATTENDED_TUNNEL_ID",
@@ -744,6 +1141,7 @@ class WebMcpRuntimeTests(unittest.TestCase):
         output = io.StringIO()
         with (
             mock.patch.object(self.module, "TunnelClient", return_value=fake_client),
+            mock.patch.object(self.module, "runtime_store_for", return_value=store),
             redirect_stdout(output),
         ):
             self.assertEqual(0, self.module.command_mcp_profile_init(arguments))
@@ -817,17 +1215,206 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertTrue(stopped["audit"]["footer"])
         self.assertEqual("approved", self.load(handoff / "state.json")["phase"])
 
+        trace = self.close_protocol_trace(handoff)
+        self.assertTrue(trace.closed)
         self.module.record_mcp_stopped(handoff, session_id_sha256=session_hash)
         self.module.record_mcp_stopped(handoff, session_id_sha256=session_hash)
         state = self.load(handoff / "state.json")
         receipt = self.load(handoff / "receipt.json")
         self.assertTrue(state["mcp_session"]["tunnel_runtime_stopped"])
+        self.assertTrue(state["mcp_session"]["protocol_trace_valid"])
+        self.assertEqual(trace.head_sha256, state["mcp_session"]["protocol_trace_head_sha256"])
+        self.assertTrue(state["mcp_session"]["protocol_trace_closed"])
         self.assertEqual(1, sum(event["type"] == "mcp_stopped" for event in receipt["events"]))
         self.run_cli("verify", "--handoff-dir", str(handoff))
         verified_audit = json.loads(
             self.run_cli("mcp-verify-audit", "--handoff-dir", str(handoff)).stdout
         )
         self.assertTrue(verified_audit["audit"]["valid"])
+
+        tampered_state = json.loads(json.dumps(state))
+        tampered_state["mcp_session"]["protocol_trace_head_sha256"] = "f" * 64
+        with self.assertRaisesRegex(
+            self.module.HandoffError, "tunnel-stop receipt differs from final protocol trace"
+        ):
+            self.module.verify_schema3_mcp_session(
+                tampered_state,
+                receipt,
+                self.load(handoff / "manifest.json"),
+                manifest_sha256=self.module.sha256_file(handoff / "manifest.json"),
+            )
+
+    def test_forced_stop_records_valid_prefix_without_fabricating_a_footer(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, session_hash, _ = self.activate(handoff)
+        stopped = self.module.stop_mcp_authorization(handoff, store)
+        self.assertTrue(stopped["audit"]["footer"])
+
+        self.module.record_mcp_stopped(handoff, session_id_sha256=session_hash)
+        state = self.load(handoff / "state.json")
+        trace_state = state["mcp_session"]
+        self.assertTrue(trace_state["tunnel_runtime_stopped"])
+        self.assertTrue(trace_state["protocol_trace_valid"])
+        self.assertFalse(trace_state["protocol_trace_closed"])
+        self.assertIsNone(trace_state["protocol_trace_close_reason"])
+        receipt = self.load(handoff / "receipt.json")
+        self.assertEqual(1, sum(event["type"] == "mcp_stopped" for event in receipt["events"]))
+        self.assertTrue(
+            json.loads(
+                self.run_cli(
+                    "mcp-verify-audit", "--handoff-dir", str(handoff)
+                ).stdout
+            )["audit"]["valid"]
+        )
+        diagnostic = json.loads(
+            self.run_cli(
+                "mcp-protocol-trace", "--handoff-dir", str(handoff), "--json"
+            ).stdout
+        )
+        self.assertTrue(diagnostic["protocol_trace"]["artifact_valid"])
+        self.assertFalse(diagnostic["protocol_trace"]["closed"])
+        self.run_cli("verify", "--handoff-dir", str(handoff))
+
+    def test_corrupt_trace_does_not_erase_exact_stop_or_disclosure_audit(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, session_hash, _ = self.activate(handoff)
+        stopped = self.module.stop_mcp_authorization(handoff, store)
+        self.assertTrue(stopped["audit"]["footer"])
+        with (handoff / "mcp-protocol-trace.jsonl").open("ab") as handle:
+            handle.write(b"{corrupt\n")
+
+        self.module.record_mcp_stopped(handoff, session_id_sha256=session_hash)
+        state = self.load(handoff / "state.json")["mcp_session"]
+        self.assertTrue(state["tunnel_runtime_stopped"])
+        self.assertFalse(state["protocol_trace_valid"])
+        self.assertFalse(state["protocol_trace_closed"])
+        self.assertEqual("PROTOCOL_TRACE_INVALID", state["protocol_trace_error_code"])
+        self.assertTrue(state["protocol_trace_artifact_identity_bound"])
+        corrupt_bytes = (handoff / "mcp-protocol-trace.jsonl").read_bytes()
+        self.assertEqual(
+            hashlib.sha256(corrupt_bytes).hexdigest(),
+            state["protocol_trace_artifact_sha256"],
+        )
+        self.assertEqual(len(corrupt_bytes), state["protocol_trace_artifact_bytes"])
+        diagnostic = json.loads(
+            self.run_cli(
+                "mcp-protocol-trace", "--handoff-dir", str(handoff), "--json"
+            ).stdout
+        )
+        self.assertFalse(diagnostic["protocol_trace"]["artifact_valid"])
+        self.assertTrue(diagnostic["protocol_trace"]["lifecycle_binding_valid"])
+        self.assertEqual(
+            "PROTOCOL_TRACE_INVALID",
+            diagnostic["protocol_trace"]["recorded_error_code"],
+        )
+        self.assertTrue(
+            json.loads(
+                self.run_cli(
+                    "mcp-verify-audit", "--handoff-dir", str(handoff)
+                ).stdout
+            )["audit"]["valid"]
+        )
+        self.run_cli("verify", "--handoff-dir", str(handoff))
+
+        (handoff / "mcp-protocol-trace.jsonl").write_bytes(b"{different-corrupt\n")
+        (handoff / "mcp-protocol-trace.jsonl").chmod(0o600)
+        rewritten = self.run_cli(
+            "mcp-protocol-trace",
+            "--handoff-dir",
+            str(handoff),
+            "--json",
+            expected=2,
+        )
+        self.assertIn("bytes differ from tunnel-stop evidence", rewritten.stderr)
+
+    def test_unsafe_trace_preserves_stop_but_marks_artifact_identity_unbound(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, session_hash, _ = self.activate(handoff)
+        stopped = self.module.stop_mcp_authorization(handoff, store)
+        self.assertTrue(stopped["audit"]["footer"])
+        (handoff / "mcp-protocol-trace.jsonl").chmod(0o644)
+
+        self.module.record_mcp_stopped(handoff, session_id_sha256=session_hash)
+        state = self.load(handoff / "state.json")["mcp_session"]
+        self.assertTrue(state["tunnel_runtime_stopped"])
+        self.assertFalse(state["protocol_trace_valid"])
+        self.assertFalse(state["protocol_trace_artifact_identity_bound"])
+        self.assertNotIn("protocol_trace_artifact_sha256", state)
+        diagnostic = json.loads(
+            self.run_cli(
+                "mcp-protocol-trace", "--handoff-dir", str(handoff), "--json"
+            ).stdout
+        )
+        self.assertFalse(diagnostic["protocol_trace"]["artifact_identity_bound"])
+        self.assertFalse(diagnostic["protocol_trace"]["lifecycle_binding_valid"])
+        self.assertTrue(
+            json.loads(
+                self.run_cli(
+                    "mcp-verify-audit", "--handoff-dir", str(handoff)
+                ).stdout
+            )["audit"]["valid"]
+        )
+
+    def test_self_consistent_post_stop_trace_rewrite_fails_lifecycle_binding(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, session_hash, _ = self.activate(handoff)
+        self.module.stop_mcp_authorization(handoff, store)
+        self.close_protocol_trace(handoff, "stdio_eof")
+        self.module.record_mcp_stopped(handoff, session_id_sha256=session_hash)
+
+        trace_path = handoff / "mcp-protocol-trace.jsonl"
+        records = [
+            json.loads(line)
+            for line in trace_path.read_text(encoding="ascii").splitlines()
+        ]
+        footer = records[-1]
+        footer["close_reason"] = "protocol_broken"
+        unsigned = {key: value for key, value in footer.items() if key != "event_sha256"}
+        footer["event_sha256"] = hashlib.sha256(
+            json.dumps(
+                unsigned,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("ascii")
+        ).hexdigest()
+        trace_path.write_text(
+            "".join(
+                json.dumps(
+                    record,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+                + "\n"
+                for record in records
+            ),
+            encoding="ascii",
+        )
+        trace_path.chmod(0o600)
+        self.assertTrue(
+            self.module.protocol_trace_for(
+                self.module.verify_package(handoff)
+            ).verify().closed
+        )
+
+        diagnostic = self.run_cli(
+            "mcp-protocol-trace",
+            "--handoff-dir",
+            str(handoff),
+            "--json",
+            expected=2,
+        )
+        self.assertIn("differs from final tunnel-stop evidence", diagnostic.stderr)
+        status = json.loads(
+            self.run_cli(
+                "mcp-status", "--handoff-dir", str(handoff), "--json"
+            ).stdout
+        )
+        self.assertTrue(status["split_brain"])
+        self.assertFalse(status["protocol_trace"]["lifecycle_binding_valid"])
 
     def test_stop_recovers_global_revoked_package_active_crash_window(self) -> None:
         handoff = self.prepare_and_approve()
@@ -879,6 +1466,10 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertTrue(status["effective_authorized"])
         self.assertEqual("live", status["controller"]["status"])
         self.assertFalse(status["expired_lazily"])
+        self.assertTrue(status["protocol_trace"]["artifact_valid"])
+        self.assertTrue(status["protocol_trace"]["header_binding_valid"])
+        self.assertFalse(status["protocol_trace"]["artifact_identity_bound"])
+        self.assertFalse(status["protocol_trace"]["lifecycle_binding_valid"])
 
         stopped = json.loads(
             self.run_cli(
@@ -891,7 +1482,30 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertEqual("revoked", stopped["authorization"]["status"])
         self.assertFalse(stopped["tunnel_runtime_stopped"])
         self.assertTrue(stopped["foreground_controller_stop_required"])
+        revoked_status = json.loads(
+            self.run_cli(
+                "mcp-status",
+                "--handoff-dir",
+                str(handoff),
+                "--json",
+            ).stdout
+        )
+        self.assertTrue(revoked_status["protocol_trace"]["header_binding_valid"])
+        self.assertFalse(revoked_status["protocol_trace"]["artifact_identity_bound"])
+        self.assertFalse(revoked_status["protocol_trace"]["lifecycle_binding_valid"])
+        self.close_protocol_trace(handoff)
         self.module.record_mcp_stopped(handoff, session_id_sha256=session_hash)
+        final_trace = json.loads(
+            self.run_cli(
+                "mcp-protocol-trace",
+                "--handoff-dir",
+                str(handoff),
+                "--json",
+            ).stdout
+        )["protocol_trace"]
+        self.assertTrue(final_trace["header_binding_valid"])
+        self.assertTrue(final_trace["artifact_identity_bound"])
+        self.assertTrue(final_trace["lifecycle_binding_valid"])
         self.run_cli("verify", "--handoff-dir", str(handoff))
 
     def test_stop_emergency_denies_exact_session_without_rewriting_damaged_evidence(self) -> None:
@@ -1005,6 +1619,11 @@ class WebMcpRuntimeTests(unittest.TestCase):
 
         def fake_run_foreground(*, hooks, **kwargs):
             del kwargs
+            with self.assertRaises(self.module.RuntimeStateError) as profile_conflict:
+                self.module.ProfileControllerLease(store.root).acquire()
+            self.assertEqual(
+                "PROFILE_OPERATION_CONFLICT", profile_conflict.exception.code
+            )
             begun = hooks.begin_activation(session_hash)
             hooks.complete_activation(session_hash, begun["audit_header_sha256"])
             receipt_path = handoff / "receipt.json"
@@ -1045,6 +1664,11 @@ class WebMcpRuntimeTests(unittest.TestCase):
                 self.module,
                 "runtime_key_environment",
                 return_value={"CONTROL_PLANE_API_KEY": "sk-" + "x" * 32},
+            ),
+            mock.patch.object(
+                self.module,
+                "inspect_tunnel_profile",
+                return_value=SimpleNamespace(ready=True, code=None),
             ),
             mock.patch.object(self.module, "runtime_store_for", return_value=store),
             mock.patch.object(
