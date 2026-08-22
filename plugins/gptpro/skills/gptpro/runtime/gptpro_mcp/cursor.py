@@ -106,7 +106,15 @@ class CursorCodec:
             ):
                 raise ValueError
             return dict(payload["next_position"])
-        except (ValueError, TypeError, binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (
+            ValueError,
+            TypeError,
+            RecursionError,
+            binascii.Error,
+            UnicodeDecodeError,
+            UnicodeEncodeError,
+            json.JSONDecodeError,
+        ) as exc:
             raise ToolError(
                 "CURSOR_INVALID",
                 "The pagination cursor is malformed, expired, or bound to another request.",

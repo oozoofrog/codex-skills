@@ -5,16 +5,22 @@ from __future__ import annotations
 
 import argparse
 import copy
+import errno
 import fnmatch
+import functools
 import hashlib
 import json
+import math
 import os
+import platform
 import re
 import secrets
+import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 import zipfile
 from collections.abc import Iterable
@@ -35,6 +41,35 @@ from runtime.gptpro_mcp.schema import (  # noqa: I001
     tool_schema_sha256,
     validate_limits as validate_mcp_limits,
 )
+from runtime.gptpro_mcp.audit import AuditBinding, AuditLog, AuditSummary
+from runtime.gptpro_mcp.controller import (
+    ActiveSession,
+    ControllerError,
+    ControllerHooks,
+    control_socket_path,
+    run_foreground,
+)
+from runtime.gptpro_mcp.errors import ToolError
+from runtime.gptpro_mcp.live import ControllerLease, controller_lease_is_live
+from runtime.gptpro_mcp.package_lock import package_lifecycle_lock
+from runtime.gptpro_mcp.package_tx import (
+    commit_lifecycle_pair,
+    lifecycle_journal_pending,
+    recover_lifecycle_pair,
+)
+from runtime.gptpro_mcp.runtime_state import (
+    RuntimeStateError,
+    RuntimeStateStore,
+    fsync_directory,
+)
+from runtime.gptpro_mcp.supervisor import request_cooperative_stop
+from runtime.gptpro_mcp.tunnel_client import (
+    TunnelCapabilities,
+    TunnelClient,
+    TunnelClientError,
+    bundled_mcp_target_sha256,
+    runtime_key_environment,
+)
 
 SCHEMA_V2 = 2
 SCHEMA_V3 = 3
@@ -45,6 +80,15 @@ DELIVERY_CHANNELS = ("browser",)
 MCP_CONNECTOR_TYPE = "secure-mcp-tunnel"
 IGNORE_SCOPES = ("local", "repository", "none")
 PHASES = ("prepared", "approved", "submitted", "response_imported", "evaluated")
+MCP_AUXILIARY_EVENTS = (
+    "mcp_activated",
+    "mcp_activation_failed",
+    "mcp_expired",
+    "mcp_revoked",
+    "mcp_stopped",
+    "mcp_recovery_recorded",
+)
+MCP_SESSION_STATUSES = ("activating", "active", "revoking", "revoked", "expired", "faulted")
 HUMAN_HANDOFF_REASONS = (
     "login",
     "account-or-workspace",
@@ -58,14 +102,18 @@ HUMAN_HANDOFF_REASONS = (
     "submission-uncertain",
     "response-export",
 )
+_OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 DEFAULT_REQUESTED_MODEL = "ChatGPT Pro / GPT-5.6 Sol / Intelligence: Pro"
 DESTINATION = "https://chatgpt.com/"
 DEFAULT_MAX_FILES = 2_000
 DEFAULT_MAX_BYTES = 25 * 1024 * 1024
 DEFAULT_MAX_FILE_BYTES = 2 * 1024 * 1024
+WEB_MCP_MINIMUM_PYTHON = (3, 11)
 DEFAULT_MAX_PASTE_BYTES = 128 * 1024
 SCHEMA3_INTERNAL_MANIFEST_MAX_BYTES = 4 * 1024 * 1024
 SCHEMA3_CENTRAL_DIRECTORY_MAX_BYTES = 2 * 1024 * 1024
+MAX_JSON_NESTING_DEPTH = 64
+MAX_JSON_NODES = 100_000
 IGNORE_COMMENT = "# gptpro local handoff artifacts"
 
 EXCLUDED_DIR_NAMES = {
@@ -151,6 +199,81 @@ class HandoffError(Exception):
     """Expected, user-actionable workflow error."""
 
 
+def validate_json_tree(value: Any, *, label: str) -> None:
+    """Reject JSON values that cannot be boundedly serialized as strict UTF-8."""
+
+    pending: list[tuple[Any, int]] = [(value, 0)]
+    visited = 0
+    while pending:
+        current, depth = pending.pop()
+        visited += 1
+        if visited > MAX_JSON_NODES:
+            raise HandoffError(f"{label} exceeds the maximum JSON node count")
+        if depth > MAX_JSON_NESTING_DEPTH:
+            raise HandoffError(f"{label} exceeds the maximum JSON nesting depth")
+        if current is None or isinstance(current, (bool, int)):
+            continue
+        if isinstance(current, float):
+            if not math.isfinite(current):
+                raise HandoffError(f"{label} contains a non-finite JSON number")
+            continue
+        if isinstance(current, str):
+            try:
+                current.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise HandoffError(f"{label} contains text that is not strict UTF-8") from exc
+            continue
+        if isinstance(current, dict):
+            for key, child in current.items():
+                if not isinstance(key, str):
+                    raise HandoffError(f"{label} contains a non-string JSON object key")
+                try:
+                    key.encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise HandoffError(
+                        f"{label} contains an object key that is not strict UTF-8"
+                    ) from exc
+                pending.append((child, depth + 1))
+            continue
+        if isinstance(current, (list, tuple)):
+            pending.extend((child, depth + 1) for child in current)
+            continue
+        raise HandoffError(f"{label} contains a value that is not JSON-compatible")
+
+
+def _with_package_lock(path_getter: Any) -> Any:
+    """Serialize package lifecycle readers/writers before global and audit locks."""
+
+    def decorate(function: Any) -> Any:
+        @functools.wraps(function)
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            handoff_dir = Path(path_getter(args, kwargs))
+            try:
+                with package_lifecycle_lock(handoff_dir):
+                    return function(*args, **kwargs)
+            except RuntimeStateError as exc:
+                raise HandoffError(f"{exc.code}: {exc.message}") from exc
+
+        return wrapped
+
+    return decorate
+
+
+def _first_handoff_arg(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Path:
+    value = args[0] if args else kwargs["handoff_dir"]
+    return Path(value)
+
+
+def _verified_handoff_arg(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Path:
+    value = args[0] if args else kwargs["verified"]
+    return Path(value["manifest_path"]).parent
+
+
+def _command_handoff_arg(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Path:
+    value = args[0] if args else kwargs["args"]
+    return Path(value.handoff_dir).expanduser().resolve(strict=True)
+
+
 @dataclass(frozen=True)
 class SelectedFile:
     path: str
@@ -176,11 +299,34 @@ def utc_now() -> str:
 
 
 def canonical_json_bytes(value: Any) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    validate_json_tree(value, label="Canonical JSON value")
+    try:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
+        raise HandoffError("Unable to canonicalize JSON safely") from exc
 
 
 def pretty_json_bytes(value: Any) -> bytes:
-    return (json.dumps(value, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    validate_json_tree(value, label="JSON document")
+    try:
+        return (
+            json.dumps(
+                value,
+                sort_keys=True,
+                indent=2,
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
+        raise HandoffError("Unable to serialize JSON safely") from exc
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -351,22 +497,45 @@ def mcp_approval_basis(manifest: dict[str, Any]) -> dict[str, Any]:
 
 
 def mcp_manifest_basis(manifest: dict[str, Any]) -> dict[str, Any]:
-    basis = copy.deepcopy(manifest)
-    hashes = basis.get("hashes")
+    validate_json_tree(manifest, label="Schema-3 manifest")
+    basis = dict(manifest)
+    hashes = manifest.get("hashes")
     if isinstance(hashes, dict):
-        hashes.pop("manifest_basis_sha256", None)
-        hashes.pop("approval_basis_sha256", None)
+        basis_hashes = dict(hashes)
+        basis_hashes.pop("manifest_basis_sha256", None)
+        basis_hashes.pop("approval_basis_sha256", None)
+        basis["hashes"] = basis_hashes
     return basis
 
 
 def atomic_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
-        temp_path = Path(handle.name)
-    os.replace(temp_path, path)
+    temp_path: Path | None = None
+    directory_fd = -1
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_path = Path(handle.name)
+        os.replace(temp_path, path)
+        temp_path = None
+        directory_fd = os.open(
+            path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        os.fsync(directory_fd)
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -378,10 +547,11 @@ def load_json(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise HandoffError(f"Required artifact not found: {path}") from exc
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, ValueError, RecursionError) as exc:
         raise HandoffError(f"Unable to read valid JSON from {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise HandoffError(f"Expected a JSON object: {path}")
+    validate_json_tree(value, label=f"JSON artifact {path}")
     return value
 
 
@@ -791,6 +961,87 @@ def tree_hash(files: Iterable[SelectedFile]) -> str:
     return sha256_bytes(canonical_json_bytes(rows))
 
 
+def _open_repository_root(root: Path) -> int:
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if not no_follow or not directory or not _OPEN_SUPPORTS_DIR_FD:
+        raise HandoffError("This platform cannot safely scan repository paths without following symlinks")
+    flags = os.O_RDONLY | no_follow | directory | getattr(os, "O_CLOEXEC", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(root, flags)
+        metadata = os.fstat(descriptor)
+    except OSError as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise HandoffError(f"Unable to securely open repository root {root}: {exc}") from exc
+    if not stat.S_ISDIR(metadata.st_mode):
+        os.close(descriptor)
+        raise HandoffError(f"Repository root is not a directory: {root}")
+    return descriptor
+
+
+def _read_repository_file(
+    root_descriptor: int,
+    rel_path: str,
+    *,
+    max_file_bytes: int,
+) -> tuple[bytes | None, str | None]:
+    """Open every path component without symlink traversal and read one stable inode."""
+
+    parts = PurePosixPath(rel_path).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return None, "unreadable"
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    close_on_exec = getattr(os, "O_CLOEXEC", 0)
+    directory_flags = os.O_RDONLY | no_follow | getattr(os, "O_DIRECTORY", 0) | close_on_exec
+    file_flags = os.O_RDONLY | no_follow | close_on_exec
+    current_descriptor = os.dup(root_descriptor)
+    file_descriptor = -1
+    try:
+        for component in parts[:-1]:
+            try:
+                next_descriptor = os.open(component, directory_flags, dir_fd=current_descriptor)
+            except OSError as exc:
+                reason = "symlink" if exc.errno == errno.ELOOP else "unreadable"
+                return None, reason
+            os.close(current_descriptor)
+            current_descriptor = next_descriptor
+        try:
+            file_descriptor = os.open(parts[-1], file_flags, dir_fd=current_descriptor)
+        except OSError as exc:
+            reason = "symlink" if exc.errno == errno.ELOOP else "unreadable"
+            return None, reason
+
+        before = os.fstat(file_descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            return None, "unreadable"
+        if before.st_size > max_file_bytes:
+            return None, "oversized-file"
+
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(file_descriptor, min(64 * 1024, max_file_bytes + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_file_bytes:
+                return None, "oversized-file"
+        after = os.fstat(file_descriptor)
+        stable_fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(before, field) != getattr(after, field) for field in stable_fields) or total != before.st_size:
+            return None, "unreadable"
+        return b"".join(chunks), None
+    except OSError:
+        return None, "unreadable"
+    finally:
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
+        os.close(current_descriptor)
+
+
 def scan_repository(
     root: Path,
     *,
@@ -815,55 +1066,50 @@ def scan_repository(
     omitted: list[dict[str, str]] = []
     security: list[dict[str, Any]] = []
 
-    for rel_path in candidates:
-        if matches_any(rel_path, exclude_patterns):
-            excluded.append({"path": rel_path, "reason": "user-exclude"})
-            continue
-        reason = builtin_exclusion_reason(rel_path)
-        if reason:
-            excluded.append({"path": rel_path, "reason": reason})
-            if reason == "sensitive-filename":
-                security.append(
-                    {"path": rel_path, "detector": "sensitive-filename", "line": None, "action": "excluded"}
-                )
-            continue
-        if directed and rel_path not in exact and not matches_any(rel_path, include_patterns):
-            omitted.append({"path": rel_path, "reason": "not-selected"})
-            continue
+    root_descriptor = _open_repository_root(root)
+    try:
+        for rel_path in candidates:
+            if matches_any(rel_path, exclude_patterns):
+                excluded.append({"path": rel_path, "reason": "user-exclude"})
+                continue
+            reason = builtin_exclusion_reason(rel_path)
+            if reason:
+                excluded.append({"path": rel_path, "reason": reason})
+                if reason == "sensitive-filename":
+                    security.append(
+                        {"path": rel_path, "detector": "sensitive-filename", "line": None, "action": "excluded"}
+                    )
+                continue
+            if directed and rel_path not in exact and not matches_any(rel_path, include_patterns):
+                omitted.append({"path": rel_path, "reason": "not-selected"})
+                continue
 
-        source = root / rel_path
-        if source.is_symlink():
-            excluded.append({"path": rel_path, "reason": "symlink"})
-            continue
-        try:
-            size = source.stat().st_size
-        except OSError:
-            excluded.append({"path": rel_path, "reason": "unreadable"})
-            continue
-        if size > max_file_bytes:
-            excluded.append({"path": rel_path, "reason": "oversized-file"})
-            continue
-        try:
-            content = source.read_bytes()
-        except OSError:
-            excluded.append({"path": rel_path, "reason": "unreadable"})
-            continue
-        if is_binary(content):
-            excluded.append({"path": rel_path, "reason": "binary-file"})
-            continue
-        try:
-            decoded = content.decode("utf-8")
-        except UnicodeDecodeError:
-            excluded.append({"path": rel_path, "reason": "non-utf8-text"})
-            continue
-        findings = secret_findings(rel_path, decoded)
-        if findings:
-            security.extend(findings)
-            excluded.append({"path": rel_path, "reason": "secret-content"})
-            continue
-        included.append(
-            SelectedFile(path=rel_path, content=content, sha256=sha256_bytes(content), size=len(content))
-        )
+            content, read_reason = _read_repository_file(
+                root_descriptor,
+                rel_path,
+                max_file_bytes=max_file_bytes,
+            )
+            if read_reason is not None or content is None:
+                excluded.append({"path": rel_path, "reason": read_reason or "unreadable"})
+                continue
+            if is_binary(content):
+                excluded.append({"path": rel_path, "reason": "binary-file"})
+                continue
+            try:
+                decoded = content.decode("utf-8")
+            except UnicodeDecodeError:
+                excluded.append({"path": rel_path, "reason": "non-utf8-text"})
+                continue
+            findings = secret_findings(rel_path, decoded)
+            if findings:
+                security.extend(findings)
+                excluded.append({"path": rel_path, "reason": "secret-content"})
+                continue
+            included.append(
+                SelectedFile(path=rel_path, content=content, sha256=sha256_bytes(content), size=len(content))
+            )
+    finally:
+        os.close(root_descriptor)
 
     total_bytes = sum(item.size for item in included)
     if len(included) > max_files:
@@ -1088,18 +1334,45 @@ def write_archive(
     # runtime's compression-ratio boundary. Keep schema-2 bytes compressed for
     # compatibility with the established local audit artifact format.
     compression = zipfile.ZIP_STORED if schema_version == SCHEMA_V3 else zipfile.ZIP_DEFLATED
-    with zipfile.ZipFile(path, "w", compression=compression, compresslevel=9) as archive:
-        for item in sorted(files, key=lambda value: value.path):
-            info = zipfile.ZipInfo(item.archive_path)
-            info.date_time = (1980, 1, 1, 0, 0, 0)
-            info.external_attr = 0o100644 << 16
-            info.compress_type = compression
-            archive.writestr(info, item.content)
-        info = zipfile.ZipInfo("_gptpro/file-manifest.json")
-        info.date_time = (1980, 1, 1, 0, 0, 0)
-        info.external_attr = 0o100644 << 16
-        info.compress_type = compression
-        archive.writestr(info, internal_manifest)
+    temp_path: Path | None = None
+    directory_fd = -1
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w+b", dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            temp_path = Path(handle.name)
+            with zipfile.ZipFile(
+                handle, "w", compression=compression, compresslevel=9
+            ) as archive:
+                for item in sorted(files, key=lambda value: value.path):
+                    info = zipfile.ZipInfo(item.archive_path)
+                    info.date_time = (1980, 1, 1, 0, 0, 0)
+                    info.external_attr = 0o100644 << 16
+                    info.compress_type = compression
+                    archive.writestr(info, item.content)
+                info = zipfile.ZipInfo("_gptpro/file-manifest.json")
+                info.date_time = (1980, 1, 1, 0, 0, 0)
+                info.external_attr = 0o100644 << 16
+                info.compress_type = compression
+                archive.writestr(info, internal_manifest)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        temp_path = None
+        directory_fd = os.open(
+            path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        os.fsync(directory_fd)
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def event_hash(event: dict[str, Any]) -> str:
@@ -1159,12 +1432,34 @@ def verify_receipt(receipt: dict[str, Any], package_id: str, *, schema_version: 
     if not isinstance(events, list) or not events:
         raise HandoffError("Receipt must contain at least one event")
     previous: str | None = None
+    current_lifecycle_phase: str | None = None
     for index, event in enumerate(events, start=1):
         if not isinstance(event, dict):
             raise HandoffError("Receipt contains a non-object event")
         event_type = event.get("type")
-        if event_type not in PHASES:
+        allowed_types = set(PHASES)
+        if schema_version == SCHEMA_V3:
+            allowed_types.update(MCP_AUXILIARY_EVENTS)
+        if event_type not in allowed_types:
             raise HandoffError(f"Receipt contains unsupported event type {event_type!r} at event {index}")
+        if event_type in MCP_AUXILIARY_EVENTS:
+            data = event.get("data")
+            if (
+                not isinstance(data, dict)
+                or data.get("phase_before") not in PHASES
+                or data.get("phase_after") != data.get("phase_before")
+                or data.get("phase_before") != current_lifecycle_phase
+            ):
+                raise HandoffError(
+                    f"Receipt MCP event {event_type!r} must preserve the lifecycle phase"
+                )
+        elif schema_version == SCHEMA_V3:
+            expected_phase = PHASES[0] if current_lifecycle_phase is None else PHASES[
+                PHASES.index(current_lifecycle_phase) + 1
+            ] if current_lifecycle_phase != PHASES[-1] else None
+            if event_type != expected_phase:
+                raise HandoffError("Schema-3 receipt lifecycle events are missing, duplicated, or reordered")
+            current_lifecycle_phase = event_type
         if event.get("sequence") != index or event.get("previous_event_hash") != previous:
             raise HandoffError(f"Receipt chain mismatch at event {index}")
         actual = event_hash(event)
@@ -1173,17 +1468,37 @@ def verify_receipt(receipt: dict[str, Any], package_id: str, *, schema_version: 
         previous = actual
 
 
-def append_receipt_event(handoff_dir: Path, event_type: str, data: dict[str, Any]) -> None:
-    path = handoff_dir / "receipt.json"
-    receipt = load_json(path)
+def receipt_with_event(
+    receipt: dict[str, Any], event_type: str, data: dict[str, Any]
+) -> dict[str, Any]:
+    validate_json_tree(receipt, label="Receipt")
+    validate_json_tree(data, label="Receipt event data")
+    receipt = copy.deepcopy(receipt)
     package_id = str(receipt.get("package_id", ""))
     schema_version = receipt.get("schema_version")
     if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
         raise HandoffError("Receipt schema is unsupported")
     verify_receipt(receipt, package_id, schema_version=int(schema_version))
-    if event_type not in PHASES:
+    allowed_types = set(PHASES)
+    if int(schema_version) == SCHEMA_V3:
+        allowed_types.update(MCP_AUXILIARY_EVENTS)
+    if event_type not in allowed_types:
         raise HandoffError(f"Receipt event type {event_type!r} is not valid for schema {schema_version}")
+    if event_type in MCP_AUXILIARY_EVENTS and (
+        data.get("phase_before") not in PHASES
+        or data.get("phase_after") != data.get("phase_before")
+    ):
+        raise HandoffError(f"Receipt MCP event {event_type!r} must preserve the lifecycle phase")
     events = receipt["events"]
+    if int(schema_version) == SCHEMA_V3:
+        lifecycle = [event["type"] for event in events if event.get("type") in PHASES]
+        current_phase = lifecycle[-1]
+        if event_type in MCP_AUXILIARY_EVENTS and data.get("phase_before") != current_phase:
+            raise HandoffError(f"Receipt MCP event {event_type!r} does not match the current lifecycle phase")
+        if event_type in PHASES:
+            next_index = PHASES.index(current_phase) + 1
+            if next_index >= len(PHASES) or event_type != PHASES[next_index]:
+                raise HandoffError("Schema-3 receipt lifecycle transition is not the next phase")
     event = {
         "sequence": len(events) + 1,
         "timestamp": utc_now(),
@@ -1193,7 +1508,214 @@ def append_receipt_event(handoff_dir: Path, event_type: str, data: dict[str, Any
     }
     event["event_hash"] = event_hash(event)
     events.append(event)
-    write_json(path, receipt)
+    return receipt
+
+
+@_with_package_lock(_first_handoff_arg)
+def commit_state_receipt_event(
+    handoff_dir: Path,
+    state: dict[str, Any],
+    event_type: str,
+    data: dict[str, Any],
+) -> None:
+    receipt = load_json(handoff_dir / "receipt.json")
+    next_receipt = receipt_with_event(receipt, event_type, data)
+    if (
+        state.get("package_id") != next_receipt.get("package_id")
+        or state.get("schema_version") != next_receipt.get("schema_version")
+    ):
+        raise HandoffError("Package state and receipt identity differ")
+    try:
+        commit_lifecycle_pair(
+            handoff_dir,
+            operation=event_type.replace("_", "-"),
+            state=state,
+            receipt=next_receipt,
+        )
+    except RuntimeStateError as exc:
+        raise runtime_failure(exc) from exc
+
+
+@_with_package_lock(_first_handoff_arg)
+def append_receipt_event(handoff_dir: Path, event_type: str, data: dict[str, Any]) -> None:
+    state = load_json(handoff_dir / "state.json")
+    commit_state_receipt_event(handoff_dir, state, event_type, data)
+
+
+def receipt_events(receipt: dict[str, Any], event_type: str) -> list[dict[str, Any]]:
+    return [event for event in receipt["events"] if event.get("type") == event_type]
+
+
+def verify_schema3_mcp_session(
+    state: dict[str, Any],
+    receipt: dict[str, Any],
+    manifest: dict[str, Any],
+    *,
+    manifest_sha256: str,
+) -> None:
+    """Verify package-local MCP session evidence without consulting machine-global state."""
+
+    session = state.get("mcp_session")
+    phase = state["phase"]
+    if session is None:
+        if receipt_events(receipt, "mcp_activated") or any(
+            receipt_events(receipt, event_type)
+            for event_type in ("mcp_expired", "mcp_revoked", "mcp_stopped")
+        ):
+            raise HandoffError("Schema-3 MCP receipt has session events without package session state")
+        if PHASES.index(phase) >= PHASES.index("submitted"):
+            raise HandoffError("Schema-3 submitted state is missing its MCP session evidence")
+        return
+    if not isinstance(session, dict) or phase == "prepared":
+        raise HandoffError(
+            "Schema-3 runtime sessions are not supported without verified package-local evidence"
+        )
+    required_fields = {
+        "status",
+        "session_id_sha256",
+        "manifest_sha256",
+        "approval_event_sha256",
+        "tunnel_runtime_alias",
+        "tunnel_id_binding_sha256",
+        "tunnel_profile_sha256",
+        "tunnel_client_binary_sha256",
+        "mcp_target_sha256",
+        "mcp_runtime_tree_sha256",
+        "tool_schema_sha256",
+        "protocol_profile",
+        "workspace_binding_confirmed",
+        "activated_at",
+        "expires_at",
+        "audit_file",
+        "audit_header_sha256",
+    }
+    if not required_fields <= set(session):
+        raise HandoffError(
+            "Schema-3 runtime sessions are not supported without verified package-local evidence"
+        )
+    status = session.get("status")
+    if status not in MCP_SESSION_STATUSES:
+        raise HandoffError("Schema-3 MCP session status is invalid")
+    session_hash = require_sha256(
+        session.get("session_id_sha256"), label="Schema-3 MCP session ID hash"
+    )
+    require_sha256(session.get("audit_header_sha256"), label="Schema-3 MCP audit header hash")
+    require_sha256(session.get("tunnel_profile_sha256"), label="Schema-3 Tunnel profile hash")
+    require_sha256(
+        session.get("tunnel_client_binary_sha256"), label="Schema-3 Tunnel client binary hash"
+    )
+    require_sha256(session.get("mcp_target_sha256"), label="Schema-3 exact MCP target hash")
+    require_sha256(session.get("mcp_runtime_tree_sha256"), label="Schema-3 MCP runtime tree hash")
+    require_sha256(
+        session.get("approval_event_sha256"), label="Schema-3 MCP approval event hash"
+    )
+    approval_events = receipt_events(receipt, "approved")
+    if (
+        len(approval_events) != 1
+        or session.get("approval_event_sha256") != approval_events[0].get("event_hash")
+    ):
+        raise HandoffError("Schema-3 MCP session approval receipt binding is invalid")
+    if session.get("manifest_sha256") != manifest_sha256:
+        raise HandoffError("Schema-3 MCP session manifest binding does not match this package")
+    connector = manifest["connector"]
+    if (
+        session.get("tunnel_runtime_alias") != connector.get("tunnel_profile_alias")
+        or session.get("tunnel_id_binding_sha256")
+        != connector.get("tunnel_id_binding_sha256")
+        or session.get("tool_schema_sha256") != connector.get("tool_schema_sha256")
+        or session.get("protocol_profile") != connector.get("protocol_profile")
+        or session.get("audit_file") != "mcp-audit.jsonl"
+        or session.get("workspace_binding_confirmed") is not True
+    ):
+        raise HandoffError("Schema-3 MCP session differs from the approved connector binding")
+    activated_at = parse_utc_timestamp(session.get("activated_at"), label="MCP activation time")
+    expires_at = parse_utc_timestamp(session.get("expires_at"), label="MCP session expiry")
+    if expires_at <= activated_at:
+        raise HandoffError("Schema-3 MCP session expiry is not after activation")
+
+    activations = [
+        event
+        for event in receipt_events(receipt, "mcp_activated")
+        if isinstance(event.get("data"), dict)
+        and event["data"].get("session_id_sha256") == session_hash
+    ]
+    if len(activations) != 1:
+        raise HandoffError(
+            "Schema-3 runtime sessions are not supported without one verified activation receipt"
+        )
+    activation = activations[0]["data"]
+    expected_activation = {
+        "phase_before": "approved",
+        "phase_after": "approved",
+        "session_id_sha256": session_hash,
+        "manifest_sha256": manifest_sha256,
+        "approval_event_sha256": session["approval_event_sha256"],
+        "archive_sha256": manifest["hashes"]["archive_sha256"],
+        "file_set_sha256": manifest["mcp_disclosure"]["file_set_sha256"],
+        "tool_schema_sha256": connector["tool_schema_sha256"],
+        "protocol_profile": connector["protocol_profile"],
+        "tunnel_runtime_alias": connector["tunnel_profile_alias"],
+        "tunnel_id_binding_sha256": connector["tunnel_id_binding_sha256"],
+        "tunnel_profile_sha256": session["tunnel_profile_sha256"],
+        "tunnel_client_binary_sha256": session["tunnel_client_binary_sha256"],
+        "mcp_target_sha256": session["mcp_target_sha256"],
+        "mcp_runtime_tree_sha256": session["mcp_runtime_tree_sha256"],
+        "workspace_binding_confirmed": True,
+        "activated_at": session["activated_at"],
+        "expires_at": session["expires_at"],
+        "audit_file": "mcp-audit.jsonl",
+        "audit_header_sha256": session["audit_header_sha256"],
+    }
+    if activation != expected_activation:
+        raise HandoffError("Schema-3 MCP activation receipt differs from package session state")
+    if activations[0]["sequence"] <= approval_events[0]["sequence"]:
+        raise HandoffError("Schema-3 MCP activation receipt precedes package approval")
+
+    terminal_types = {"mcp_expired", "mcp_revoked", "mcp_stopped", "mcp_recovery_recorded"}
+    terminal = [
+        event
+        for event in receipt["events"]
+        if event.get("type") in terminal_types
+        and isinstance(event.get("data"), dict)
+        and event["data"].get("session_id_sha256") == session_hash
+    ]
+    if status == "active" and terminal:
+        raise HandoffError("Active schema-3 MCP session has terminal receipt evidence")
+    if status in {"revoked", "expired", "faulted"} and not terminal:
+        raise HandoffError("Terminal schema-3 MCP session is missing terminal receipt evidence")
+    primary_type = {"revoked": "mcp_revoked", "expired": "mcp_expired"}.get(status)
+    if primary_type is not None:
+        primary_events = receipt_events(receipt, primary_type)
+        if len(primary_events) != 1:
+            raise HandoffError(f"Terminal schema-3 MCP session requires exactly one {primary_type} receipt")
+        primary = primary_events[0]["data"]
+        expected_summary = {
+            "audit_final_sequence": session.get("audit_final_sequence"),
+            "audit_final_head_sha256": session.get("audit_head_sha256"),
+            "tool_calls": session.get("tool_calls"),
+            "disclosed_bytes": session.get("disclosed_bytes"),
+        }
+        if any(primary.get(key) != value for key, value in expected_summary.items()):
+            raise HandoffError("Terminal schema-3 MCP receipt does not bind the final audit summary")
+    stopped_events = receipt_events(receipt, "mcp_stopped")
+    if len(stopped_events) > 1:
+        raise HandoffError("Schema-3 MCP session has duplicate tunnel-stop receipts")
+    if stopped_events:
+        stopped = stopped_events[0]["data"]
+        if status not in {"revoked", "expired", "faulted"} or stopped.get(
+            "tunnel_runtime_stopped"
+        ) is not True:
+            raise HandoffError("Schema-3 tunnel-stop receipt is not bound to a terminal session")
+        if session.get("tunnel_runtime_stopped") is not True:
+            raise HandoffError("Schema-3 tunnel-stop receipt differs from package session state")
+        for key, state_key in (
+            ("audit_final_sequence", "audit_final_sequence"),
+            ("audit_final_head_sha256", "audit_head_sha256"),
+            ("tool_calls", "tool_calls"),
+            ("disclosed_bytes", "disclosed_bytes"),
+        ):
+            if stopped.get(key) != session.get(state_key):
+                raise HandoffError("Schema-3 tunnel-stop receipt differs from final audit state")
 
 
 def read_task(args: argparse.Namespace) -> str:
@@ -1511,7 +2033,10 @@ def create_package(args: argparse.Namespace) -> int:
     handoff_dir = output_root / package_id
     if handoff_dir.exists():
         raise HandoffError(f"Handoff directory already exists: {handoff_dir}")
-    handoff_dir.mkdir(parents=True)
+    try:
+        handoff_dir.mkdir(mode=0o700, parents=True)
+    except OSError as exc:
+        raise HandoffError(f"Unable to create private handoff directory: {exc}") from exc
     prompt_path = handoff_dir / "prompt.md"
     context_path: Path | None = None
     archive_path = handoff_dir / f"context-{package_id}.zip"
@@ -1943,7 +2468,21 @@ def verify_mcp_manifest_contract(manifest: dict[str, Any]) -> None:
         raise HandoffError("Schema-3 manifest-basis hash mismatch")
 
 
-def verify_package(handoff_dir: Path) -> dict[str, Any]:
+def verify_package(
+    handoff_dir: Path, *, recover_lifecycle: bool = True
+) -> dict[str, Any]:
+    try:
+        if lifecycle_journal_pending(handoff_dir):
+            if not recover_lifecycle:
+                raise HandoffError(
+                    "PACKAGE_LIFECYCLE_PENDING: package state is being committed or requires "
+                    "package-first recovery; content tools fail closed"
+                )
+            recover_lifecycle_pair(handoff_dir)
+    except (OSError, RuntimeStateError) as exc:
+        code = getattr(exc, "code", "RUNTIME_STATE_UNSAFE")
+        message = getattr(exc, "message", "Package lifecycle recovery failed")
+        raise HandoffError(f"{code}: {message}") from exc
     manifest_path = handoff_dir / "manifest.json"
     manifest = load_json(manifest_path)
     state = load_json(handoff_dir / "state.json")
@@ -1956,13 +2495,13 @@ def verify_package(handoff_dir: Path) -> dict[str, Any]:
         raise HandoffError("State identity or schema mismatch")
     if state.get("phase") not in PHASES:
         raise HandoffError(f"Unknown state phase: {state.get('phase')}")
-    if schema_version == SCHEMA_V3 and PHASES.index(state["phase"]) > PHASES.index("approved"):
-        raise HandoffError(
-            "Schema-3 submission and response phases are not supported by this foundation build"
-        )
     verify_receipt(receipt, package_id, schema_version=int(schema_version))
     lifecycle_events = [event for event in receipt["events"] if event.get("type") in PHASES]
     if not lifecycle_events or lifecycle_events[-1].get("type") != state.get("phase"):
+        if schema_version == SCHEMA_V3 and PHASES.index(state["phase"]) > PHASES.index("approved"):
+            raise HandoffError(
+                "Schema-3 submission and response phases are not supported without matching receipt evidence"
+            )
         raise HandoffError("Receipt's latest event does not match the current state phase")
 
     artifacts = manifest.get("artifacts")
@@ -1998,10 +2537,6 @@ def verify_package(handoff_dir: Path) -> dict[str, Any]:
     if schema_version == SCHEMA_V3:
         if isinstance(state.get("revision"), bool) or not isinstance(state.get("revision"), int) or state["revision"] < 1:
             raise HandoffError("Schema-3 state revision is invalid")
-        if state.get("mcp_session") is not None:
-            raise HandoffError(
-                "Schema-3 MCP runtime sessions are not supported by this foundation build"
-            )
         if PHASES.index(state["phase"]) >= PHASES.index("approved"):
             approval = state.get("approval")
             if not isinstance(approval, dict):
@@ -2057,6 +2592,12 @@ def verify_package(handoff_dir: Path) -> dict[str, Any]:
                 or approval != expected_approval
             ):
                 raise HandoffError("Schema-3 approval record is incomplete or differs from the manifest")
+        verify_schema3_mcp_session(
+            state,
+            receipt,
+            manifest,
+            manifest_sha256=manifest_hash,
+        )
 
     def artifact_path(key: str) -> Path:
         value = artifacts.get(key)
@@ -2152,6 +2693,8 @@ def verify_package(handoff_dir: Path) -> dict[str, Any]:
             or submission.get("delivery_channel") != "browser"
             or submission.get("observed_app_name") != connector.get("app_name")
             or submission.get("observed_workspace_label") != connector.get("workspace_label")
+            or submission.get("mcp_session_id_sha256")
+            != state.get("mcp_session", {}).get("session_id_sha256")
         ):
             raise HandoffError("Schema-3 submission does not match the approved channel or connector labels")
 
@@ -2287,7 +2830,14 @@ def verify_package(handoff_dir: Path) -> dict[str, Any]:
                     raise HandoffError(f"Archived file is not strict UTF-8: {name}") from exc
                 if schema_version == SCHEMA_V3 and "\0" in text:
                     raise HandoffError(f"Archived file contains NUL bytes: {name}")
-    except (OSError, zipfile.BadZipFile, KeyError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (
+        OSError,
+        zipfile.BadZipFile,
+        KeyError,
+        ValueError,
+        RecursionError,
+        UnicodeDecodeError,
+    ) as exc:
         raise HandoffError(f"Unable to verify archive: {exc}") from exc
 
     return {
@@ -2333,9 +2883,1322 @@ def command_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def runtime_store_for() -> RuntimeStateStore:
+    """Return the single canonical per-user MCP authorization store.
+
+    The lifecycle CLI intentionally has no runtime-root override. Allowing a
+    caller to select another root would create a second authorization namespace
+    and break the one-active-package invariant.
+    """
+
+    try:
+        return RuntimeStateStore()
+    except RuntimeStateError as exc:
+        raise HandoffError(f"{exc.code}: {exc.message}") from exc
+
+
+def schema3_approval_event(verified: dict[str, Any]) -> dict[str, Any]:
+    events = receipt_events(verified["receipt"], "approved")
+    if len(events) != 1 or events[0].get("data") != verified["state"].get("approval"):
+        raise HandoffError("Schema-3 approval receipt binding is unavailable")
+    require_sha256(events[0].get("event_hash"), label="Schema-3 approval event hash")
+    return events[0]
+
+
+def audit_binding_for(verified: dict[str, Any], session_id_sha256: str) -> AuditBinding:
+    manifest = verified["manifest"]
+    approval_event = schema3_approval_event(verified)
+    limits_hash = sha256_bytes(canonical_json_bytes(manifest["mcp_disclosure"]["limits"]))
+    try:
+        return AuditBinding(
+            package_id=manifest["package_id"],
+            session_id_sha256=session_id_sha256,
+            manifest_sha256=verified["manifest_sha256"],
+            approval_event_sha256=approval_event["event_hash"],
+            archive_sha256=manifest["hashes"]["archive_sha256"],
+            file_set_sha256=manifest["mcp_disclosure"]["file_set_sha256"],
+            tool_schema_sha256=manifest["connector"]["tool_schema_sha256"],
+            limits_sha256=limits_hash,
+        )
+    except ValueError as exc:
+        raise HandoffError("Schema-3 audit binding is invalid") from exc
+
+
+def audit_log_for(
+    verified: dict[str, Any],
+    session_id_sha256: str,
+    *,
+    runtime_store: RuntimeStateStore | None = None,
+) -> AuditLog:
+    return AuditLog(
+        verified["manifest_path"].parent / "mcp-audit.jsonl",
+        audit_binding_for(verified, session_id_sha256),
+        runtime_store=runtime_store,
+    )
+
+
+def audit_summary_payload(summary: AuditSummary) -> dict[str, Any]:
+    return {
+        "audit_header_sha256": summary.header_sha256,
+        "audit_head_sha256": summary.head_sha256,
+        "audit_final_sequence": summary.final_sequence,
+        "tool_calls": summary.tool_calls,
+        "disclosed_bytes": summary.disclosed_bytes,
+        "footer": summary.footer,
+        "last_committed_at": summary.last_committed_at.astimezone(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z"),
+    }
+
+
+def assert_mcp_runtime_binding(
+    verified: dict[str, Any],
+    runtime_state: dict[str, Any] | None,
+    *,
+    session_id_sha256: str,
+    expected_statuses: set[str],
+    require_unexpired: bool = False,
+) -> dict[str, Any]:
+    """Bind machine-global authorization to one exact verified package."""
+
+    if runtime_state is None:
+        raise HandoffError("No machine-global MCP authorization exists")
+    manifest = verified["manifest"]
+    connector = manifest["connector"]
+    approval_event = schema3_approval_event(verified)
+    package_session = verified["state"].get("mcp_session")
+    target_hash = (
+        package_session.get("mcp_target_sha256")
+        if isinstance(package_session, dict)
+        else runtime_state.get("mcp_target_sha256")
+    )
+    target_hash = require_sha256(target_hash, label="Exact MCP target hash")
+    runtime_identity = package_session if isinstance(package_session, dict) else runtime_state
+    tunnel_profile_hash = require_sha256(
+        runtime_identity.get("tunnel_profile_sha256"), label="Tunnel profile hash"
+    )
+    tunnel_binary_hash = require_sha256(
+        runtime_identity.get("tunnel_client_binary_sha256"), label="Tunnel client binary hash"
+    )
+    runtime_tree_hash = require_sha256(
+        runtime_identity.get("mcp_runtime_tree_sha256"), label="MCP runtime tree hash"
+    )
+    if runtime_tree_hash != mcp_runtime_tree_sha256():
+        raise HandoffError("Installed MCP runtime changed after this authorization was prepared")
+    expected = {
+        "package_id": manifest["package_id"],
+        "session_id_sha256": session_id_sha256,
+        "handoff_dir": str(verified["manifest_path"].parent.resolve()),
+        "manifest_sha256": verified["manifest_sha256"],
+        "approval_event_sha256": approval_event["event_hash"],
+        "archive_sha256": manifest["hashes"]["archive_sha256"],
+        "file_set_sha256": manifest["mcp_disclosure"]["file_set_sha256"],
+        "tool_schema_sha256": connector["tool_schema_sha256"],
+        "protocol_profile": connector["protocol_profile"],
+        "transport": "mcp-read",
+        "delivery_channel": "browser",
+        "connector_type": MCP_CONNECTOR_TYPE,
+        "tunnel_runtime_alias": connector["tunnel_profile_alias"],
+        "tunnel_id_binding_sha256": connector["tunnel_id_binding_sha256"],
+        "tunnel_profile_sha256": tunnel_profile_hash,
+        "tunnel_client_binary_sha256": tunnel_binary_hash,
+        "mcp_target_sha256": target_hash,
+        "mcp_runtime_tree_sha256": runtime_tree_hash,
+        "workspace_binding_confirmed": True,
+        "audit_file": "mcp-audit.jsonl",
+    }
+    if runtime_state.get("status") not in expected_statuses:
+        raise HandoffError("Machine-global MCP authorization is not in the required state")
+    if any(runtime_state.get(key) != value for key, value in expected.items()):
+        raise HandoffError("Machine-global MCP authorization does not match this package binding")
+    activated_at = parse_utc_timestamp(
+        runtime_state.get("activated_at"), label="MCP runtime activation time"
+    )
+    expires_at = parse_utc_timestamp(runtime_state.get("expires_at"), label="MCP runtime expiry")
+    approval_expiry = parse_utc_timestamp(
+        manifest["mcp_disclosure"]["approval_valid_until"], label="MCP approval expiry"
+    )
+    maximum_expiry = activated_at + timedelta(
+        seconds=manifest["mcp_disclosure"]["limits"]["session_ttl_seconds"]
+    )
+    if expires_at <= activated_at or expires_at > min(approval_expiry, maximum_expiry):
+        raise HandoffError("Machine-global MCP authorization TTL exceeds the approved package bounds")
+    activated_monotonic, expires_monotonic, last_activity_monotonic = (
+        _mcp_monotonic_bounds(runtime_state)
+    )
+    wall_duration = (expires_at - activated_at).total_seconds()
+    if abs((expires_monotonic - activated_monotonic) - wall_duration) > 1.0:
+        raise HandoffError("Machine-global MCP wall and monotonic session bounds disagree")
+    if require_unexpired:
+        monotonic_now = time.monotonic()
+        if monotonic_now < activated_monotonic or monotonic_now < last_activity_monotonic:
+            raise HandoffError(
+                "Machine monotonic clock reset invalidated this authorization; run mcp-recover"
+            )
+        if monotonic_now >= expires_monotonic or datetime.now(timezone.utc) >= expires_at:
+            raise HandoffError("Machine-global MCP authorization has expired")
+    return runtime_state
+
+
+def _mcp_monotonic_bounds(runtime_state: dict[str, Any]) -> tuple[float, float, float]:
+    values: list[float] = []
+    for key in ("activated_monotonic", "expires_monotonic", "last_activity_monotonic"):
+        raw = runtime_state.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
+            raise HandoffError("Machine-global MCP monotonic deadline is invalid")
+        values.append(float(raw))
+    activated, expires, last_activity = values
+    if activated < 0 or expires <= activated or not activated <= last_activity <= expires:
+        raise HandoffError("Machine-global MCP monotonic deadlines are inconsistent")
+    return activated, expires, last_activity
+
+
+def mcp_runtime_tree_sha256() -> str:
+    paths = [
+        SKILL_ROOT / "scripts" / "gptpro.py",
+        SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+        *sorted((SKILL_ROOT / "runtime" / "gptpro_mcp").glob("*.py")),
+    ]
+    entries = [
+        {
+            "path": path.relative_to(SKILL_ROOT).as_posix(),
+            "sha256": sha256_file(path),
+        }
+        for path in paths
+        if path.is_file()
+    ]
+    return sha256_bytes(canonical_json_bytes(entries))
+
+
+class RuntimeIdentityBoundTunnelClient:
+    """Fail closed if the selected Tunnel binary or bundled MCP runtime drifts."""
+
+    def __init__(
+        self,
+        delegate: TunnelClient,
+        *,
+        tunnel_client_binary_sha256: str,
+        mcp_target_sha256: str,
+        mcp_runtime_tree_sha256_value: str,
+    ) -> None:
+        self._delegate = delegate
+        self._tunnel_client_binary_sha256 = require_sha256(
+            tunnel_client_binary_sha256, label="Tunnel client binary hash"
+        )
+        self._mcp_target_sha256 = require_sha256(
+            mcp_target_sha256, label="Exact MCP target hash"
+        )
+        self._mcp_runtime_tree_sha256 = require_sha256(
+            mcp_runtime_tree_sha256_value, label="MCP runtime tree hash"
+        )
+
+    def spawn_run(self, *args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        if getattr(self._delegate, "binary_sha256", None) != self._tunnel_client_binary_sha256:
+            raise TunnelClientError(
+                "TUNNEL_CLIENT_IDENTITY_CHANGED",
+                "The selected Tunnel client identity changed before child launch.",
+            )
+        if mcp_runtime_tree_sha256() != self._mcp_runtime_tree_sha256:
+            raise TunnelClientError(
+                "MCP_RUNTIME_IDENTITY_CHANGED",
+                "The bundled MCP runtime changed before child launch.",
+            )
+        if bundled_mcp_target_sha256() != self._mcp_target_sha256:
+            raise TunnelClientError(
+                "MCP_RUNTIME_IDENTITY_CHANGED",
+                "The MCP interpreter or entrypoint changed before child launch.",
+            )
+        supplied_target = kwargs.get("expected_mcp_target_sha256")
+        if supplied_target is not None and supplied_target != self._mcp_target_sha256:
+            raise TunnelClientError(
+                "MCP_RUNTIME_IDENTITY_CHANGED",
+                "The foreground launch requested a different MCP target identity.",
+            )
+        kwargs["expected_mcp_target_sha256"] = self._mcp_target_sha256
+        return self._delegate.spawn_run(*args, **kwargs)
+
+    def health(self, *args: Any, **kwargs: Any) -> Any:
+        return self._delegate.health(*args, **kwargs)
+
+
+def checked_schema3_handoff(path_arg: str, *, phase: str | None = None) -> tuple[Path, dict[str, Any]]:
+    handoff_dir = validate_handoff_dir(path_arg)
+    verified = verify_package(handoff_dir)
+    if verified["schema_version"] != SCHEMA_V3:
+        raise HandoffError("This MCP command requires a schema-3 mcp-read package")
+    if phase is not None:
+        require_phase(verified["state"], phase)
+    return handoff_dir, verified
+
+
+def runtime_failure(exc: RuntimeStateError | ToolError) -> HandoffError:
+    message = getattr(exc, "message", "The MCP runtime operation failed.")
+    return HandoffError(f"{exc.code}: {message}")
+
+
+def mcp_activation_preflight(
+    verified: dict[str, Any],
+    *,
+    tunnel_profile: str,
+    observed_tunnel_binding_sha256: str,
+    observed_tunnel_profile_sha256: str,
+    observed_tunnel_client_binary_sha256: str,
+    observed_mcp_target_sha256: str,
+    observed_mcp_runtime_tree_sha256: str,
+    profile_binding_verification: str,
+    workspace_binding_confirmed: bool,
+) -> dict[str, Any]:
+    manifest = verified["manifest"]
+    state = verified["state"]
+    if verified["schema_version"] != SCHEMA_V3 or manifest["transport"]["resolved"] != "mcp-read":
+        raise HandoffError("MCP activation requires a schema-3 mcp-read package")
+    require_phase(state, "approved")
+    attempted = [
+        event
+        for event in verified["receipt"]["events"]
+        if event.get("type") in {"mcp_activated", "mcp_activation_failed", "mcp_recovery_recorded"}
+    ]
+    if state.get("mcp_session") is not None or attempted:
+        raise HandoffError("A schema-3 package may be activated only once")
+    if (verified["manifest_path"].parent / "mcp-audit.jsonl").exists():
+        raise HandoffError("This package already has an MCP audit artifact; prepare a new package")
+    connector = manifest["connector"]
+    if tunnel_profile != connector["tunnel_profile_alias"]:
+        raise HandoffError("Tunnel profile alias differs from the approved package")
+    observed_binding = require_sha256(
+        observed_tunnel_binding_sha256,
+        label="Observed Tunnel profile binding",
+    )
+    if observed_binding != connector["tunnel_id_binding_sha256"]:
+        raise HandoffError("Tunnel profile identity does not match the approved package binding")
+    if profile_binding_verification != "automatic-doctor-json":
+        raise HandoffError("Tunnel profile binding was not verified from the official doctor JSON")
+    profile_hash = require_sha256(
+        observed_tunnel_profile_sha256,
+        label="Observed Tunnel profile hash",
+    )
+    tunnel_binary_hash = require_sha256(
+        observed_tunnel_client_binary_sha256,
+        label="Observed Tunnel client binary hash",
+    )
+    target_hash = require_sha256(
+        observed_mcp_target_sha256,
+        label="Observed exact MCP target",
+    )
+    runtime_tree_hash = require_sha256(
+        observed_mcp_runtime_tree_sha256,
+        label="Observed MCP runtime tree hash",
+    )
+    if runtime_tree_hash != mcp_runtime_tree_sha256():
+        raise HandoffError("Observed MCP runtime tree differs from the installed Skill runtime")
+    if not workspace_binding_confirmed:
+        raise HandoffError("Activation requires explicit confirmation of the approved ChatGPT workspace binding")
+    approval_expiry = parse_utc_timestamp(
+        manifest["mcp_disclosure"]["approval_valid_until"], label="MCP approval expiry"
+    )
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    activated_monotonic = time.monotonic()
+    if now >= approval_expiry:
+        raise HandoffError("Schema-3 MCP approval has expired; prepare a new package")
+    session_expiry = min(
+        approval_expiry,
+        now + timedelta(seconds=manifest["mcp_disclosure"]["limits"]["session_ttl_seconds"]),
+    )
+    expires_monotonic = activated_monotonic + (session_expiry - now).total_seconds()
+    return {
+        "package_id": manifest["package_id"],
+        "tunnel_runtime_alias": tunnel_profile,
+        "tunnel_id_binding_sha256": observed_binding,
+        "tunnel_profile_sha256": profile_hash,
+        "tunnel_client_binary_sha256": tunnel_binary_hash,
+        "profile_binding_verification": profile_binding_verification,
+        "mcp_target_sha256": target_hash,
+        "mcp_runtime_tree_sha256": runtime_tree_hash,
+        "workspace_binding_confirmed": True,
+        "activated_at": now.isoformat().replace("+00:00", "Z"),
+        "expires_at": session_expiry.isoformat().replace("+00:00", "Z"),
+        "activated_monotonic": activated_monotonic,
+        "expires_monotonic": expires_monotonic,
+        "last_activity_monotonic": activated_monotonic,
+        "idle_ttl_seconds": manifest["mcp_disclosure"]["limits"]["idle_ttl_seconds"],
+        "foreground_required": True,
+        "successful_control_plane_poll_required": True,
+    }
+
+
+def validate_mcp_activation_preflight(
+    verified: dict[str, Any], preflight: dict[str, Any]
+) -> dict[str, Any]:
+    """Revalidate controller-provided preflight data before persistent writes."""
+
+    manifest = verified["manifest"]
+    connector = manifest["connector"]
+    limits = manifest["mcp_disclosure"]["limits"]
+    expected_exact = {
+        "package_id": manifest["package_id"],
+        "tunnel_runtime_alias": connector["tunnel_profile_alias"],
+        "tunnel_id_binding_sha256": connector["tunnel_id_binding_sha256"],
+        "profile_binding_verification": "automatic-doctor-json",
+        "workspace_binding_confirmed": True,
+        "idle_ttl_seconds": limits["idle_ttl_seconds"],
+        "foreground_required": True,
+        "successful_control_plane_poll_required": True,
+    }
+    if any(preflight.get(key) != value for key, value in expected_exact.items()):
+        raise HandoffError("MCP activation preflight differs from the approved package binding")
+    require_sha256(preflight.get("tunnel_profile_sha256"), label="Tunnel profile hash")
+    require_sha256(
+        preflight.get("tunnel_client_binary_sha256"), label="Tunnel client binary hash"
+    )
+    require_sha256(preflight.get("mcp_target_sha256"), label="Exact MCP target hash")
+    runtime_tree_hash = require_sha256(
+        preflight.get("mcp_runtime_tree_sha256"), label="MCP runtime tree hash"
+    )
+    if runtime_tree_hash != mcp_runtime_tree_sha256():
+        raise HandoffError("MCP activation preflight runtime identity changed")
+    activated_at = parse_utc_timestamp(preflight.get("activated_at"), label="MCP activation time")
+    expires_at = parse_utc_timestamp(preflight.get("expires_at"), label="MCP session expiry")
+    approval_expiry = parse_utc_timestamp(
+        manifest["mcp_disclosure"]["approval_valid_until"], label="MCP approval expiry"
+    )
+    now = datetime.now(timezone.utc)
+    monotonic_now = time.monotonic()
+    monotonic_values: dict[str, float] = {}
+    for key in ("activated_monotonic", "expires_monotonic", "last_activity_monotonic"):
+        raw = preflight.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
+            raise HandoffError("MCP activation preflight monotonic deadline is invalid")
+        monotonic_values[key] = float(raw)
+    wall_duration = (expires_at - activated_at).total_seconds()
+    monotonic_duration = (
+        monotonic_values["expires_monotonic"] - monotonic_values["activated_monotonic"]
+    )
+    if (
+        activated_at > now + timedelta(minutes=5)
+        or expires_at <= activated_at
+        or expires_at > approval_expiry
+        or expires_at > activated_at + timedelta(seconds=limits["session_ttl_seconds"])
+        or now >= expires_at
+        or monotonic_values["activated_monotonic"] <= 0
+        or monotonic_values["last_activity_monotonic"]
+        != monotonic_values["activated_monotonic"]
+        or monotonic_values["expires_monotonic"]
+        <= monotonic_values["activated_monotonic"]
+        or monotonic_now < monotonic_values["activated_monotonic"]
+        or monotonic_now >= monotonic_values["expires_monotonic"]
+        or abs(monotonic_duration - wall_duration) > 1.0
+    ):
+        raise HandoffError("MCP activation preflight TTL is invalid or expired")
+    return dict(preflight)
+
+
+@_with_package_lock(_verified_handoff_arg)
+def begin_mcp_activation(
+    verified: dict[str, Any],
+    runtime_store: RuntimeStateStore,
+    *,
+    session_id_sha256: str,
+    preflight: dict[str, Any],
+) -> dict[str, Any]:
+    """Create deny-by-default activating state and a durable audit header."""
+
+    session_hash = require_sha256(session_id_sha256, label="MCP session ID hash")
+    preflight = validate_mcp_activation_preflight(verified, preflight)
+    manifest = verified["manifest"]
+    approval_event = schema3_approval_event(verified)
+    candidate = {
+        "package_id": manifest["package_id"],
+        "session_id_sha256": session_hash,
+        "handoff_dir": str(verified["manifest_path"].parent.resolve()),
+        "manifest_sha256": verified["manifest_sha256"],
+        "approval_event_sha256": approval_event["event_hash"],
+        "archive_sha256": manifest["hashes"]["archive_sha256"],
+        "file_set_sha256": manifest["mcp_disclosure"]["file_set_sha256"],
+        "tool_schema_sha256": manifest["connector"]["tool_schema_sha256"],
+        "protocol_profile": manifest["connector"]["protocol_profile"],
+        "transport": "mcp-read",
+        "delivery_channel": "browser",
+        "connector_type": MCP_CONNECTOR_TYPE,
+        "tunnel_runtime_alias": preflight["tunnel_runtime_alias"],
+        "tunnel_id_binding_sha256": preflight["tunnel_id_binding_sha256"],
+        "tunnel_profile_sha256": preflight["tunnel_profile_sha256"],
+        "tunnel_client_binary_sha256": preflight["tunnel_client_binary_sha256"],
+        "mcp_target_sha256": preflight["mcp_target_sha256"],
+        "mcp_runtime_tree_sha256": preflight["mcp_runtime_tree_sha256"],
+        "workspace_binding_confirmed": True,
+        "activated_at": preflight["activated_at"],
+        "expires_at": preflight["expires_at"],
+        "activated_monotonic": preflight["activated_monotonic"],
+        "expires_monotonic": preflight["expires_monotonic"],
+        "last_activity_monotonic": preflight["last_activity_monotonic"],
+        "idle_ttl_seconds": preflight["idle_ttl_seconds"],
+        "audit_file": "mcp-audit.jsonl",
+    }
+    begun = False
+    try:
+        runtime_state = runtime_store.begin_activation(candidate)
+        begun = True
+        header_hash = audit_log_for(
+            verified, session_hash, runtime_store=runtime_store
+        ).create_header()
+    except (RuntimeStateError, ToolError) as exc:
+        try:
+            current = runtime_store.read()
+            if (
+                current is not None
+                and current.get("session_id_sha256") == session_hash
+                and current.get("status") == "activating"
+            ):
+                runtime_store.transition(session_hash, "activating", "faulted")
+        except RuntimeStateError:
+            pass
+        if begun:
+            append_receipt_event(
+                verified["manifest_path"].parent,
+                "mcp_activation_failed",
+                {
+                    "phase_before": verified["state"]["phase"],
+                    "phase_after": verified["state"]["phase"],
+                    "session_id_sha256": session_hash,
+                    "error_code": exc.code,
+                },
+            )
+        raise runtime_failure(exc) from exc
+    return {
+        "runtime_state": runtime_state,
+        "audit_header_sha256": header_hash,
+        "session_id_sha256": session_hash,
+    }
+
+
+def _activation_receipt_data(
+    verified: dict[str, Any],
+    *,
+    session_id_sha256: str,
+    audit_header_sha256: str,
+    runtime_state: dict[str, Any],
+) -> dict[str, Any]:
+    manifest = verified["manifest"]
+    return {
+        "phase_before": verified["state"]["phase"],
+        "phase_after": verified["state"]["phase"],
+        "session_id_sha256": session_id_sha256,
+        "manifest_sha256": verified["manifest_sha256"],
+        "approval_event_sha256": runtime_state["approval_event_sha256"],
+        "archive_sha256": manifest["hashes"]["archive_sha256"],
+        "file_set_sha256": manifest["mcp_disclosure"]["file_set_sha256"],
+        "tool_schema_sha256": manifest["connector"]["tool_schema_sha256"],
+        "protocol_profile": manifest["connector"]["protocol_profile"],
+        "tunnel_runtime_alias": manifest["connector"]["tunnel_profile_alias"],
+        "tunnel_id_binding_sha256": manifest["connector"]["tunnel_id_binding_sha256"],
+        "tunnel_profile_sha256": runtime_state["tunnel_profile_sha256"],
+        "tunnel_client_binary_sha256": runtime_state["tunnel_client_binary_sha256"],
+        "mcp_target_sha256": runtime_state["mcp_target_sha256"],
+        "mcp_runtime_tree_sha256": runtime_state["mcp_runtime_tree_sha256"],
+        "workspace_binding_confirmed": True,
+        "activated_at": runtime_state["activated_at"],
+        "expires_at": runtime_state["expires_at"],
+        "audit_file": "mcp-audit.jsonl",
+        "audit_header_sha256": audit_header_sha256,
+    }
+
+
+@_with_package_lock(_first_handoff_arg)
+def complete_mcp_activation(
+    handoff_dir: Path,
+    runtime_store: RuntimeStateStore,
+    *,
+    session_id_sha256: str,
+    audit_header_sha256: str,
+    successful_control_plane_poll_observed: bool,
+) -> dict[str, Any]:
+    """Publish package evidence, then make authorization active as the final step."""
+
+    if not successful_control_plane_poll_observed:
+        raise HandoffError(
+            "Activation requires official health evidence with a successful control-plane poll"
+        )
+    verified = verify_package(handoff_dir)
+    require_phase(verified["state"], "approved")
+    session_hash = require_sha256(session_id_sha256, label="MCP session ID hash")
+    header_hash = require_sha256(audit_header_sha256, label="MCP audit header hash")
+    try:
+        runtime_state = assert_mcp_runtime_binding(
+            verified,
+            runtime_store.read(),
+            session_id_sha256=session_hash,
+            expected_statuses={"activating"},
+            require_unexpired=True,
+        )
+        audit_summary = audit_log_for(
+            verified, session_hash, runtime_store=runtime_store
+        ).verify()
+    except (RuntimeStateError, ToolError) as exc:
+        raise runtime_failure(exc) from exc
+    if audit_summary.header_sha256 != header_hash or audit_summary.final_sequence != 0:
+        raise HandoffError("MCP audit header changed before activation completed")
+
+    activation_data = _activation_receipt_data(
+        verified,
+        session_id_sha256=session_hash,
+        audit_header_sha256=header_hash,
+        runtime_state=runtime_state,
+    )
+    state = load_json(handoff_dir / "state.json")
+    state["mcp_session"] = {
+        "status": "active",
+        "session_id_sha256": session_hash,
+        "manifest_sha256": verified["manifest_sha256"],
+        "approval_event_sha256": runtime_state["approval_event_sha256"],
+        "tunnel_runtime_alias": activation_data["tunnel_runtime_alias"],
+        "tunnel_id_binding_sha256": activation_data["tunnel_id_binding_sha256"],
+        "tunnel_profile_sha256": activation_data["tunnel_profile_sha256"],
+        "tunnel_client_binary_sha256": activation_data["tunnel_client_binary_sha256"],
+        "mcp_target_sha256": activation_data["mcp_target_sha256"],
+        "mcp_runtime_tree_sha256": activation_data["mcp_runtime_tree_sha256"],
+        "tool_schema_sha256": activation_data["tool_schema_sha256"],
+        "protocol_profile": activation_data["protocol_profile"],
+        "workspace_binding_confirmed": True,
+        "activated_at": activation_data["activated_at"],
+        "expires_at": activation_data["expires_at"],
+        "audit_file": "mcp-audit.jsonl",
+        "audit_header_sha256": header_hash,
+    }
+    state["revision"] += 1
+    state["updated_at"] = utc_now()
+    commit_state_receipt_event(handoff_dir, state, "mcp_activated", activation_data)
+    try:
+        active = runtime_store.transition(
+            session_hash,
+            "activating",
+            "active",
+            updates={"audit_header_sha256": header_hash},
+        )
+    except RuntimeStateError as exc:
+        try:
+            current = runtime_store.read()
+            if (
+                current is not None
+                and current.get("session_id_sha256") == session_hash
+                and current.get("status") in {"activating", "active"}
+            ):
+                runtime_store.transition(session_hash, current["status"], "faulted")
+        except RuntimeStateError:
+            pass
+        failed = load_json(handoff_dir / "state.json")
+        failed["mcp_session"]["status"] = "faulted"
+        failed["revision"] += 1
+        failed["updated_at"] = utc_now()
+        commit_state_receipt_event(
+            handoff_dir,
+            failed,
+            "mcp_recovery_recorded",
+            {
+                "phase_before": failed["phase"],
+                "phase_after": failed["phase"],
+                "session_id_sha256": session_hash,
+                "reason": "activation_commit_failed",
+            },
+        )
+        raise runtime_failure(exc) from exc
+    return {"authorization": active, "audit": audit_summary_payload(audit_summary)}
+
+
+@_with_package_lock(_first_handoff_arg)
+def fail_mcp_activation(
+    handoff_dir: Path,
+    runtime_store: RuntimeStateStore,
+    *,
+    session_id_sha256: str,
+    error_code: str,
+) -> None:
+    if re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", error_code) is None:
+        error_code = "MCP_ACTIVATION_FAILED"
+    session_hash = require_sha256(session_id_sha256, label="MCP session ID hash")
+    state = load_json(handoff_dir / "state.json")
+    receipt = load_json(handoff_dir / "receipt.json")
+    verify_receipt(receipt, state["package_id"], schema_version=SCHEMA_V3)
+    if any(
+        event.get("type") in {"mcp_activation_failed", "mcp_recovery_recorded"}
+        and isinstance(event.get("data"), dict)
+        and event["data"].get("session_id_sha256") == session_hash
+        for event in receipt["events"]
+    ):
+        return
+    try:
+        current = runtime_store.read()
+        if current is not None and current.get("session_id_sha256") == session_hash:
+            if current.get("status") in {"activating", "active"}:
+                runtime_store.transition(session_hash, current["status"], "faulted")
+    except RuntimeStateError:
+        pass
+    event_type = "mcp_activation_failed"
+    if isinstance(state.get("mcp_session"), dict):
+        state["mcp_session"]["status"] = "faulted"
+        state["revision"] += 1
+        state["updated_at"] = utc_now()
+        event_type = "mcp_recovery_recorded"
+    commit_state_receipt_event(
+        handoff_dir,
+        state,
+        event_type,
+        {
+            "phase_before": state["phase"],
+            "phase_after": state["phase"],
+            "session_id_sha256": session_hash,
+            "error_code": error_code,
+        },
+    )
+
+
+def _inspect_orphan_audit(
+    verified: dict[str, Any], session_id_sha256: str
+) -> tuple[str, AuditSummary | None, str | None]:
+    """Classify an audit without treating a missing pre-header file as valid evidence."""
+
+    audit_path = verified["manifest_path"].parent / "mcp-audit.jsonl"
+    try:
+        metadata = audit_path.lstat()
+    except FileNotFoundError:
+        return "missing", None, "AUDIT_HEADER_MISSING"
+    except OSError:
+        return "invalid", None, "AUDIT_CHAIN_INVALID"
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        return "invalid", None, "AUDIT_CHAIN_INVALID"
+    try:
+        return "valid", audit_log_for(verified, session_id_sha256).verify(), None
+    except ToolError as exc:
+        return "invalid", None, exc.code
+
+
+def _fault_pre_audit_mcp_activation(
+    verified: dict[str, Any],
+    runtime_store: RuntimeStateStore,
+    *,
+    session_id_sha256: str,
+    audit_condition: str,
+    audit_error_code: str,
+) -> dict[str, Any]:
+    """Deny a crash before activation evidence existed, without inventing a footer."""
+
+    if audit_condition not in {"missing", "invalid"}:
+        raise HandoffError("Pre-audit recovery requires missing or invalid audit evidence")
+    if verified["state"].get("mcp_session") is not None:
+        raise HandoffError(
+            "Audit recovery without a valid header is permitted only before package activation"
+        )
+    session_hash = require_sha256(session_id_sha256, label="MCP session ID hash")
+    current = assert_mcp_runtime_binding(
+        verified,
+        runtime_store.read(),
+        session_id_sha256=session_hash,
+        expected_statuses={"activating", "faulted"},
+    )
+    if current["status"] == "activating":
+        try:
+            current = runtime_store.transition(
+                session_hash,
+                "activating",
+                "faulted",
+                updates={
+                    "orphaned_reason": "controller_lost_before_audit_header",
+                    "audit_recovery_status": audit_condition,
+                },
+            )
+        except RuntimeStateError as exc:
+            raise runtime_failure(exc) from exc
+
+    receipt = load_json(verified["manifest_path"].parent / "receipt.json")
+    matching = [
+        event
+        for event in receipt_events(receipt, "mcp_activation_failed")
+        if isinstance(event.get("data"), dict)
+        and event["data"].get("session_id_sha256") == session_hash
+    ]
+    if not matching:
+        append_receipt_event(
+            verified["manifest_path"].parent,
+            "mcp_activation_failed",
+            {
+                "phase_before": verified["state"]["phase"],
+                "phase_after": verified["state"]["phase"],
+                "session_id_sha256": session_hash,
+                "error_code": audit_error_code,
+            },
+        )
+    elif len(matching) != 1:
+        raise HandoffError("Pre-audit recovery receipt is duplicated")
+    return {
+        "authorization": current,
+        "audit": {
+            "valid": False,
+            "condition": audit_condition,
+            "code": audit_error_code,
+            "footer": False,
+            "tool_calls": 0,
+            "disclosed_bytes": 0,
+        },
+        "recovery_mode": "pre_audit_faulted",
+    }
+
+
+@_with_package_lock(_first_handoff_arg)
+def recover_interrupted_mcp_activation(
+    handoff_dir: Path,
+    runtime_store: RuntimeStateStore,
+    *,
+    reason: str = "controller_lost",
+) -> dict[str, Any]:
+    """Close an exact activating/faulted session without claiming its child stopped."""
+
+    if reason not in {"controller_lost", "user_requested"}:
+        raise HandoffError("MCP recovery reason is invalid")
+    verified = verify_package(handoff_dir)
+    current = runtime_store.read()
+    if current is None:
+        raise HandoffError("No machine-global MCP authorization exists")
+    session_hash = require_sha256(
+        current.get("session_id_sha256"), label="MCP session ID hash"
+    )
+    current = assert_mcp_runtime_binding(
+        verified,
+        current,
+        session_id_sha256=session_hash,
+        expected_statuses={"activating", "active", "revoking", "faulted"},
+    )
+    try:
+        audit = audit_log_for(verified, session_hash)
+        summary = audit.verify()
+        if not summary.footer:
+            summary = audit.append_footer(reason)
+        if current["status"] == "active":
+            current = runtime_store.transition(session_hash, "active", "revoking")
+        recovered = runtime_store.transition(
+            session_hash,
+            current["status"],
+            "revoked",
+            updates={
+                "audit_final_sequence": summary.final_sequence,
+                "audit_final_head_sha256": summary.head_sha256,
+                "tool_calls": summary.tool_calls,
+                "disclosed_bytes": summary.disclosed_bytes,
+                "revoked_reason": reason,
+            },
+        )
+    except (RuntimeStateError, ToolError) as exc:
+        raise runtime_failure(exc) from exc
+
+    package_session = verified["state"].get("mcp_session")
+    if isinstance(package_session, dict):
+        _record_terminal_package_session(
+            verified,
+            status="revoked",
+            event_type="mcp_revoked",
+            reason=reason,
+            summary=summary,
+        )
+    else:
+        receipt = load_json(handoff_dir / "receipt.json")
+        if not receipt_events(receipt, "mcp_activation_failed"):
+            append_receipt_event(
+                handoff_dir,
+                "mcp_activation_failed",
+                {
+                    "phase_before": verified["state"]["phase"],
+                    "phase_after": verified["state"]["phase"],
+                    "session_id_sha256": session_hash,
+                    "error_code": "CONTROLLER_LOST"
+                    if reason == "controller_lost"
+                    else "ACTIVATION_CANCELLED",
+                },
+            )
+    return {"authorization": recovered, "audit": audit_summary_payload(summary)}
+
+
+def _terminal_audit_matches_runtime(
+    runtime_state: dict[str, Any], summary: AuditSummary
+) -> bool:
+    return summary.footer and all(
+        runtime_state.get(key) == value
+        for key, value in (
+            ("audit_final_sequence", summary.final_sequence),
+            ("audit_final_head_sha256", summary.head_sha256),
+            ("tool_calls", summary.tool_calls),
+            ("disclosed_bytes", summary.disclosed_bytes),
+        )
+    )
+
+
+@_with_package_lock(_verified_handoff_arg)
+def _record_terminal_package_session(
+    verified: dict[str, Any],
+    *,
+    status: str,
+    event_type: str,
+    reason: str,
+    summary: AuditSummary,
+) -> dict[str, Any]:
+    if status not in {"revoked", "expired"} or event_type not in {"mcp_revoked", "mcp_expired"}:
+        raise HandoffError("MCP terminal package transition is invalid")
+    handoff_dir = verified["manifest_path"].parent
+    state = load_json(handoff_dir / "state.json")
+    session = state.get("mcp_session")
+    if not isinstance(session, dict):
+        raise HandoffError("MCP terminal package state is missing its session")
+    session_hash = require_sha256(session.get("session_id_sha256"), label="MCP session ID hash")
+    timestamp_key = "revoked_at" if status == "revoked" else "expired_at"
+    session.update(
+        {
+            "status": status,
+            timestamp_key: utc_now(),
+            "reason": reason,
+            **audit_summary_payload(summary),
+        }
+    )
+    state["revision"] += 1
+    state["updated_at"] = utc_now()
+    commit_state_receipt_event(
+        handoff_dir,
+        state,
+        event_type,
+        {
+            "phase_before": state["phase"],
+            "phase_after": state["phase"],
+            "session_id_sha256": session_hash,
+            "reason": reason,
+            "audit_final_sequence": summary.final_sequence,
+            "audit_final_head_sha256": summary.head_sha256,
+            "tool_calls": summary.tool_calls,
+            "disclosed_bytes": summary.disclosed_bytes,
+        },
+    )
+    return state
+
+
+@_with_package_lock(_first_handoff_arg)
+def stop_mcp_authorization(
+    handoff_dir: Path,
+    runtime_store: RuntimeStateStore,
+    *,
+    reason: str = "user_requested",
+) -> dict[str, Any]:
+    """Revoke content first and close the audit; never touches a process."""
+
+    if re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", reason) is None:
+        raise HandoffError("MCP stop reason is invalid")
+    verified = verify_package(handoff_dir)
+    session = verified["state"].get("mcp_session")
+    if not isinstance(session, dict):
+        raise HandoffError("This package has no MCP session to stop")
+    session_hash = require_sha256(session.get("session_id_sha256"), label="MCP session ID hash")
+    try:
+        current = assert_mcp_runtime_binding(
+            verified,
+            runtime_store.read(),
+            session_id_sha256=session_hash,
+            expected_statuses={"active", "revoking", "revoked", "expired", "faulted"},
+        )
+        if current["status"] == "revoked":
+            summary = audit_log_for(verified, session_hash).verify()
+            if not _terminal_audit_matches_runtime(current, summary):
+                raise HandoffError("Revoked MCP authorization does not match its terminal audit")
+            if session.get("status") == "active":
+                recovered_reason = str(current.get("revoked_reason") or "recovered_revoked")
+                _record_terminal_package_session(
+                    verified,
+                    status="revoked",
+                    event_type="mcp_revoked",
+                    reason=recovered_reason,
+                    summary=summary,
+                )
+            elif session.get("status") != "revoked":
+                raise HandoffError("Revoked MCP authorization conflicts with package session state")
+            return {"authorization": current, "audit": audit_summary_payload(summary)}
+        if current["status"] == "active":
+            # Validate existing evidence before the first stop-side mutation.
+            # If it is unavailable, the caller's emergency path faults only the
+            # exact global authorization and leaves every package byte untouched.
+            audit = audit_log_for(verified, session_hash)
+            audit.verify()
+            runtime_store.transition(session_hash, "active", "revoking")
+        elif current["status"] not in {"revoking", "expired", "faulted"}:
+            raise HandoffError("MCP authorization is not in a stoppable state")
+        else:
+            audit = audit_log_for(verified, session_hash)
+        summary = audit.append_footer(reason)
+        latest = runtime_store.read()
+        if latest is None or latest.get("session_id_sha256") != session_hash:
+            raise HandoffError("MCP authorization changed during revoke-first stop")
+        revoked = runtime_store.transition(
+            session_hash,
+            latest["status"],
+            "revoked",
+            updates={
+                "audit_final_sequence": summary.final_sequence,
+                "audit_final_head_sha256": summary.head_sha256,
+                "tool_calls": summary.tool_calls,
+                "disclosed_bytes": summary.disclosed_bytes,
+                "revoked_reason": reason,
+            },
+        )
+    except (RuntimeStateError, ToolError) as exc:
+        try:
+            latest = runtime_store.read()
+            if (
+                latest is not None
+                and latest.get("session_id_sha256") == session_hash
+                and latest.get("status") == "revoking"
+            ):
+                runtime_store.transition(session_hash, "revoking", "faulted")
+        except RuntimeStateError:
+            pass
+        raise runtime_failure(exc) from exc
+
+    _record_terminal_package_session(
+        verified,
+        status="revoked",
+        event_type="mcp_revoked",
+        reason=reason,
+        summary=summary,
+    )
+    return {"authorization": revoked, "audit": audit_summary_payload(summary)}
+
+
+def _runtime_handoff_identity(path: str | Path) -> str:
+    """Return the lexical absolute identity persisted at activation time.
+
+    Emergency denial must continue to work when package evidence has been
+    deleted or replaced.  It therefore cannot require the final path to exist
+    or follow a newly introduced symlink.  The activation record already
+    contains the canonical resolved path; an exact lexical match to that
+    immutable binding is sufficient for a deny-only transition.
+    """
+
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    return os.path.abspath(os.fspath(candidate))
+
+
+def deny_mcp_authorization_without_package(
+    handoff_dir: str | Path,
+    runtime_store: RuntimeStateStore,
+    *,
+    expected_session_id_sha256: str | None = None,
+    reason: str = "package_evidence_unavailable",
+) -> dict[str, Any]:
+    """Atomically deny one exact runtime binding without trusting package bytes.
+
+    This is deliberately a denial-only escape hatch.  It never reads or
+    rewrites manifest, state, receipt, archive, or audit evidence and never
+    signals a process.  The caller may subsequently request cooperative stop
+    through the exact session-bound control socket.
+    """
+
+    if re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", reason) is None:
+        raise HandoffError("MCP emergency-denial reason is invalid")
+    expected_session = (
+        require_sha256(
+            expected_session_id_sha256,
+            label="Expected MCP session ID hash",
+        )
+        if expected_session_id_sha256 is not None
+        else None
+    )
+    expected_handoff = _runtime_handoff_identity(handoff_dir)
+    try:
+        with runtime_store.locked() as transaction:
+            current = transaction.read()
+            if current is None:
+                raise HandoffError("No machine-global MCP authorization exists")
+            session_hash = require_sha256(
+                current.get("session_id_sha256"), label="MCP session ID hash"
+            )
+            if expected_session is not None and session_hash != expected_session:
+                raise HandoffError("Machine-global authorization belongs to a different session")
+            if current.get("handoff_dir") != expected_handoff:
+                raise HandoffError("Machine-global authorization belongs to a different handoff")
+            status = current.get("status")
+            if status in {"activating", "active", "revoking"}:
+                denied = dict(current)
+                denied.update(
+                    {
+                        "status": "faulted",
+                        "revision": int(current["revision"]) + 1,
+                        "updated_at": utc_now(),
+                        "orphaned_reason": reason,
+                        "audit_recovery_status": "unavailable",
+                    }
+                )
+                return transaction.write(denied)
+            if status == "faulted" and current.get("orphaned_reason") is None:
+                denied = dict(current)
+                denied.update(
+                    {
+                        "revision": int(current["revision"]) + 1,
+                        "updated_at": utc_now(),
+                        "orphaned_reason": reason,
+                        "audit_recovery_status": "unavailable",
+                    }
+                )
+                return transaction.write(denied)
+            if status in {"faulted", "revoked", "expired"}:
+                return current
+            raise HandoffError("Machine-global MCP authorization is not denyable")
+    except RuntimeStateError as exc:
+        raise runtime_failure(exc) from exc
+
+
+def revoke_mcp_authorization_fail_closed(
+    handoff_dir: str | Path,
+    runtime_store: RuntimeStateStore,
+    *,
+    expected_session_id_sha256: str | None = None,
+    reason: str = "user_requested",
+) -> dict[str, Any]:
+    """Close valid evidence normally, or deny globally without rewriting it."""
+
+    package_error: HandoffError | None = None
+    try:
+        checked_dir, verified = checked_schema3_handoff(str(handoff_dir))
+        if isinstance(verified["state"].get("mcp_session"), dict):
+            result = stop_mcp_authorization(checked_dir, runtime_store, reason=reason)
+        else:
+            result = recover_interrupted_mcp_activation(
+                checked_dir,
+                runtime_store,
+                reason=reason,
+            )
+        return {
+            **result,
+            "package_evidence_available": True,
+            "package_evidence_status": "verified",
+        }
+    except HandoffError as exc:
+        package_error = exc
+
+    try:
+        denied = deny_mcp_authorization_without_package(
+            handoff_dir,
+            runtime_store,
+            expected_session_id_sha256=expected_session_id_sha256,
+        )
+    except HandoffError:
+        assert package_error is not None
+        raise package_error
+    return {
+        "authorization": denied,
+        "audit": {
+            "valid": False,
+            "condition": "unavailable",
+            "code": "PACKAGE_EVIDENCE_UNAVAILABLE",
+        },
+        "package_evidence_available": False,
+        "package_evidence_status": "unavailable",
+    }
+
+
+@_with_package_lock(_first_handoff_arg)
+def expire_mcp_authorization(
+    handoff_dir: Path,
+    runtime_store: RuntimeStateStore,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Lazily deny an elapsed session and bind its terminal audit summary."""
+
+    verified = verify_package(handoff_dir)
+    session = verified["state"].get("mcp_session")
+    if not isinstance(session, dict):
+        raise HandoffError("This package has no MCP session to expire")
+    session_hash = require_sha256(session.get("session_id_sha256"), label="MCP session ID hash")
+    current_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    current_monotonic = time.monotonic()
+    try:
+        current = assert_mcp_runtime_binding(
+            verified,
+            runtime_store.read(),
+            session_id_sha256=session_hash,
+            expected_statuses={"active", "expired"},
+        )
+        audit = audit_log_for(verified, session_hash)
+        before = audit.verify()
+        activated_monotonic, expires_monotonic, last_activity_monotonic = (
+            _mcp_monotonic_bounds(current)
+        )
+        monotonic_reset = (
+            current_monotonic < activated_monotonic
+            or current_monotonic < last_activity_monotonic
+        )
+        session_expired = (
+            monotonic_reset
+            or current_monotonic >= expires_monotonic
+            or current_time
+            >= parse_utc_timestamp(current["expires_at"], label="MCP runtime expiry")
+        )
+        idle_expired = (
+            monotonic_reset
+            or current_monotonic
+            >= last_activity_monotonic + current["idle_ttl_seconds"]
+            or current_time
+            >= before.last_committed_at + timedelta(seconds=current["idle_ttl_seconds"])
+        )
+        if not session_expired and not idle_expired and current["status"] == "active":
+            return {
+                "expired": False,
+                "authorization": current,
+                "audit": audit_summary_payload(before),
+            }
+        reason = (
+            "monotonic_clock_reset"
+            if monotonic_reset
+            else "session_expired"
+            if session_expired
+            else "idle_timeout"
+        )
+        if current["status"] == "active":
+            current = runtime_store.transition(
+                session_hash,
+                "active",
+                "expired",
+                updates={"expired_reason": reason},
+            )
+        summary = audit.append_footer(reason)
+    except (RuntimeStateError, ToolError) as exc:
+        failed = load_json(handoff_dir / "state.json")
+        if isinstance(failed.get("mcp_session"), dict):
+            failed["mcp_session"]["status"] = "faulted"
+            failed["revision"] += 1
+            failed["updated_at"] = utc_now()
+            commit_state_receipt_event(
+                handoff_dir,
+                failed,
+                "mcp_recovery_recorded",
+                {
+                    "phase_before": failed["phase"],
+                    "phase_after": failed["phase"],
+                    "session_id_sha256": session_hash,
+                    "reason": "expiry_audit_failed",
+                    "error_code": exc.code,
+                },
+            )
+        raise runtime_failure(exc) from exc
+    if session.get("status") == "active":
+        _record_terminal_package_session(
+            verified,
+            status="expired",
+            event_type="mcp_expired",
+            reason=reason,
+            summary=summary,
+        )
+    return {
+        "expired": True,
+        "authorization": current,
+        "audit": audit_summary_payload(summary),
+    }
+
+
+def require_active_mcp_authorization(
+    verified: dict[str, Any], runtime_store: RuntimeStateStore
+) -> tuple[dict[str, Any], AuditSummary]:
+    session = verified["state"].get("mcp_session")
+    if not isinstance(session, dict) or session.get("status") != "active":
+        raise HandoffError("mcp-read requires an active package-specific MCP authorization")
+    session_hash = require_sha256(session.get("session_id_sha256"), label="MCP session ID hash")
+    try:
+        current = assert_mcp_runtime_binding(
+            verified,
+            runtime_store.read(),
+            session_id_sha256=session_hash,
+            expected_statuses={"active"},
+            require_unexpired=True,
+        )
+    except RuntimeStateError as exc:
+        raise runtime_failure(exc) from exc
+    if not controller_lease_is_live(runtime_store, session_hash):
+        raise HandoffError(
+            "CONTROLLER_ORPHANED: the exact foreground controller lease is not live; "
+            "run mcp-recover for this handoff before any submission or new activation"
+        )
+    try:
+        summary = audit_log_for(verified, session_hash).verify()
+    except ToolError as exc:
+        raise runtime_failure(exc) from exc
+    if (
+        summary.footer
+        or summary.header_sha256 != session.get("audit_header_sha256")
+        or current.get("audit_header_sha256") != summary.header_sha256
+    ):
+        raise HandoffError("Active MCP authorization does not match its open disclosure audit")
+    idle_expiry = summary.last_committed_at + timedelta(seconds=current["idle_ttl_seconds"])
+    activated_monotonic, _, last_activity_monotonic = _mcp_monotonic_bounds(current)
+    monotonic_now = time.monotonic()
+    if monotonic_now < activated_monotonic or monotonic_now < last_activity_monotonic:
+        raise HandoffError(
+            "Machine monotonic clock reset invalidated this authorization; run mcp-recover"
+        )
+    if (
+        monotonic_now >= last_activity_monotonic + current["idle_ttl_seconds"]
+        or datetime.now(timezone.utc) >= idle_expiry
+    ):
+        raise HandoffError("Machine-global MCP authorization reached its idle timeout")
+    return current, summary
+
+
+@_with_package_lock(_first_handoff_arg)
+def record_mcp_stopped(
+    handoff_dir: Path,
+    *,
+    session_id_sha256: str,
+    reason: str = "user_requested",
+) -> None:
+    verified = verify_package(handoff_dir)
+    state = verified["state"]
+    session = state.get("mcp_session")
+    if (
+        not isinstance(session, dict)
+        or session.get("session_id_sha256") != session_id_sha256
+        or session.get("status") not in {"revoked", "expired", "faulted"}
+    ):
+        raise HandoffError("Tunnel stop evidence does not match a terminal MCP authorization")
+    existing = receipt_events(verified["receipt"], "mcp_stopped")
+    if existing:
+        if len(existing) != 1 or existing[0]["data"].get("session_id_sha256") != session_id_sha256:
+            raise HandoffError("Existing MCP tunnel-stop receipt does not match this session")
+        return
+    state["mcp_session"]["tunnel_runtime_stopped"] = True
+    state["revision"] += 1
+    state["updated_at"] = utc_now()
+    commit_state_receipt_event(
+        handoff_dir,
+        state,
+        "mcp_stopped",
+        {
+            "phase_before": state["phase"],
+            "phase_after": state["phase"],
+            "session_id_sha256": session_id_sha256,
+            "reason": reason,
+            "tunnel_runtime_stopped": True,
+            "audit_final_sequence": session.get("audit_final_sequence"),
+            "audit_final_head_sha256": session.get("audit_head_sha256"),
+            "tool_calls": session.get("tool_calls", 0),
+            "disclosed_bytes": session.get("disclosed_bytes", 0),
+        },
+    )
+
+
+# Backward-compatible internal name for an early controller prototype.
+record_mcp_tunnel_stopped = record_mcp_stopped
+
+
 def next_action(phase: str, transport: str = "paste") -> str:
     approved_action = (
-        "stop: this foundation build cannot activate or submit mcp-read; use a later verified runtime build or prepare and approve a new supported transport"
+        "run the secretless mcp-probe, confirm its exact binary SHA-256 for any key-bearing profile/activation command, then use the attended foreground mcp-activate controller for this exact approved package; never switch channel without new approval"
         if transport == "mcp-read"
         else (
             "perform the approved visible ChatGPT Pro general Chat transport; "
@@ -2389,18 +4252,54 @@ def human_handoff_instructions(
     outbound_paths: list[dict[str, Any]],
     response_markers: dict[str, str],
     github: dict[str, Any] | None,
+    connector: dict[str, Any] | None,
 ) -> tuple[str, list[str], list[str], dict[str, Any]]:
     approved_paths = [item["path"] for item in outbound_paths]
     common_return = ["what was visibly observed", "whether the requested action was completed, declined, or blocked"]
-    if transport == "mcp-read":
+    if transport == "mcp-read" and not isinstance(connector, dict):
+        raise HandoffError("Schema-3 MCP connector metadata is missing")
+    if transport == "mcp-read" and reason == "account-or-workspace":
         return (
-            "This foundation build can approve an MCP disclosure contract but has no MCP runtime, active authorization, or Tunnel lifecycle.",
+            "Only the user can select the ChatGPT account and workspace approved for this exact mcp-read/browser package.",
             [
-                "Do not connect or authorize a Tunnel for this package and do not paste its prompt into ChatGPT.",
-                "Leave the package in approved state, or prepare a new github, paste, or text-file package and obtain a new approval.",
+                "Inspect the visible ChatGPT account and workspace without opening unrelated conversations.",
+                f"Select exactly the intended workspace labeled `{connector['workspace_label']}` for the app `{connector['app_name']}`, or decline.",
+                "Return before profile initialization, MCP activation, prompt paste, or Send; package-specific approval remains mandatory and unchanged.",
             ],
-            common_return + ["whether a later verified runtime build is available"],
-            {"allowed_outcomes": ["declined", "blocked"], "automatic_retry_allowed": False},
+            common_return + ["the exact visible account, workspace, and app labels"],
+            {"allowed_outcomes": ["completed", "declined", "blocked"], "automatic_retry_allowed": True},
+        )
+    if transport == "mcp-read" and reason == "app-authorization":
+        return (
+            "Developer Mode, ChatGPT app authorization, and the user-owned Tunnel profile cross account and local trust boundaries that require a person.",
+            [
+                "In the intended workspace, review Developer Mode and the visible app authorization yourself; do not automate login, MFA, CAPTCHA, OAuth, or key creation.",
+                f"Authorize only the app `{connector['app_name']}` in workspace `{connector['workspace_label']}` and verify it exposes only gptpro_package_info, gptpro_repo_search, and gptpro_repo_read.",
+                "Keep the Tunnel profile user-owned. Use only the explicitly selected binary whose SHA-256 was copied from the secretless mcp-probe; do not trust a PATH substitute.",
+                "Return before MCP activation or prompt submission. Do not change transport, connector, app, workspace, or disclosure scope under the existing approval.",
+            ],
+            common_return + ["the visible Developer Mode state, app name, workspace, and exact tool names"],
+            {"allowed_outcomes": ["completed", "declined", "blocked"], "automatic_retry_allowed": False},
+        )
+    if transport == "mcp-read" and reason == "manual-transport":
+        return (
+            "A person may submit the approved prompt only while this exact package's foreground MCP authorization is visibly active.",
+            [
+                "First confirm mcp-status identifies this exact package as active and the foreground controller is still live; otherwise do not paste or send anything.",
+                f"In workspace `{connector['workspace_label']}`, select app `{connector['app_name']}` and exactly this model/reasoning setting: {requested_model}.",
+                f"Paste the complete contents of the one approved prompt file: {approved_paths[0]}. Do not upload the ZIP or attach any other file.",
+                "Verify the package ID and response-marker request, then send exactly once. If submission is uncertain, do not retry.",
+            ],
+            [
+                "result: sent, not-sent, or unknown",
+                "the exact visible account, workspace, app, model, and reasoning labels",
+                "the ChatGPT conversation URL if a matching user turn is visibly present",
+            ],
+            {
+                "allowed_outcomes": ["sent", "not-sent", "unknown"],
+                "automatic_retry_allowed": False,
+                "on_sent": "run mark-submitted only after matching visible UI evidence",
+            },
         )
     if reason == "login":
         return (
@@ -2631,6 +4530,820 @@ def command_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def public_runtime_authorization(state: dict[str, Any] | None) -> dict[str, Any] | None:
+    if state is None:
+        return None
+    allowed = (
+        "schema_version",
+        "status",
+        "revision",
+        "package_id",
+        "session_id_sha256",
+        "manifest_sha256",
+        "approval_event_sha256",
+        "archive_sha256",
+        "file_set_sha256",
+        "tool_schema_sha256",
+        "protocol_profile",
+        "transport",
+        "delivery_channel",
+        "connector_type",
+        "tunnel_runtime_alias",
+        "tunnel_id_binding_sha256",
+        "tunnel_profile_sha256",
+        "tunnel_client_binary_sha256",
+        "mcp_target_sha256",
+        "mcp_runtime_tree_sha256",
+        "workspace_binding_confirmed",
+        "activated_at",
+        "expires_at",
+        "idle_ttl_seconds",
+        "audit_header_sha256",
+        "audit_final_sequence",
+        "audit_final_head_sha256",
+        "tool_calls",
+        "disclosed_bytes",
+        "revoked_reason",
+        "expired_reason",
+        "orphaned_reason",
+        "audit_recovery_status",
+    )
+    return {key: state[key] for key in allowed if key in state}
+
+
+def tunnel_client_for(args: argparse.Namespace) -> TunnelClient:
+    raw = getattr(args, "tunnel_client", None)
+    if raw:
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            raise HandoffError("--tunnel-client must be an absolute path")
+        selected: Path | None = path
+    else:
+        selected = None
+    try:
+        return TunnelClient(selected)
+    except TunnelClientError as exc:
+        raise HandoffError(f"{exc.code}: {exc.message}") from exc
+
+
+def web_mcp_platform_report() -> dict[str, Any]:
+    """Return the centrally enforced phase-3 runtime prerequisite."""
+
+    supported = sys.platform == "darwin" and sys.version_info >= WEB_MCP_MINIMUM_PYTHON
+    return {
+        "system": platform.system(),
+        "machine": platform.machine(),
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "supported": supported,
+        "minimum_python": ".".join(str(part) for part in WEB_MCP_MINIMUM_PYTHON),
+        "required_system": "macOS",
+    }
+
+
+def require_web_mcp_runtime_platform() -> None:
+    """Fail before any credential resolution or key-bearing child command."""
+
+    report = web_mcp_platform_report()
+    if not report["supported"]:
+        raise HandoffError(
+            "RUNTIME_UNSUPPORTED_PLATFORM: Web MCP requires macOS with Python 3.11 or newer"
+        )
+
+
+def confirmed_key_bearing_tunnel_client(
+    args: argparse.Namespace,
+) -> tuple[TunnelClient, TunnelCapabilities]:
+    """Require an explicit, probe-confirmed binary before resolving any secret reference."""
+
+    raw_path = getattr(args, "tunnel_client", None)
+    if not isinstance(raw_path, str) or not raw_path:
+        raise HandoffError(
+            "Key-bearing Tunnel commands require an explicit absolute --tunnel-client path"
+        )
+    path = Path(raw_path)
+    if not path.is_absolute():
+        raise HandoffError(
+            "Key-bearing Tunnel commands require an explicit absolute --tunnel-client path"
+        )
+    confirmed_hash = require_sha256(
+        getattr(args, "confirm_tunnel_client_sha256", None),
+        label="Confirmed Tunnel client binary hash",
+    )
+    try:
+        client = TunnelClient(path)
+        capabilities = client.probe()
+    except TunnelClientError as exc:
+        raise HandoffError(f"{exc.code}: {exc.message}") from exc
+    if not secrets.compare_digest(capabilities.binary_sha256, confirmed_hash):
+        raise HandoffError(
+            "Confirmed Tunnel client binary hash does not match the selected binary"
+        )
+    return client, capabilities
+
+
+def command_mcp_profile_init(args: argparse.Namespace) -> int:
+    """Run the official attended profile initializer after an exact binary trust gate."""
+
+    require_web_mcp_runtime_platform()
+    client, capabilities = confirmed_key_bearing_tunnel_client(args)
+    if not capabilities.supported:
+        raise HandoffError(
+            "TUNNEL_CLIENT_UNSUPPORTED: the selected Tunnel client lacks required capabilities"
+        )
+    try:
+        initialized = client.init_profile_attended(
+            args.tunnel_profile,
+            env=os.environ,
+            tunnel_id_reference=args.tunnel_id_ref,
+            control_plane_api_key_reference=args.runtime_api_key_ref,
+            mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+            profile_dir=tunnel_profile_dir_for(args),
+        )
+    except TunnelClientError as exc:
+        raise HandoffError(f"{exc.code}: {exc.message}") from exc
+    print(
+        json.dumps(
+            {
+                "operation": "mcp-profile-init",
+                "ok": initialized.ok,
+                "code": initialized.code,
+                "tunnel_profile": args.tunnel_profile,
+                "tunnel_profile_sha256": initialized.profile_sha256,
+                "profile_dir_sha256": initialized.profile_dir_sha256,
+                "mcp_command_sha256": initialized.mcp_command_sha256,
+                "tunnel_client_binary_sha256": capabilities.binary_sha256,
+                "attended": True,
+            },
+            sort_keys=True,
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+    return 0 if initialized.ok else 2
+
+
+def tunnel_profile_dir_for(args: argparse.Namespace) -> Path | None:
+    raw = getattr(args, "profile_dir", None)
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise HandoffError("--profile-dir must be an absolute path")
+    return path
+
+
+def command_mcp_probe(args: argparse.Namespace) -> int:
+    platform_report = web_mcp_platform_report()
+    payload: dict[str, Any] = {
+        "ok": bool(platform_report["supported"]),
+        "operation": "mcp-probe",
+        "side_effects": {
+            "conversation_or_repository_disclosure": False,
+            "disclosure_claim_scope": "gptpro_wrapper_only",
+            "credential_resolution": False,
+            "local_runtime_setup": "may_create_owner_only_runtime_directory_and_lock_file",
+            "tunnel_client_execution": {
+                "may_execute": bool(platform_report["supported"]),
+                "purpose": "bounded_version_and_help_capability_subprocesses",
+                "trust_requirement": "selected_or_path_discovered_binary_must_be_user_reviewed_and_trusted",
+            },
+        },
+        "platform": platform_report,
+        "skill": {
+            "loaded_path_sha256": sha256_bytes(str(SKILL_ROOT).encode("utf-8")),
+            "runtime_tree_sha256": mcp_runtime_tree_sha256(),
+        },
+        "protocol": {
+            "profile": MCP_PROTOCOL_PROFILE,
+            "tool_schema_sha256": tool_schema_sha256(),
+            "tool_count": len(MCP_TOOL_NAMES),
+        },
+        "developer_mode": "human_check_required",
+        "chatgpt_app_binding": "human_check_required",
+        "profile_check": "deferred_to_explicitly_confirmed_key_bearing_command",
+    }
+    if platform_report["supported"]:
+        try:
+            store = runtime_store_for()
+            payload["authorization"] = public_runtime_authorization(store.read())
+            payload["runtime_state_safe"] = True
+        except (HandoffError, RuntimeStateError) as exc:
+            payload["ok"] = False
+            payload["runtime_state_safe"] = False
+            payload["runtime_state_error"] = getattr(exc, "code", "RUNTIME_STATE_UNSAFE")
+    else:
+        payload["authorization"] = None
+        payload["runtime_state_safe"] = False
+        payload["runtime_state_error"] = "RUNTIME_UNSUPPORTED_PLATFORM"
+
+    if not platform_report["supported"]:
+        payload["tunnel_client"] = {
+            "found": False,
+            "code": "RUNTIME_UNSUPPORTED_PLATFORM",
+        }
+    else:
+        try:
+            client = tunnel_client_for(args)
+            capabilities = client.probe()
+            payload["tunnel_client"] = {
+                "found": True,
+                "binary_sha256": capabilities.binary_sha256,
+                "version": capabilities.version,
+                "foreground_run": capabilities.foreground_run,
+                "doctor_profile": capabilities.doctor_profile,
+                "health_require_control_plane_poll": capabilities.health_require_control_plane_poll,
+                "health_unix_socket": capabilities.health_unix_socket,
+                "health_exact_pid": capabilities.health_exact_pid,
+                "warn_log_level": capabilities.warn_log_level,
+                "supported": capabilities.supported,
+            }
+            payload["ok"] = payload["ok"] and bool(payload["tunnel_client"]["supported"])
+            payload["tunnel_profile"] = {
+                "checked": False,
+                "reason": "profile_check_deferred_to_confirmed_activation",
+            }
+        except (HandoffError, TunnelClientError) as exc:
+            payload["ok"] = False
+            payload["tunnel_client"] = {
+                "found": False,
+                "code": getattr(exc, "code", "TUNNEL_CLIENT_UNAVAILABLE"),
+            }
+    print(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False))
+    return 0 if payload["ok"] else 2
+
+
+def command_mcp_activate(args: argparse.Namespace) -> int:
+    """Run the approved package through one attended foreground Tunnel session."""
+
+    require_web_mcp_runtime_platform()
+    handoff_dir, verified = checked_schema3_handoff(args.handoff_dir, phase="approved")
+    client, capabilities = confirmed_key_bearing_tunnel_client(args)
+    try:
+        if not capabilities.supported or not capabilities.health_require_control_plane_poll:
+            raise TunnelClientError(
+                "TUNNEL_CLIENT_UNSUPPORTED",
+                "The official tunnel-client lacks required foreground or control-plane health capabilities.",
+            )
+        env = runtime_key_environment(args.runtime_api_key_ref)
+        manifest = verified["manifest"]
+        check = client.doctor(
+            args.tunnel_profile,
+            env=env,
+            profile_dir=tunnel_profile_dir_for(args),
+            package_id=manifest["package_id"],
+            expected_tunnel_binding_sha256=manifest["connector"]["tunnel_id_binding_sha256"],
+            expected_mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+        )
+    except TunnelClientError as exc:
+        raise HandoffError(f"{exc.code}: {exc.message}") from exc
+    if (
+        not check.ok
+        or check.tunnel_binding_matches is not True
+        or check.tunnel_binding_sha256 is None
+        or check.mcp_target_matches is not True
+        or check.mcp_target_sha256 is None
+    ):
+        raise HandoffError(f"{check.code or 'TUNNEL_NOT_ASSOCIATED'}: Tunnel profile preflight failed")
+    preflight = mcp_activation_preflight(
+        verified,
+        tunnel_profile=args.tunnel_profile,
+        observed_tunnel_binding_sha256=check.tunnel_binding_sha256,
+        observed_tunnel_profile_sha256=check.profile_sha256,
+        observed_tunnel_client_binary_sha256=capabilities.binary_sha256,
+        observed_mcp_target_sha256=check.mcp_target_sha256,
+        observed_mcp_runtime_tree_sha256=mcp_runtime_tree_sha256(),
+        profile_binding_verification=check.profile_binding_verification,
+        workspace_binding_confirmed=args.confirm_workspace_binding,
+    )
+    store = runtime_store_for()
+    try:
+        current = store.read()
+    except RuntimeStateError as exc:
+        raise runtime_failure(exc) from exc
+    if current is not None and current.get("status") in {"activating", "active", "revoking"}:
+        current_session = require_sha256(
+            current.get("session_id_sha256"), label="Active MCP session ID hash"
+        )
+        if not controller_lease_is_live(store, current_session):
+            raise HandoffError(
+                "CONTROLLER_ORPHANED: the previous foreground controller lease is not live; "
+                "run mcp-recover for its exact handoff before activating a new package"
+            )
+        raise HandoffError("SESSION_CONFLICT: Another package authorization is already live")
+
+    controller_session_id_sha256: str | None = None
+
+    def begin(session_id_sha256: str) -> dict[str, Any]:
+        nonlocal controller_session_id_sha256
+        controller_session_id_sha256 = session_id_sha256
+        latest = verify_package(handoff_dir)
+        require_phase(latest["state"], "approved")
+        return begin_mcp_activation(
+            latest,
+            store,
+            session_id_sha256=session_id_sha256,
+            preflight=preflight,
+        )
+
+    def complete(session_id_sha256: str, audit_header_sha256: str) -> dict[str, Any]:
+        return complete_mcp_activation(
+            handoff_dir,
+            store,
+            session_id_sha256=session_id_sha256,
+            audit_header_sha256=audit_header_sha256,
+            successful_control_plane_poll_observed=True,
+        )
+
+    def fail(session_id_sha256: str, error_code: str) -> None:
+        fail_mcp_activation(
+            handoff_dir,
+            store,
+            session_id_sha256=session_id_sha256,
+            error_code=error_code,
+        )
+
+    def revoke(reason: str) -> dict[str, Any]:
+        return revoke_mcp_authorization_fail_closed(
+            handoff_dir,
+            store,
+            expected_session_id_sha256=controller_session_id_sha256,
+            reason=reason,
+        )
+
+    def record_stopped(session_id_sha256: str, reason: str) -> None:
+        record_mcp_stopped(
+            handoff_dir,
+            session_id_sha256=session_id_sha256,
+            reason=reason,
+        )
+
+    def announce_active(session: ActiveSession) -> None:
+        active = store.read()
+        payload = {
+            "event": "mcp_active",
+            "status": session.status,
+            "package_id": manifest["package_id"],
+            "session_id_sha256": session.session_id_sha256,
+            "control_plane_poll_confirmed": session.control_plane_poll_confirmed,
+            "expires_at": active.get("expires_at") if isinstance(active, dict) else None,
+            "foreground_controller_running": True,
+        }
+        print(json.dumps(payload, sort_keys=True, ensure_ascii=False), flush=True)
+
+    hooks = ControllerHooks(
+        begin_activation=begin,
+        complete_activation=complete,
+        fail_activation=fail,
+        revoke_authorization=revoke,
+        record_stopped=record_stopped,
+        on_active=announce_active,
+    )
+    try:
+        result = run_foreground(
+            tunnel_client=RuntimeIdentityBoundTunnelClient(
+                client,
+                tunnel_client_binary_sha256=preflight["tunnel_client_binary_sha256"],
+                mcp_target_sha256=preflight["mcp_target_sha256"],
+                mcp_runtime_tree_sha256_value=preflight["mcp_runtime_tree_sha256"],
+            ),
+            runtime_store=store,
+            tunnel_profile=args.tunnel_profile,
+            child_environment=env,
+            hooks=hooks,
+            profile_dir=tunnel_profile_dir_for(args),
+            ready_timeout=float(args.ready_timeout),
+        )
+    except (ControllerError, TunnelClientError, RuntimeStateError) as exc:
+        raise HandoffError(f"{exc.code}: {exc.message}") from exc
+    print(
+        json.dumps(
+            {
+                "event": "mcp_stopped",
+                "status": result.status,
+                "package_id": manifest["package_id"],
+                "session_id_sha256": result.session_id_sha256,
+                "stop_reason": result.stop_reason,
+                "control_plane_poll_confirmed": result.control_plane_poll_confirmed,
+                "authorization_revoked": result.authorization_revoked,
+                "tunnel_runtime_stopped": result.stopped_recorded,
+                "forced_exact_child": result.forced_exact_child,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+    return 0
+
+
+def mcp_audit_status(verified: dict[str, Any]) -> dict[str, Any]:
+    session = verified["state"].get("mcp_session")
+    if not isinstance(session, dict):
+        raise HandoffError("This package has no MCP session audit to verify")
+    session_hash = require_sha256(session.get("session_id_sha256"), label="MCP session ID hash")
+    try:
+        summary = audit_log_for(verified, session_hash).verify()
+    except ToolError as exc:
+        raise runtime_failure(exc) from exc
+    if summary.header_sha256 != session.get("audit_header_sha256"):
+        raise HandoffError("MCP audit header does not match package session state")
+    terminal = session.get("status") in {"revoked", "expired"}
+    if terminal and (
+        not summary.footer
+        or session.get("audit_final_sequence") != summary.final_sequence
+        or session.get("audit_head_sha256") != summary.head_sha256
+        or session.get("tool_calls") != summary.tool_calls
+        or session.get("disclosed_bytes") != summary.disclosed_bytes
+    ):
+        raise HandoffError("MCP terminal package state does not match its audit footer")
+    if not terminal and summary.footer:
+        raise HandoffError("MCP non-terminal package session has a closed audit")
+    return {"valid": True, **audit_summary_payload(summary)}
+
+
+def command_mcp_verify_audit(args: argparse.Namespace) -> int:
+    _, verified = checked_schema3_handoff(args.handoff_dir)
+    payload = {
+        "package_id": verified["manifest"]["package_id"],
+        "session_status": verified["state"]["mcp_session"]["status"],
+        "audit": mcp_audit_status(verified),
+    }
+    print(json.dumps(payload, sort_keys=True, indent=2))
+    return 0
+
+
+def command_mcp_status(args: argparse.Namespace) -> int:
+    store = runtime_store_for()
+    try:
+        current = store.read()
+    except RuntimeStateError as exc:
+        raise runtime_failure(exc) from exc
+    controller_required = bool(
+        current is not None and current.get("status") in {"activating", "active", "revoking"}
+    )
+    controller_live: bool | None = None
+    if controller_required:
+        session_hash = require_sha256(
+            current.get("session_id_sha256"), label="MCP session ID hash"
+        )
+        controller_live = controller_lease_is_live(store, session_hash)
+    orphaned = controller_required and controller_live is False
+    payload: dict[str, Any] = {
+        "authorization": public_runtime_authorization(current),
+        "audit": None,
+        "controller": {
+            "required": controller_required,
+            "lease_live": controller_live,
+            "status": (
+                "orphaned" if orphaned else "live" if controller_live is True else "not_required"
+            ),
+        },
+        "orphaned": orphaned,
+        "effective_authorized": False,
+        "split_brain": bool(orphaned),
+        "recovery_actions": [],
+    }
+    if orphaned:
+        payload["recovery_actions"].append("run_mcp_recover_for_exact_handoff")
+        payload["orphan_child_may_remain"] = True
+    verified: dict[str, Any] | None = None
+    if args.handoff_dir:
+        _, verified = checked_schema3_handoff(args.handoff_dir)
+    elif current is not None and isinstance(current.get("handoff_dir"), str):
+        try:
+            _, verified = checked_schema3_handoff(current["handoff_dir"])
+        except HandoffError:
+            payload["split_brain"] = True
+            payload["recovery_actions"].append("inspect_or_revoke_missing_active_package")
+            payload["package_error"] = "PACKAGE_UNAVAILABLE_OR_INVALID"
+    if current is not None and verified is not None:
+        session = verified["state"].get("mcp_session")
+        failed_without_session = (
+            session is None
+            and current.get("status") == "faulted"
+            and any(
+                isinstance(event.get("data"), dict)
+                and event["data"].get("session_id_sha256") == current.get("session_id_sha256")
+                for event in receipt_events(verified["receipt"], "mcp_activation_failed")
+            )
+        )
+        activation_in_progress = (
+            session is None and current.get("status") == "activating" and controller_live is True
+        )
+        if failed_without_session:
+            payload["audit"] = {
+                "valid": False,
+                "condition": current.get("audit_recovery_status", "unavailable"),
+                "code": "ACTIVATION_FAILED_BEFORE_PACKAGE_SESSION",
+            }
+            payload["recovery_actions"].append("prepare_a_new_package")
+        elif activation_in_progress:
+            payload["activation_in_progress"] = True
+        elif not isinstance(session, dict) or session.get("session_id_sha256") != current.get(
+            "session_id_sha256"
+        ):
+            payload["split_brain"] = True
+            payload["recovery_actions"].append("stop_exact_authorization_before_new_activation")
+        elif (
+            current.get("status") == "active"
+            and session.get("status") == "active"
+            and controller_live is True
+        ):
+            expiry = expire_mcp_authorization(
+                verified["manifest_path"].parent,
+                store,
+            )
+            current = expiry["authorization"]
+            payload["authorization"] = public_runtime_authorization(current)
+            payload["audit"] = expiry["audit"]
+            payload["expired_lazily"] = expiry["expired"]
+            if expiry["expired"]:
+                payload["recovery_actions"].append("stop_foreground_tunnel_controller")
+        else:
+            try:
+                payload["audit"] = mcp_audit_status(verified)
+            except HandoffError:
+                payload["audit"] = {"valid": False, "code": "AUDIT_OR_STATE_MISMATCH"}
+                payload["split_brain"] = True
+                payload["recovery_actions"].append("verify_audit_then_run_mcp_stop")
+            if current.get("status") != session.get("status"):
+                payload["split_brain"] = True
+                payload["recovery_actions"].append("run_mcp_stop_for_exact_package")
+        payload["package"] = {
+            "package_id": verified["manifest"]["package_id"],
+            "phase": verified["state"]["phase"],
+            "session_status": session.get("status") if isinstance(session, dict) else None,
+        }
+    elif verified is not None:
+        session = verified["state"].get("mcp_session")
+        payload["package"] = {
+            "package_id": verified["manifest"]["package_id"],
+            "phase": verified["state"]["phase"],
+            "session_status": session.get("status") if isinstance(session, dict) else None,
+        }
+        if isinstance(session, dict) and session.get("status") in {"activating", "active", "revoking"}:
+            payload["split_brain"] = True
+            payload["recovery_actions"].append("revoke_or_recover_missing_global_authorization")
+    package_session = (
+        verified["state"].get("mcp_session") if verified is not None else None
+    )
+    payload["effective_authorized"] = bool(
+        current is not None
+        and current.get("status") == "active"
+        and controller_live is True
+        and isinstance(package_session, dict)
+        and package_session.get("status") == "active"
+        and package_session.get("session_id_sha256") == current.get("session_id_sha256")
+        and not payload["split_brain"]
+    )
+    payload["recovery_actions"] = list(dict.fromkeys(payload["recovery_actions"]))
+    print(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False))
+    return 0
+
+
+def command_mcp_stop(args: argparse.Namespace) -> int:
+    store = runtime_store_for()
+    result = revoke_mcp_authorization_fail_closed(args.handoff_dir, store)
+    session_hash = require_sha256(
+        result["authorization"].get("session_id_sha256"), label="MCP session ID hash"
+    )
+    try:
+        stop_requested = request_cooperative_stop(
+            control_socket_path(store.root),
+            session_hash,
+        )
+    except (ControllerError, RuntimeStateError):
+        stop_requested = False
+    stopped = False
+    stop_evidence: str | None = None
+    controller_lease_released = False
+    if stop_requested:
+        deadline = time.monotonic() + 7.0
+        while time.monotonic() < deadline:
+            if result["package_evidence_available"]:
+                try:
+                    latest = verify_package(Path(args.handoff_dir))["state"].get("mcp_session")
+                except HandoffError:
+                    latest = None
+                if isinstance(latest, dict) and latest.get("tunnel_runtime_stopped") is True:
+                    stopped = True
+                    stop_evidence = "package_receipt"
+                    break
+            elif not controller_lease_is_live(store, session_hash):
+                controller_lease_released = True
+                break
+            time.sleep(0.05)
+    print(
+        json.dumps(
+            {
+                "status": (
+                    "authorization_revoked"
+                    if result["authorization"].get("status") == "revoked"
+                    else "authorization_denied"
+                ),
+                "authorization": public_runtime_authorization(result["authorization"]),
+                "audit": result["audit"],
+                "package_evidence_available": result["package_evidence_available"],
+                "package_evidence_status": result["package_evidence_status"],
+                "cooperative_stop_requested": stop_requested,
+                "tunnel_runtime_stopped": stopped,
+                "stop_evidence": stop_evidence,
+                "controller_lease_released": controller_lease_released,
+                "exact_tunnel_process_status": (
+                    "stopped"
+                    if stopped
+                    else "unconfirmed"
+                    if controller_lease_released
+                    else "controller_stop_pending"
+                ),
+                "manual_process_review_required": controller_lease_released and not stopped,
+                "foreground_controller_stop_required": not (
+                    stopped or controller_lease_released
+                ),
+            },
+            sort_keys=True,
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _retire_stale_control_socket(runtime_store: RuntimeStateStore) -> dict[str, Any]:
+    """Remove only an owner-only socket proven to have no listening endpoint."""
+
+    try:
+        path = control_socket_path(runtime_store.root)
+    except (ControllerError, RuntimeStateError):
+        return {"status": "unsafe", "retired": False, "listener_present": None}
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return {"status": "absent", "retired": False, "listener_present": False}
+    except OSError:
+        return {"status": "ambiguous", "retired": False, "listener_present": None}
+    if (
+        not stat.S_ISSOCK(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != 0o600
+    ):
+        return {"status": "unsafe", "retired": False, "listener_present": None}
+
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(0.5)
+    try:
+        probe.connect(str(path))
+    except FileNotFoundError:
+        return {"status": "absent", "retired": False, "listener_present": False}
+    except OSError as exc:
+        if exc.errno not in {errno.ECONNREFUSED, errno.ENOENT}:
+            return {"status": "ambiguous", "retired": False, "listener_present": None}
+    else:
+        return {"status": "listener_present", "retired": False, "listener_present": True}
+    finally:
+        probe.close()
+
+    try:
+        after = path.lstat()
+    except FileNotFoundError:
+        return {"status": "absent", "retired": False, "listener_present": False}
+    except OSError:
+        return {"status": "ambiguous", "retired": False, "listener_present": None}
+    if (
+        (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+        or not stat.S_ISSOCK(after.st_mode)
+        or after.st_uid != os.getuid()
+        or stat.S_IMODE(after.st_mode) != 0o600
+    ):
+        return {"status": "changed", "retired": False, "listener_present": None}
+    try:
+        path.unlink()
+        fsync_directory(runtime_store.root)
+    except (OSError, RuntimeStateError):
+        return {"status": "retire_failed", "retired": False, "listener_present": False}
+    return {"status": "retired", "retired": True, "listener_present": False}
+
+
+def command_mcp_recover(args: argparse.Namespace) -> int:
+    """Deny an orphaned controller session without discovering or killing a process."""
+
+    if not args.confirm_controller_lost:
+        raise HandoffError("Orphan recovery requires --confirm-controller-lost")
+    handoff_dir = validate_handoff_dir(args.handoff_dir)
+    store = runtime_store_for()
+    try:
+        current = store.read()
+    except RuntimeStateError as exc:
+        raise runtime_failure(exc) from exc
+    if current is None:
+        raise HandoffError("No machine-global MCP authorization exists")
+    session_hash = require_sha256(
+        current.get("session_id_sha256"), label="MCP session ID hash"
+    )
+    if current.get("handoff_dir") != str(handoff_dir.resolve()):
+        raise HandoffError("Machine-global authorization belongs to a different handoff")
+    try:
+        recovery_lease = ControllerLease(store, session_hash).acquire()
+    except RuntimeStateError as exc:
+        if exc.code == "SESSION_CONFLICT":
+            raise HandoffError("The exact foreground controller is still live; use mcp-stop") from exc
+        raise HandoffError(
+            "Unable to prove that the exact foreground controller is gone; recovery refused"
+        ) from exc
+
+    package_recovered = False
+    recovery_mode = "global_only_faulted"
+    audit: dict[str, Any] | None = None
+    control_socket: dict[str, Any]
+    try:
+        latest = store.read()
+        if (
+            latest is None
+            or latest.get("session_id_sha256") != session_hash
+            or latest.get("handoff_dir") != str(handoff_dir.resolve())
+        ):
+            raise HandoffError("Machine-global authorization changed during orphan recovery")
+        current = latest
+        control_socket = _retire_stale_control_socket(store)
+
+        try:
+            verified = verify_package(handoff_dir)
+        except HandoffError:
+            verified = None
+        if verified is not None and current.get("status") in {
+            "activating",
+            "active",
+            "revoking",
+            "faulted",
+        }:
+            audit_condition, _, audit_error = _inspect_orphan_audit(verified, session_hash)
+            if audit_condition == "valid":
+                recovered = recover_interrupted_mcp_activation(
+                    handoff_dir,
+                    store,
+                    reason="controller_lost",
+                )
+            elif (
+                verified["state"].get("mcp_session") is None
+                and current.get("status") in {"activating", "faulted"}
+            ):
+                recovered = _fault_pre_audit_mcp_activation(
+                    verified,
+                    store,
+                    session_id_sha256=session_hash,
+                    audit_condition=audit_condition,
+                    audit_error_code=audit_error or "AUDIT_CHAIN_INVALID",
+                )
+            else:
+                raise HandoffError(
+                    "Orphan recovery cannot close missing or corrupt audit evidence after package activation; "
+                    "authorization remains fail-closed for manual inspection"
+                )
+            current = recovered["authorization"]
+            audit = recovered["audit"]
+            recovery_mode = recovered.get("recovery_mode", "audit_closed")
+            package_recovered = True
+        elif verified is None and current.get("status") in {"activating", "active", "revoking"}:
+            try:
+                current = store.transition(
+                    session_hash,
+                    current["status"],
+                    "faulted",
+                    updates={"orphaned_reason": "controller_lost_package_unavailable"},
+                )
+            except RuntimeStateError as exc:
+                raise runtime_failure(exc) from exc
+        elif current.get("status") not in {"faulted", "revoked", "expired"}:
+            raise HandoffError("Machine-global authorization is not recoverable")
+    finally:
+        recovery_lease.close()
+
+    if control_socket["status"] in {"listener_present", "ambiguous", "unsafe", "changed", "retire_failed"}:
+        next_action = "inspect_the_orphan_controller_or_socket_then_confirm_tunnel_termination"
+    else:
+        next_action = "confirm_orphan_tunnel_process_termination_then_prepare_a_new_package"
+
+    print(
+        json.dumps(
+            {
+                "status": "orphan_authorization_denied",
+                "authorization": public_runtime_authorization(current),
+                "package_evidence_recovered": package_recovered,
+                "recovery_mode": recovery_mode,
+                "audit": audit,
+                "control_socket": control_socket,
+                "tunnel_runtime_stopped": False,
+                "orphan_child_may_remain": True,
+                "process_discovery_attempted": False,
+                "process_signal_attempted": False,
+                "next_action": next_action,
+            },
+            sort_keys=True,
+            indent=2,
+        )
+    )
+    return 0
+
+
 def command_human_handoff(args: argparse.Namespace) -> int:
     handoff_dir = validate_handoff_dir(args.handoff_dir)
     verified = verify_package(handoff_dir)
@@ -2651,6 +5364,7 @@ def command_human_handoff(args: argparse.Namespace) -> int:
         outbound_paths=outbound_paths,
         response_markers=manifest["response_markers"],
         github=manifest["transport"].get("github"),
+        connector=manifest.get("connector"),
     )
     payload = {
         "status": "human_action_required",
@@ -2687,6 +5401,7 @@ def require_phase(state: dict[str, Any], expected: str) -> None:
         raise HandoffError(f"Expected phase {expected!r}, found {state.get('phase')!r}")
 
 
+@_with_package_lock(_command_handoff_arg)
 def command_approve(args: argparse.Namespace) -> int:
     if not args.confirm_transmission:
         raise HandoffError("Approval requires --confirm-transmission after the user approves the exact outbound text")
@@ -2739,12 +5454,12 @@ def command_approve(args: argparse.Namespace) -> int:
     state["approval"] = approval
     if schema_version == SCHEMA_V3:
         state["revision"] += 1
-    write_json(handoff_dir / "state.json", state)
-    append_receipt_event(handoff_dir, "approved", approval)
+    commit_state_receipt_event(handoff_dir, state, "approved", approval)
     print(json.dumps({"package_id": state["package_id"], "phase": "approved"}, indent=2))
     return 0
 
 
+@_with_package_lock(_command_handoff_arg)
 def command_mark_submitted(args: argparse.Namespace) -> int:
     if not args.confirm_sent:
         raise HandoffError("Submission recording requires --confirm-sent after visible UI confirmation")
@@ -2787,8 +5502,7 @@ def command_mark_submitted(args: argparse.Namespace) -> int:
             raise HandoffError("Observed ChatGPT app does not match the approved connector")
         if args.observed_workspace_label != connector["workspace_label"]:
             raise HandoffError("Observed ChatGPT workspace does not match the approved connector")
-        if not isinstance(state.get("mcp_session"), dict) or state["mcp_session"].get("status") != "active":
-            raise HandoffError("mcp-read submission requires an active package-specific MCP authorization")
+        require_active_mcp_authorization(verified, runtime_store_for())
     submission = {
         "submitted_at": utc_now(),
         "destination": verified["manifest"]["destination"],
@@ -2813,8 +5527,7 @@ def command_mark_submitted(args: argparse.Namespace) -> int:
     state["submission"] = submission
     if schema_version == SCHEMA_V3:
         state["revision"] += 1
-    write_json(handoff_dir / "state.json", state)
-    append_receipt_event(handoff_dir, "submitted", submission)
+    commit_state_receipt_event(handoff_dir, state, "submitted", submission)
     print(json.dumps({"package_id": state["package_id"], "phase": "submitted"}, indent=2))
     return 0
 
@@ -2843,7 +5556,7 @@ def github_response_attestation(response: str, github: dict[str, Any]) -> dict[s
         raise HandoffError("GitHub response must contain exactly one GPTPRO_GITHUB_ATTESTATION line")
     try:
         attestation = json.loads(matches[0])
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
         raise HandoffError("GitHub response attestation must contain valid compact JSON") from exc
     if not isinstance(attestation, dict):
         raise HandoffError("GitHub response attestation must be a JSON object")
@@ -2869,6 +5582,7 @@ def github_response_attestation(response: str, github: dict[str, Any]) -> dict[s
     return attestation
 
 
+@_with_package_lock(_command_handoff_arg)
 def command_import_response(args: argparse.Namespace) -> int:
     handoff_dir = validate_handoff_dir(args.handoff_dir)
     verified = verify_package(handoff_dir)
@@ -2897,8 +5611,7 @@ def command_import_response(args: argparse.Namespace) -> int:
     state["response"] = response_state
     if state["schema_version"] == SCHEMA_V3:
         state["revision"] += 1
-    write_json(handoff_dir / "state.json", state)
-    append_receipt_event(handoff_dir, "response_imported", response_state)
+    commit_state_receipt_event(handoff_dir, state, "response_imported", response_state)
     print(
         json.dumps(
             {"package_id": state["package_id"], "phase": "response_imported", "response_path": str(response_path)},
@@ -2908,6 +5621,7 @@ def command_import_response(args: argparse.Namespace) -> int:
     return 0
 
 
+@_with_package_lock(_command_handoff_arg)
 def command_record_evaluation(args: argparse.Namespace) -> int:
     if not args.summary.strip() or any(not item.strip() for item in args.evidence):
         raise HandoffError("Evaluation summary and evidence entries must not be empty")
@@ -2942,8 +5656,7 @@ def command_record_evaluation(args: argparse.Namespace) -> int:
     state["evaluation"] = evaluation_state
     if state["schema_version"] == SCHEMA_V3:
         state["revision"] += 1
-    write_json(handoff_dir / "state.json", state)
-    append_receipt_event(handoff_dir, "evaluated", evaluation_state)
+    commit_state_receipt_event(handoff_dir, state, "evaluated", evaluation_state)
     print(json.dumps({"package_id": state["package_id"], "phase": "evaluated", **evaluation_state}, indent=2))
     return 0
 
@@ -3001,7 +5714,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--delivery-channel",
         choices=DELIVERY_CHANNELS,
         default="browser",
-        help="Schema-3 foundation records browser delivery only; this build has no MCP runtime",
+        help="Schema-3 mcp-read uses attended browser delivery through the bounded MCP runtime",
     )
     prepare.add_argument(
         "--github-remote",
@@ -3059,6 +5772,92 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "status":
             command.add_argument("--json", action="store_true", help="Compatibility flag; output is always JSON")
         command.set_defaults(func=func)
+
+    mcp_probe = subparsers.add_parser(
+        "mcp-probe",
+        help="Probe local Web MCP and Tunnel client capabilities without resolving credentials",
+    )
+    mcp_probe.add_argument("--tunnel-client")
+    mcp_probe.add_argument("--json", action="store_true", help="Compatibility flag; output is always JSON")
+    mcp_probe.set_defaults(func=command_mcp_probe)
+
+    mcp_profile_init = subparsers.add_parser(
+        "mcp-profile-init",
+        help="Initialize one attended Tunnel profile after confirming the exact probed binary hash",
+    )
+    mcp_profile_init.add_argument("--tunnel-profile", required=True)
+    mcp_profile_init.add_argument("--tunnel-id-ref", required=True)
+    mcp_profile_init.add_argument("--runtime-api-key-ref", required=True)
+    mcp_profile_init.add_argument(
+        "--tunnel-client",
+        required=True,
+        help="Explicit absolute path previously inspected with mcp-probe",
+    )
+    mcp_profile_init.add_argument(
+        "--confirm-tunnel-client-sha256",
+        required=True,
+        help="Exact binary_sha256 emitted by the no-secret mcp-probe command",
+    )
+    mcp_profile_init.add_argument("--profile-dir")
+    mcp_profile_init.add_argument(
+        "--json", action="store_true", help="Compatibility flag; output is always JSON"
+    )
+    mcp_profile_init.set_defaults(func=command_mcp_profile_init)
+
+    mcp_activate = subparsers.add_parser(
+        "mcp-activate",
+        help="Run the exact approved package through an attended foreground Tunnel activation",
+    )
+    mcp_activate.add_argument("--handoff-dir", required=True)
+    mcp_activate.add_argument("--tunnel-profile", required=True)
+    mcp_activate.add_argument("--runtime-api-key-ref", required=True)
+    mcp_activate.add_argument("--confirm-workspace-binding", action="store_true")
+    mcp_activate.add_argument(
+        "--tunnel-client",
+        required=True,
+        help="Explicit absolute path previously inspected with mcp-probe",
+    )
+    mcp_activate.add_argument(
+        "--confirm-tunnel-client-sha256",
+        required=True,
+        help="Exact binary_sha256 emitted by the no-secret mcp-probe command",
+    )
+    mcp_activate.add_argument("--profile-dir")
+    mcp_activate.add_argument("--ready-timeout", type=positive_int, default=30)
+    mcp_activate.add_argument("--json", action="store_true", help="Compatibility flag; output is always JSON")
+    mcp_activate.set_defaults(func=command_mcp_activate)
+
+    mcp_status = subparsers.add_parser(
+        "mcp-status", help="Inspect the one machine-global package authorization and audit"
+    )
+    mcp_status.add_argument("--handoff-dir")
+    mcp_status.add_argument("--json", action="store_true", help="Compatibility flag; output is always JSON")
+    mcp_status.set_defaults(func=command_mcp_status)
+
+    mcp_stop = subparsers.add_parser(
+        "mcp-stop", help="Revoke one exact package authorization, then request its controller stop"
+    )
+    mcp_stop.add_argument("--handoff-dir", required=True)
+    mcp_stop.add_argument("--json", action="store_true", help="Compatibility flag; output is always JSON")
+    mcp_stop.set_defaults(func=command_mcp_stop)
+
+    mcp_recover = subparsers.add_parser(
+        "mcp-recover",
+        help="Fail closed an exact orphaned controller authorization without process discovery",
+    )
+    mcp_recover.add_argument("--handoff-dir", required=True)
+    mcp_recover.add_argument("--confirm-controller-lost", action="store_true")
+    mcp_recover.add_argument(
+        "--json", action="store_true", help="Compatibility flag; output is always JSON"
+    )
+    mcp_recover.set_defaults(func=command_mcp_recover)
+
+    mcp_verify_audit = subparsers.add_parser(
+        "mcp-verify-audit", help="Verify the package-specific disclosure audit chain and bindings"
+    )
+    mcp_verify_audit.add_argument("--handoff-dir", required=True)
+    mcp_verify_audit.add_argument("--json", action="store_true", help="Compatibility flag; output is always JSON")
+    mcp_verify_audit.set_defaults(func=command_mcp_verify_audit)
 
     human_handoff = subparsers.add_parser(
         "human-handoff",

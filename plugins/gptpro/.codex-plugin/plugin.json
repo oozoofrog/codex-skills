@@ -1,7 +1,7 @@
 {
   "name": "gptpro",
   "version": "0.1.0",
-  "description": "Secure attended ChatGPT Pro handoffs with an experimental read-only Web MCP foundation and protocol core.",
+  "description": "Secure attended ChatGPT Pro handoffs with an experimental read-only Web MCP runtime.",
   "author": {
     "name": "oozoofrog",
     "url": "https://github.com/oozoofrog"
@@ -17,13 +17,13 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "GPT Pro Collaborator",
-    "shortDescription": "ChatGPT Pro handoffs and experimental Web MCP",
-    "longDescription": "Prepare an approved GitHub-first, immutable-SHA repository handoff with verified text fallback for logged-in ChatGPT Pro. An explicit experimental schema-3 foundation and deny-all protocol core can bind and locally test a future read-only Web MCP disclosure without claiming that authorization, Tunnel lifecycle, or ChatGPT connectivity is available.",
+    "shortDescription": "Approved ChatGPT Pro handoffs and read-only Web MCP",
+    "longDescription": "Prepare approved immutable repository consultations for logged-in ChatGPT Pro using GitHub-first text handoffs or an explicitly selected experimental read-only Web MCP session. The MCP path binds one approved package to a foreground official Secure MCP Tunnel client, private local authorization state, bounded tools, and a fail-before-return audit; account and Developer Mode steps remain attended.",
     "developerName": "oozoofrog",
     "category": "Productivity",
     "capabilities": [
       "Interactive"
     ],
-    "defaultPrompt": "Use $gptpro in review mode, initialize local handoff storage if needed, prepare a GitHub-first approved repository handoff with text fallback, consult ChatGPT Pro with human takeover at trust or browser boundaries when needed, and validate the advisory response."
+    "defaultPrompt": "Use $gptpro in review mode to prepare and verify an approved repository consultation, preserve the explicitly approved context transport and delivery channel, use the experimental read-only Web MCP runtime only when requested and ready, pause for human trust/account steps, and independently validate the ChatGPT Pro advice."
   }
 }

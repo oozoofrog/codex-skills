@@ -30,7 +30,7 @@ codex plugin add gptpro@codex-skills
 
 The marketplace entry resolves `./plugins/gptpro`; its manifest loads the mirrored Skill from `./skills/gptpro/`. No Python installation command is involved.
 
-The Skill package does not bundle or install OpenAI `tunnel-client`. The experimental Web MCP path has a separate, attended external setup and is not operational in a foundation-only release; see the installed Skill's `references/web-mcp.md` before treating it as available.
+The Skill package does not bundle or install OpenAI `tunnel-client`. Its experimental Web MCP runtime currently requires macOS plus Python 3.11 or newer and has a separate attended setup: the user obtains or builds the client through the reviewed official `openai/tunnel-client` path and owns Tunnel/key, Developer Mode, and ChatGPT app/workspace authorization. A no-secret probe reports the exact binary path/hash; key-bearing init/activation require both values, but that drift check is not publisher provenance or signature verification. The Skill supervises the documented foreground client flow and requires a successful control-plane poll, while local runtime tests still do not prove logged-in ChatGPT account E2E. Read the installed Skill's `references/web-mcp.md` before using this path.
 
 ## Public click installation
 

@@ -60,7 +60,7 @@ Preparation records both `git.head_sha` and a hash of the actual packaged file s
 
 When an in-repository output root is not ignored, `prepare` adds a warning pointing to `init`; it does not change Git configuration automatically.
 
-For a deliberate Web MCP foundation package, use `--transport mcp-read` plus `--tunnel-id-ref env:NAME` or an absolute owner-only mode-0600 `file:` reference, the intended app/workspace labels, and the smallest directed file set. It creates schema 3, a prompt-only outbound list, and a local immutable ZIP. It never uploads the ZIP and never makes MCP an `auto` fallback. The raw Tunnel ID/reference is not persisted. This build can verify and approve that contract but cannot activate or submit it.
+For a deliberate Web MCP package, use `--transport mcp-read` plus `--tunnel-id-ref env:NAME` or an absolute owner-only mode-0600 `file:` reference, the intended app/workspace labels, and the smallest directed file set. It creates schema 3, a prompt-only outbound list, and a local immutable ZIP. It never uploads the ZIP and never makes MCP an `auto` fallback. The raw Tunnel ID/reference is not written to gptpro package/runtime/receipt/audit artifacts; the official attended initializer does store the ID in its owner-only user profile. Approval and activation remain separate actions.
 
 ## Verify and inspect
 
@@ -94,7 +94,73 @@ python3 <skill-dir>/scripts/gptpro.py approve \
   --confirm-mcp-disclosure
 ```
 
-That approval does not authorize a manually fabricated active session. A foundation-only build stops here; do not paste the prompt or record submission.
+That approval does not authorize a manually fabricated active session. Continue only through the runtime lifecycle below, and do not paste the prompt or record submission until the exact approved session is active.
+
+## Activate an experimental Web MCP session
+
+Read [web-mcp.md](web-mcp.md) first. The official `tunnel-client` profile is user-owned and must point to the exact installed `/absolute/python -I -S -B -Xpycache_prefix=/dev/null /absolute/skill/scripts/gptpro_mcp.py serve` command. Its documented v0.0.12 public flow is:
+
+```text
+tunnel-client init --profile <name> ...
+tunnel-client doctor --profile <name> --explain
+tunnel-client run --profile <name> ...
+```
+
+Run the secretless gptpro MCP probe first. On first use, the user explicitly initializes the profile with that exact binary path/hash. Before activation, the user confirms the exact visible ChatGPT app/workspace binding. `mcp-activate` re-verifies the approved package and runs the profile's `doctor` preflight before consuming the package's single activation attempt. It then creates owner-only user-global `activating` state plus a package-local audit header, starts one exact `tunnel-client run` child with an owner-only Unix health/admin socket and no TCP listener, and waits for:
+
+```bash
+python3 <skill-dir>/scripts/gptpro.py mcp-probe \
+  --tunnel-client /absolute/path/to/tunnel-client \
+  --json
+
+python3 <skill-dir>/scripts/gptpro.py mcp-profile-init \
+  --tunnel-profile gptpro-web \
+  --tunnel-id-ref env:GPTPRO_TUNNEL_ID \
+  --runtime-api-key-ref env:CONTROL_PLANE_API_KEY \
+  --tunnel-client /absolute/path/to/tunnel-client \
+  --confirm-tunnel-client-sha256 <binary_sha256-from-probe> \
+  --json
+
+python3 <skill-dir>/scripts/gptpro.py mcp-activate \
+  --handoff-dir <dir> \
+  --tunnel-profile gptpro-web \
+  --runtime-api-key-ref env:CONTROL_PLANE_API_KEY \
+  --tunnel-client /absolute/path/to/tunnel-client \
+  --confirm-tunnel-client-sha256 <binary_sha256-from-probe> \
+  --confirm-workspace-binding \
+  --json
+```
+
+```bash
+tunnel-client health \
+  --url-file <activation-health-url-file> \
+  --pid <owned-child-pid> \
+  --require-control-plane-poll \
+  --json
+```
+
+Only that successful control-plane poll permits the state to become `active`. `doctor`, `/healthz`, or `/readyz` alone is insufficient. Keep the activation command in the foreground while ChatGPT uses the tools. The controller passes the per-session capability to its stdio child through the environment; the capability and Tunnel/API credentials are not written into package, receipt, audit, prompt, or runtime-state JSON.
+
+Developer Mode, Tunnel/key creation, login, ChatGPT account/workspace/app selection, and visible prompt submission are attended user steps. After the completed response is saved, stop promptly. `mcp-stop` first revokes content authorization and finalizes package evidence, then requests cooperative shutdown from the exact owning controller. It never discovers processes by name or uses a broad kill. If the controller is missing, authorization remains revoked and the failure is reported.
+
+From a second terminal or controller while activation remains in the foreground:
+
+```bash
+python3 <skill-dir>/scripts/gptpro.py mcp-status --handoff-dir <dir> --json
+python3 <skill-dir>/scripts/gptpro.py mcp-stop --handoff-dir <dir> --json
+# Only after separately proving the exact foreground controller is gone:
+python3 <skill-dir>/scripts/gptpro.py mcp-recover \
+  --handoff-dir <dir> \
+  --confirm-controller-lost \
+  --json
+python3 <skill-dir>/scripts/gptpro.py mcp-verify-audit --handoff-dir <dir> --json
+```
+
+Never use `mcp-recover` while the exact controller lease is live. It is a fail-closed authorization recovery path, not process discovery or a substitute for `mcp-stop`.
+
+Advanced `--tunnel-client`, `--profile-dir`, and `--ready-timeout` options exist for explicit installation and attended diagnostics. The authorization lifecycle always uses the canonical owner-only per-user runtime slot; there is no CLI runtime-root override because a second namespace would violate the one-active-package invariant.
+
+Activation and stop append auxiliary receipt events without advancing the consultation phase. A successful activation is not submission evidence, and an audit record is not response-import or evaluation evidence. Do not switch to another transport after activation failure without preparing and approving a new package.
 
 ## Human checkpoint
 

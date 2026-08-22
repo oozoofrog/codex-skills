@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+import builtins
 import hashlib
 import io
+import importlib.util
 import json
 import os
 import struct
@@ -15,6 +17,7 @@ import warnings
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 if str(SKILL_ROOT) not in sys.path:
@@ -49,7 +52,7 @@ def digest(value: bytes) -> str:
 class PackageFixture:
     def __init__(self, files: dict[str, bytes] | None = None) -> None:
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.archive_path = self.root / "snapshot.zip"
         self.files = files or {
             "README.md": b"Alpha first\r\nsecond line\r\nSTRASSE marker\r\n",
@@ -583,6 +586,73 @@ class ToolSemanticsTests(unittest.TestCase):
         self.assertEqual(64, len(committer.record["request_id_sha256"]))
         self.assertEqual(64, len(committer.record["arguments_sha256"]))
 
+    def test_rejected_attempt_is_audited_without_arguments_or_content(self) -> None:
+        class RecordingCommitter:
+            def __init__(self) -> None:
+                self.rejection = None
+
+            def commit_before_return(self, **kwargs):
+                del kwargs
+
+            def record_rejection(self, **kwargs):
+                self.rejection = kwargs
+
+        committer = RecordingCommitter()
+        runtime = ToolRuntime(
+            StaticAuthorizationProvider(self.fixture.grant()), committer=committer
+        )
+        with self.assertRaises(ToolError) as raised:
+            runtime.call(
+                "gptpro_repo_search",
+                {"package_id": PACKAGE_ID, "query": ""},
+                request_id="rejected-request",
+            )
+        self.assertEqual("SEARCH_QUERY_INVALID", raised.exception.code)
+        self.assertIsNotNone(committer.rejection)
+        self.assertEqual("SEARCH_QUERY_INVALID", committer.rejection["error_code"])
+        self.assertEqual(1, committer.rejection["calls_used"])
+        serialized = json.dumps(
+            {key: value for key, value in committer.rejection.items() if key != "grant"},
+            sort_keys=True,
+        )
+        self.assertNotIn("rejected-request", serialized)
+        self.assertEqual(64, len(committer.rejection["request_id_sha256"]))
+        self.assertEqual(64, len(committer.rejection["arguments_sha256"]))
+
+    def test_non_utf8_json_argument_does_not_desync_call_counter(self) -> None:
+        class SequencingCommitter:
+            def __init__(self) -> None:
+                self.commits: list[dict] = []
+                self.rejections: list[dict] = []
+
+            def commit_before_return(self, **kwargs):
+                self.commits.append(kwargs)
+
+            def record_rejection(self, **kwargs):
+                self.rejections.append(kwargs)
+
+        committer = SequencingCommitter()
+        runtime = ToolRuntime(
+            StaticAuthorizationProvider(self.fixture.grant()), committer=committer
+        )
+        with self.assertRaises(ToolError) as raised:
+            runtime.call(
+                "gptpro_repo_search",
+                {"package_id": PACKAGE_ID, "query": "\ud800"},
+                request_id="invalid-unicode",
+            )
+        self.assertEqual("MCP_INVALID_ARGUMENT", raised.exception.code)
+        self.assertEqual([], committer.commits)
+        self.assertEqual([], committer.rejections)
+
+        result = runtime.call(
+            "gptpro_package_info",
+            {"package_id": PACKAGE_ID},
+            request_id="next-valid-request",
+        )
+        self.assertEqual(1, result["structuredContent"]["result"]["session"]["calls_used"])
+        self.assertEqual(1, committer.commits[0]["calls_used"])
+
     def test_committer_failure_prevents_content_result(self) -> None:
         class FailingCommitter:
             def commit_before_return(self, **kwargs):
@@ -716,6 +786,24 @@ class ProtocolTests(unittest.TestCase):
         responses = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual([-32700, -32600, -32600, -32600, -32601], [r["error"]["code"] for r in responses])
         self.assertEqual([None, None, 1, None, 8], [r["id"] for r in responses])
+
+    def test_json_decoder_resource_errors_are_parse_errors_and_next_frame_survives(self) -> None:
+        source = io.StringIO("{}\n{}\n{}\n")
+        output, stderr = io.StringIO(), io.StringIO()
+        ping = {"jsonrpc": "2.0", "id": 9, "method": "ping"}
+        with mock.patch(
+            "runtime.gptpro_mcp.protocol.json.loads",
+            side_effect=[ValueError("integer digit limit"), RecursionError("nested input"), ping],
+        ):
+            self.assertEqual(0, LegacyMcpServer(self.fixture.runtime()).serve(source, output, stderr))
+        responses = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([-32700, -32700], [item["error"]["code"] for item in responses[:2]])
+        self.assertEqual(
+            ["MCP_PROTOCOL_ERROR", "MCP_PROTOCOL_ERROR"],
+            [item["error"]["data"]["code"] for item in responses[:2]],
+        )
+        self.assertEqual({}, responses[2]["result"])
+        self.assertEqual("", stderr.getvalue())
 
     def test_oversized_frame_is_drained_and_next_request_survives(self) -> None:
         source = io.StringIO("x" * (MAX_INPUT_FRAME_CHARS + 1) + "\n" + json.dumps(
@@ -861,6 +949,37 @@ class ProtocolTests(unittest.TestCase):
 
 
 class EntrypointTests(unittest.TestCase):
+    def test_tunnel_credentials_are_scrubbed_before_runtime_imports(self) -> None:
+        script = SKILL_ROOT / "scripts/gptpro_mcp.py"
+        spec = importlib.util.spec_from_file_location("gptpro_mcp_entrypoint_test", script)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        secret_names = tuple(module._INHERITED_SECRET_ENV)
+        environment = {name: f"secret-{index}" for index, name in enumerate(secret_names)}
+        observations: list[dict[str, str | None]] = []
+        original_import = builtins.__import__
+
+        def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name.startswith("runtime.gptpro_mcp"):
+                observations.append({key: os.environ.get(key) for key in secret_names})
+            return original_import(name, globals, locals, fromlist, level)
+
+        with (
+            mock.patch.dict(os.environ, environment, clear=True),
+            mock.patch("builtins.__import__", side_effect=guarded_import),
+        ):
+            runtime, lease, server_class = module._runtime_from_environment()
+        self.assertIsNone(lease)
+        self.assertIsNotNone(runtime)
+        self.assertIsNotNone(server_class)
+        self.assertTrue(observations)
+        self.assertTrue(
+            all(value is None for snapshot in observations for value in snapshot.values())
+        )
+
     def test_help_has_no_runtime_side_effect(self) -> None:
         script = SKILL_ROOT / "scripts/gptpro_mcp.py"
         result = subprocess.run(

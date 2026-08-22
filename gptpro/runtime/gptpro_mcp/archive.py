@@ -228,7 +228,7 @@ class VerifiedArchive:
                     raise _archive_fault(code="CONTENT_DRIFT")
                 try:
                     internal = json.loads(internal_bytes.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                except (UnicodeDecodeError, ValueError, RecursionError) as exc:
                     raise _archive_fault(exc) from exc
                 if (
                     not isinstance(internal, dict)

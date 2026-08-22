@@ -94,7 +94,7 @@ class LegacyMcpServer:
     def process_line(self, line: str) -> None:
         try:
             message = json.loads(line)
-        except (json.JSONDecodeError, UnicodeError):
+        except (json.JSONDecodeError, UnicodeError, ValueError, RecursionError):
             self._write(_rpc_error(None, -32700, "Parse error", stable_code="MCP_PROTOCOL_ERROR"))
             return
         if not isinstance(message, dict):
