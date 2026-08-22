@@ -290,7 +290,7 @@ class ProtocolTraceTests(unittest.TestCase):
     def test_negotiated_version_allowlist_tracks_server_support(self) -> None:
         self.assertEqual(set(SUPPORTED_PROTOCOL_VERSIONS), set(SAFE_PROTOCOL_VERSIONS))
 
-    def test_same_version_duplicate_initialize_trace_is_exact_and_zero_disclosure(self) -> None:
+    def test_pre_ready_same_version_initialize_replay_trace_is_exact_and_zero_disclosure(self) -> None:
         runtime = NoDisclosureRuntime()
         result, _, _ = self.transcript(
             [
@@ -316,7 +316,7 @@ class ProtocolTraceTests(unittest.TestCase):
             [
                 ("decision", "accepted"),
                 ("response", "response_flushed"),
-                ("decision", "duplicate_initialize"),
+                ("decision", "initialize_replayed"),
                 ("response", "response_flushed"),
             ],
             [(event["stage"], event["outcome"]) for event in summary.events],
@@ -327,7 +327,7 @@ class ProtocolTraceTests(unittest.TestCase):
             [event["requested_version"] for event in decisions],
         )
         self.assertEqual("2024-11-05", decisions[0]["negotiated_version"])
-        self.assertNotIn("negotiated_version", decisions[1])
+        self.assertEqual("2024-11-05", decisions[1]["negotiated_version"])
         persisted = self.trace.path.read_text(encoding="ascii")
         self.assertNotIn("first-secret-id", persisted)
         self.assertNotIn("duplicate-secret-id", persisted)

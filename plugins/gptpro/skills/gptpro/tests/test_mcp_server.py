@@ -815,6 +815,41 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(-32600, responses[5]["error"]["code"])
         self.assertEqual(list(TOOL_CATALOG), responses[6]["result"]["tools"])
 
+    def test_tunnel_connector_probe_replays_same_version_initialize_before_ready(self) -> None:
+        responses, _, _ = self.transcript([
+            {
+                "jsonrpc": "2.0",
+                "id": "discover",
+                "method": "server/discover",
+                "params": {
+                    "_meta": {
+                        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    }
+                },
+            },
+            self.initialize("2025-11-25", request_id="probe-initialize"),
+            self.initialize("2025-11-25", request_id="connector-initialize"),
+            self.initialize("2025-11-25", request_id="unexpected-third-initialize"),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": "list", "method": "tools/list"},
+        ])
+        self.assertEqual(-32601, responses[0]["error"]["code"])
+        self.assertEqual("2025-11-25", responses[1]["result"]["protocolVersion"])
+        self.assertEqual(responses[1]["result"], responses[2]["result"])
+        self.assertEqual(-32600, responses[3]["error"]["code"])
+        self.assertEqual(list(TOOL_CATALOG), responses[4]["result"]["tools"])
+
+    def test_pre_ready_different_version_duplicate_initialize_is_rejected(self) -> None:
+        responses, _, _ = self.transcript([
+            self.initialize("2025-11-25", request_id="probe-initialize"),
+            self.initialize("2024-11-05", request_id="different-initialize"),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": "list", "method": "tools/list"},
+        ])
+        self.assertEqual("2025-11-25", responses[0]["result"]["protocolVersion"])
+        self.assertEqual(-32600, responses[1]["error"]["code"])
+        self.assertEqual(list(TOOL_CATALOG), responses[2]["result"]["tools"])
+
     def test_preinitialized_tools_fail(self) -> None:
         responses, _, _ = self.transcript([
             {"jsonrpc": "2.0", "id": 7, "method": "tools/list"}

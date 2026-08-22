@@ -75,6 +75,7 @@ class LegacyMcpServer:
         self._state_lock = threading.Lock()
         self._writer_lock = threading.Lock()
         self._initialize_seen = False
+        self._initialize_replay_used = False
         self._initialized = False
         self._protocol_version: str | None = None
         self._inflight: dict[tuple[str, Any], threading.Event] = {}
@@ -276,10 +277,10 @@ class LegacyMcpServer:
             self._initialize(request_id, params)
             return
         if method == "server/discover":
-            # This server intentionally remains legacy-only.  Mark one explicit
-            # fallback handshake as pending before returning Method not found.
-            # The persistent Tunnel stdio child may already have completed an
-            # earlier legacy lifecycle, so close readiness immediately.
+            # This server intentionally remains legacy-only. Close any earlier
+            # lifecycle before returning Method not found. The shared Tunnel
+            # stdio child may then deliver one probe initialize and one identical
+            # connector initialize before the readiness notification.
             metadata = params.get("_meta")
             discover_requested = (
                 metadata.get("io.modelcontextprotocol/protocolVersion")
@@ -304,6 +305,7 @@ class LegacyMcpServer:
                 return
             with self._state_lock:
                 self._initialize_seen = False
+                self._initialize_replay_used = False
                 self._initialized = False
                 self._protocol_version = None
             self._write_traced(
@@ -518,13 +520,39 @@ class LegacyMcpServer:
         with self._state_lock:
             before = self._readiness_locked()
             duplicate = self._initialize_seen
+            replayable = (
+                duplicate
+                and before == "initialize_acknowledged"
+                and not self._initialize_replay_used
+                and requested == self._protocol_version
+            )
             if not duplicate:
                 negotiated = (
                     requested
                     if requested in SUPPORTED_PROTOCOL_VERSIONS
                     else PREFERRED_PROTOCOL_VERSION
                 )
+            elif replayable:
+                negotiated = self._protocol_version
         if duplicate:
+            if replayable:
+                if not self._record_trace(
+                    "initialize",
+                    "initialize_replayed",
+                    readiness_before=before,
+                    readiness_after=before,
+                    requested_version_class=requested_class,
+                    requested_version=safe_requested_version(requested),
+                    negotiated_version=negotiated,
+                ):
+                    return
+                with self._state_lock:
+                    self._initialize_replay_used = True
+                self._write_traced(
+                    _rpc_result(request_id, self._initialize_result(negotiated)),
+                    "initialize",
+                )
+                return
             if not self._record_trace(
                 "initialize",
                 "duplicate_initialize",
@@ -556,20 +584,22 @@ class LegacyMcpServer:
             return
         with self._state_lock:
             self._initialize_seen = True
+            self._initialize_replay_used = False
             self._initialized = False
             self._protocol_version = negotiated
         self._write_traced(
-            _rpc_result(
-                request_id,
-                {
-                    "protocolVersion": negotiated,
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-                    "instructions": SERVER_INSTRUCTIONS,
-                },
-            ),
+            _rpc_result(request_id, self._initialize_result(negotiated)),
             "initialize",
         )
+
+    @staticmethod
+    def _initialize_result(negotiated: str) -> dict[str, Any]:
+        return {
+            "protocolVersion": negotiated,
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+            "instructions": SERVER_INSTRUCTIONS,
+        }
 
     def _tool_worker(
         self,

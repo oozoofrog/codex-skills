@@ -21,8 +21,9 @@
 - `docs/release-checklist.md` 추가
 
 ### Updated
+- `gptpro` Web MCP legacy handshake now tolerates the observed Tunnel startup-probe pattern by replaying exactly one identical supported-version `initialize` only while initialization is acknowledged but not ready; different-version, third, or post-ready duplicates remain rejected, and tools remain locked until `notifications/initialized`
 - `gptpro` Web MCP profile lifecycle now detects Homebrew/Python interpreter-path drift without resolving credentials and supports an explicitly confirmed, same-Tunnel atomic staged refresh behind a machine-global profile/controller flock and proven-safe terminal controller lease, rejecting missing/unsafe/live lease ambiguity, restoring failed replacements byte-for-byte, and reporting retained private-stage cleanup separately
-- `gptpro` Web MCP legacy stdio handshake compatibility: ChatGPT's `server/discover` legacy fallback now closes tool readiness and permits one fresh `initialize` over the persistent Tunnel child; ordinary duplicate initialization remains rejected, and tools stay denied until a new `notifications/initialized`
+- `gptpro` Web MCP legacy stdio handshake compatibility: ChatGPT's `server/discover` legacy fallback closes tool readiness and opens a fresh initialization lifecycle over the persistent Tunnel child; tools stay denied until a new `notifications/initialized`
 - `gptpro` `auto`를 GitHub-first로 확장: 선택 파일과 HEAD 바이트 일치, github.com 원격 ref/PR head의 SHA 검증, immutable commit·경로 allowlist pinning, prompt-only 전송, 사람 소유 App 권한 checkpoint, 응답 attestation 검증 및 text fallback 사유 기록
 - `gptpro`에 로그인·OAuth/app scope·권한·파일 선택·모델 확인·수동 전송·불확실한 제출·response export를 정상적인 attended human checkpoint로 다루는 read-only `human-handoff` workflow 추가
 - `gptpro` 첫 사용 시 `.gptpro/handoffs`와 Git 제외 규칙을 preview 후 선택적으로 구성하는 멱등 `init` workflow 추가

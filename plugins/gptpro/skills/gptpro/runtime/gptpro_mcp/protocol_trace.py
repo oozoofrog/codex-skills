@@ -53,6 +53,7 @@ SAFE_OUTCOMES = frozenset(
         "frame_too_large",
         "response_flushed",
         "trace_truncated",
+        "initialize_replayed",
     }
 )
 SAFE_READINESS = frozenset({"uninitialized", "initialize_acknowledged", "ready"})
