@@ -54,6 +54,7 @@ SAFE_OUTCOMES = frozenset(
         "response_flushed",
         "trace_truncated",
         "initialize_replayed",
+        "request_scoped_initialized",
     }
 )
 SAFE_READINESS = frozenset({"uninitialized", "initialize_acknowledged", "ready"})
@@ -633,6 +634,13 @@ class ProtocolTrace:
             raise ValueError("response stage and outcome are inconsistent")
         if (method == "trace_control") != (outcome == "trace_truncated"):
             raise ValueError("trace-control event is inconsistent")
+        if outcome == "request_scoped_initialized" and (
+            method != "tools_call"
+            or stage != "processed"
+            or readiness_before != "initialize_acknowledged"
+            or readiness_after != "ready"
+        ):
+            raise ValueError("request-scoped initialization event is inconsistent")
         if (
             not isinstance(readiness_before, str)
             or not isinstance(readiness_after, str)

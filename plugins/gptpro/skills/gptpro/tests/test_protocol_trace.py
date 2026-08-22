@@ -332,6 +332,75 @@ class ProtocolTraceTests(unittest.TestCase):
         self.assertNotIn("first-secret-id", persisted)
         self.assertNotIn("duplicate-secret-id", persisted)
 
+    def test_request_scoped_initialize_trace_is_sanitized(self) -> None:
+        class RecordingRuntime:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def call(self, name, arguments, **kwargs):
+                del name, arguments, kwargs
+                self.calls += 1
+                return {"content": [], "structuredContent": {"ok": True}}
+
+        runtime = RecordingRuntime()
+        secret_package = "20260822T173606Z-secret-package"
+        result, responses, _ = self.transcript(
+            [
+                {
+                    "jsonrpc": "2.0",
+                    "id": "first-secret-id",
+                    "method": "initialize",
+                    "params": {"protocolVersion": "2025-11-25"},
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": "replay-secret-id",
+                    "method": "initialize",
+                    "params": {"protocolVersion": "2025-11-25"},
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": "call-secret-id",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "gptpro_package_info",
+                        "arguments": {"package_id": secret_package},
+                    },
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": "next-secret-id",
+                    "method": "initialize",
+                    "params": {"protocolVersion": "2025-11-25"},
+                },
+            ],
+            runtime=runtime,
+        )
+        self.assertEqual(0, result)
+        self.assertEqual(1, runtime.calls)
+        self.assertEqual("2025-11-25", responses[3]["result"]["protocolVersion"])
+        summary = self.trace.verify()
+        request_scoped = [
+            event
+            for event in summary.events
+            if event["outcome"] == "request_scoped_initialized"
+        ]
+        self.assertEqual(1, len(request_scoped))
+        self.assertEqual("tools_call", request_scoped[0]["method"])
+        self.assertEqual("processed", request_scoped[0]["stage"])
+        self.assertEqual("initialize_acknowledged", request_scoped[0]["readiness_before"])
+        self.assertEqual("ready", request_scoped[0]["readiness_after"])
+        persisted = self.trace.path.read_text(encoding="ascii")
+        for secret in (
+            "first-secret-id",
+            "replay-secret-id",
+            "call-secret-id",
+            "next-secret-id",
+            secret_package,
+            "gptpro_package_info",
+        ):
+            self.assertNotIn(secret, persisted)
+
     def test_unknown_method_and_unsafe_values_never_persist_raw_text(self) -> None:
         raw_method = "private/method/with/credential-tunnel_secret_value"
         result, _, _ = self.transcript(
@@ -356,6 +425,7 @@ class ProtocolTraceTests(unittest.TestCase):
             ("ping", "decision", "response_flushed"),
             ("trace_control", "decision", "accepted"),
             ("ping", "decision", "trace_truncated"),
+            ("ping", "processed", "request_scoped_initialized"),
         )
         for method, stage, outcome in invalid_combinations:
             with self.subTest(method=method, stage=stage, outcome=outcome):

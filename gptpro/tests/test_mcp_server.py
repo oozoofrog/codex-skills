@@ -839,6 +839,88 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(-32600, responses[3]["error"]["code"])
         self.assertEqual(list(TOOL_CATALOG), responses[4]["result"]["tools"])
 
+    def test_tunnel_request_scoped_tool_calls_accept_identical_reinitialize(self) -> None:
+        package_call = {
+            "jsonrpc": "2.0",
+            "id": "package-info-1",
+            "method": "tools/call",
+            "params": {
+                "name": "gptpro_package_info",
+                "arguments": {"package_id": PACKAGE_ID},
+            },
+        }
+        responses, _, _ = self.transcript([
+            self.initialize("2025-11-25", request_id="probe-initialize"),
+            self.initialize("2025-11-25", request_id="request-initialize"),
+            package_call,
+            self.initialize("2025-11-25", request_id="next-request-initialize"),
+            self.initialize("2024-11-05", request_id="different-version"),
+        ])
+        by_id = {response["id"]: response for response in responses}
+        self.assertEqual(
+            by_id["probe-initialize"]["result"],
+            by_id["request-initialize"]["result"],
+        )
+        self.assertTrue(by_id["package-info-1"]["result"]["structuredContent"]["ok"])
+        self.assertEqual(
+            by_id["probe-initialize"]["result"],
+            by_id["next-request-initialize"]["result"],
+        )
+        self.assertEqual(-32600, by_id["different-version"]["error"]["code"])
+
+    def test_request_scoped_compatibility_keeps_nonmatching_paths_locked(self) -> None:
+        valid_call = {
+            "jsonrpc": "2.0",
+            "id": "package-info",
+            "method": "tools/call",
+            "params": {
+                "name": "gptpro_package_info",
+                "arguments": {"package_id": PACKAGE_ID},
+            },
+        }
+        without_replay, _, _ = self.transcript([
+            self.initialize(),
+            valid_call,
+        ])
+        self.assertEqual(-32600, without_replay[1]["error"]["code"])
+
+        after_discover, _, _ = self.transcript([
+            {
+                "jsonrpc": "2.0",
+                "id": "discover",
+                "method": "server/discover",
+                "params": {},
+            },
+            self.initialize(request_id="probe"),
+            self.initialize(request_id="connector"),
+            valid_call,
+        ])
+        self.assertEqual(-32600, after_discover[3]["error"]["code"])
+
+        malformed, _, _ = self.transcript([
+            self.initialize(request_id="probe"),
+            self.initialize(request_id="request"),
+            {
+                "jsonrpc": "2.0",
+                "id": "bad-call",
+                "method": "tools/call",
+                "params": {
+                    "name": "gptpro_package_info",
+                    "arguments": "not-an-object",
+                },
+            },
+            {"jsonrpc": "2.0", "id": "list", "method": "tools/list"},
+        ])
+        self.assertEqual(-32600, malformed[2]["error"]["code"])
+        self.assertEqual(-32600, malformed[3]["error"]["code"])
+
+        unsupported, _, _ = self.transcript([
+            self.initialize("2026-07-28", request_id="unsupported-probe"),
+            self.initialize("2025-11-25", request_id="supported-replay"),
+            valid_call,
+        ])
+        self.assertEqual(-32600, unsupported[2]["error"]["code"])
+
     def test_pre_ready_different_version_duplicate_initialize_is_rejected(self) -> None:
         responses, _, _ = self.transcript([
             self.initialize("2025-11-25", request_id="probe-initialize"),

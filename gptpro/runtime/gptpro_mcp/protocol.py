@@ -77,6 +77,9 @@ class LegacyMcpServer:
         self._initialize_seen = False
         self._initialize_replay_used = False
         self._initialized = False
+        self._discovery_seen = False
+        self._request_scoped_compat = False
+        self._initialize_requested_supported = False
         self._protocol_version: str | None = None
         self._inflight: dict[tuple[str, Any], threading.Event] = {}
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="gptpro-mcp")
@@ -307,6 +310,9 @@ class LegacyMcpServer:
                 self._initialize_seen = False
                 self._initialize_replay_used = False
                 self._initialized = False
+                self._discovery_seen = True
+                self._request_scoped_compat = False
+                self._initialize_requested_supported = False
                 self._protocol_version = None
             self._write_traced(
                 _rpc_error(
@@ -339,6 +345,31 @@ class LegacyMcpServer:
             return
         with self._state_lock:
             ready = self._initialized
+        if method == "tools/call" and not ready and self._valid_tool_call_params(params):
+            with self._state_lock:
+                before = self._readiness_locked()
+                request_scoped_compat = (
+                    self._initialize_seen
+                    and self._initialize_replay_used
+                    and not self._initialized
+                    and not self._discovery_seen
+                    and self._initialize_requested_supported
+                    and self._protocol_version in SUPPORTED_PROTOCOL_VERSIONS
+                )
+                if request_scoped_compat:
+                    self._initialized = True
+                    self._request_scoped_compat = True
+                after = self._readiness_locked()
+            if request_scoped_compat:
+                if not self._record_trace(
+                    "tools_call",
+                    "request_scoped_initialized",
+                    stage="processed",
+                    readiness_before=before,
+                    readiness_after=after,
+                ):
+                    return
+                ready = True
         if method in {"tools/list", "tools/call"} and not ready:
             readiness = self._readiness()
             if not self._record_trace(
@@ -394,7 +425,7 @@ class LegacyMcpServer:
         if method == "tools/call":
             name = params.get("name")
             arguments = params.get("arguments", {})
-            if set(params) != {"name", "arguments"} or name not in TOOL_NAMES or not isinstance(arguments, dict):
+            if not self._valid_tool_call_params(params):
                 readiness = self._readiness()
                 if not self._record_trace(
                     "tools_call",
@@ -522,8 +553,13 @@ class LegacyMcpServer:
             duplicate = self._initialize_seen
             replayable = (
                 duplicate
-                and before == "initialize_acknowledged"
-                and not self._initialize_replay_used
+                and (
+                    (
+                        before == "initialize_acknowledged"
+                        and not self._initialize_replay_used
+                    )
+                    or (before == "ready" and self._request_scoped_compat)
+                )
                 and requested == self._protocol_version
             )
             if not duplicate:
@@ -546,8 +582,9 @@ class LegacyMcpServer:
                     negotiated_version=negotiated,
                 ):
                     return
-                with self._state_lock:
-                    self._initialize_replay_used = True
+                if before == "initialize_acknowledged":
+                    with self._state_lock:
+                        self._initialize_replay_used = True
                 self._write_traced(
                     _rpc_result(request_id, self._initialize_result(negotiated)),
                     "initialize",
@@ -586,6 +623,8 @@ class LegacyMcpServer:
             self._initialize_seen = True
             self._initialize_replay_used = False
             self._initialized = False
+            self._request_scoped_compat = False
+            self._initialize_requested_supported = requested in SUPPORTED_PROTOCOL_VERSIONS
             self._protocol_version = negotiated
         self._write_traced(
             _rpc_result(request_id, self._initialize_result(negotiated)),
@@ -600,6 +639,14 @@ class LegacyMcpServer:
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             "instructions": SERVER_INSTRUCTIONS,
         }
+
+    @staticmethod
+    def _valid_tool_call_params(params: dict[str, Any]) -> bool:
+        return (
+            set(params) == {"name", "arguments"}
+            and params.get("name") in TOOL_NAMES
+            and isinstance(params.get("arguments"), dict)
+        )
 
     def _tool_worker(
         self,
