@@ -469,6 +469,7 @@ class WebMcpRuntimeTests(unittest.TestCase):
             code="MCP_INTERPRETER_PATH_DRIFT",
             refresh_required=True,
             safe_to_refresh=True,
+            reinit_required=False,
             profile_sha256="1" * 64,
             profile_dir_sha256="2" * 64,
             observed_mcp_command_sha256="3" * 64,
@@ -488,9 +489,38 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertEqual("MCP_INTERPRETER_PATH_DRIFT", payload["code"])
         self.assertTrue(payload["refresh_required"])
         self.assertTrue(payload["safe_to_refresh"])
+        self.assertFalse(payload["reinit_required"])
         self.assertFalse(payload["credential_resolution"])
         self.assertFalse(payload["tunnel_client_execution"])
         inspect.assert_called_once()
+        secret_resolver.assert_not_called()
+        tunnel_client.assert_not_called()
+
+    def test_profile_check_reports_missing_profile_without_secret_access(self) -> None:
+        arguments = SimpleNamespace(tunnel_profile="missing-profile", profile_dir=None)
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                self.module,
+                "inspect_tunnel_profile",
+                side_effect=self.module.TunnelClientError(
+                    "TUNNEL_PROFILE_NOT_FOUND",
+                    "The requested Tunnel profile does not exist.",
+                ),
+            ),
+            mock.patch.object(self.module, "runtime_key_environment") as secret_resolver,
+            mock.patch.object(self.module, "TunnelClient") as tunnel_client,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(2, self.module.command_mcp_profile_check(arguments))
+        payload = json.loads(output.getvalue())
+        self.assertEqual("TUNNEL_PROFILE_NOT_FOUND", payload["code"])
+        self.assertFalse(payload["refresh_required"])
+        self.assertFalse(payload["safe_to_refresh"])
+        self.assertTrue(payload["reinit_required"])
+        self.assertFalse(payload["credential_resolution"])
+        self.assertFalse(payload["tunnel_client_execution"])
+        self.assertNotIn("/", output.getvalue())
         secret_resolver.assert_not_called()
         tunnel_client.assert_not_called()
 
@@ -759,7 +789,8 @@ class WebMcpRuntimeTests(unittest.TestCase):
             ),
             mock.patch.object(self.module, "runtime_key_environment") as secret_resolver,
             self.assertRaisesRegex(
-                self.module.HandoffError, "MCP_INTERPRETER_PATH_DRIFT"
+                self.module.HandoffError,
+                "MCP_INTERPRETER_PATH_DRIFT: Run mcp-profile-check and complete the reported attended profile action before activation",
             ),
         ):
             self.module.command_mcp_activate(arguments)

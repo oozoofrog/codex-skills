@@ -134,6 +134,11 @@ class RuntimeStateTests(unittest.TestCase):
         self.assertEqual("revoking", revoking["status"])
         terminal = store.transition(self.session, "revoking", "revoked")
         self.assertEqual("revoked", terminal["status"])
+        self.assertNotIn("protocol_trace_header_sha256", terminal)
+        reloaded_terminal = store.read()
+        self.assertIsNotNone(reloaded_terminal)
+        self.assertEqual("revoked", reloaded_terminal["status"])
+        self.assertNotIn("protocol_trace_header_sha256", reloaded_terminal)
         with self.assertRaises(RuntimeStateError):
             store.transition(self.session, "revoked", "active")
 
@@ -998,6 +1003,7 @@ else:
         )
         self.assertTrue(current.ready)
         self.assertFalse(current.refresh_required)
+        self.assertFalse(current.reinit_required)
 
         drifted = self.drift_profile_interpreter(path)
         inspection = inspect_tunnel_profile(
@@ -1010,6 +1016,7 @@ else:
         self.assertEqual("MCP_INTERPRETER_PATH_DRIFT", inspection.code)
         self.assertTrue(inspection.refresh_required)
         self.assertTrue(inspection.safe_to_refresh)
+        self.assertFalse(inspection.reinit_required)
         self.assertNotIn(drifted, repr(inspection))
         self.assertNotIn(self.raw_tunnel, repr(inspection))
 
@@ -1030,6 +1037,40 @@ else:
                 profile_dir=profile_dir,
             )
         self.assertEqual("TUNNEL_PROFILE_UNSAFE", raised.exception.code)
+
+    def test_profile_check_distinguishes_missing_profile_and_skill_root(self) -> None:
+        missing_dir = self.root / "missing-profile"
+        missing_dir.mkdir(mode=0o700)
+        with self.assertRaises(TunnelClientError) as missing:
+            inspect_tunnel_profile(
+                "not-created",
+                env=self.env,
+                mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+                profile_dir=missing_dir,
+            )
+        self.assertEqual("TUNNEL_PROFILE_NOT_FOUND", missing.exception.code)
+        self.assertNotIn(str(missing_dir), repr(missing.exception))
+        self.assertNotIn(self.raw_tunnel, repr(missing.exception))
+
+        profile_dir = self.root / "cross-root-profile"
+        self.write_profile("cross-root", directory=profile_dir)
+        other_script = self.root / "other-skill" / "scripts" / "gptpro_mcp.py"
+        other_script.parent.mkdir(parents=True, mode=0o700)
+        other_script.write_text("# alternate installed Skill root\n", encoding="utf-8")
+        other_script.chmod(0o600)
+        mismatch = inspect_tunnel_profile(
+            "cross-root",
+            env=self.env,
+            mcp_script=other_script,
+            profile_dir=profile_dir,
+        )
+        self.assertFalse(mismatch.ready)
+        self.assertEqual("MCP_SKILL_ENTRYPOINT_MISMATCH", mismatch.code)
+        self.assertFalse(mismatch.refresh_required)
+        self.assertFalse(mismatch.safe_to_refresh)
+        self.assertTrue(mismatch.reinit_required)
+        self.assertNotIn(str(other_script), repr(mismatch))
+        self.assertNotIn(self.raw_tunnel, repr(mismatch))
 
     def test_profile_controller_lease_is_owner_only_cloexec_and_exclusive(self) -> None:
         runtime_root = self.root / "profile-controller-runtime"

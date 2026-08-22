@@ -106,7 +106,9 @@ tunnel-client doctor --profile <name> --explain
 tunnel-client run --profile <name> ...
 ```
 
-Run the secretless gptpro MCP probe first. On first use, the user explicitly initializes the profile with that exact binary path/hash. Before activation, the user confirms the exact visible ChatGPT app/workspace binding. `mcp-activate` re-verifies the approved package and runs the profile's `doctor` preflight before consuming the package's single activation attempt. It then creates owner-only user-global `activating` state plus a package-local audit header, starts one exact `tunnel-client run` child with an owner-only Unix health/admin socket and no TCP listener, and waits for:
+Run the secretless gptpro MCP probe first. On first use, the user explicitly initializes the profile with that exact binary path/hash. Treat `--tunnel-profile` as the exact filename stem, not an alias. A missing profile needs attended init; a profile pinned to another checkout/installation reports `MCP_SKILL_ENTRYPOINT_MISMATCH` and needs a separately named attended profile for the current Skill root, never an interpreter refresh.
+
+Before activation, the user confirms the exact visible ChatGPT app/workspace binding. `mcp-activate` re-verifies the approved package and runs the profile's `doctor` preflight before consuming the package's single activation attempt. It then creates owner-only user-global `activating` state plus a package-local audit header, starts one exact `tunnel-client run` child with an owner-only Unix health/admin socket and no TCP listener, and waits for:
 
 ```bash
 python3 <skill-dir>/scripts/gptpro.py mcp-probe \

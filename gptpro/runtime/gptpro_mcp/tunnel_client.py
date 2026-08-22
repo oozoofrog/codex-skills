@@ -232,6 +232,7 @@ class TunnelProfileInspection:
     code: str | None
     refresh_required: bool
     safe_to_refresh: bool
+    reinit_required: bool
     profile_sha256: str
     profile_dir_sha256: str
     observed_mcp_command_sha256: str
@@ -745,6 +746,11 @@ def _read_profile_document(name: str, directory: Path) -> tuple[bytes, str]:
     except TunnelClientError:
         raise
     except RuntimeStateError as exc:
+        if isinstance(exc.__cause__, FileNotFoundError):
+            raise TunnelClientError(
+                "TUNNEL_PROFILE_NOT_FOUND",
+                "The requested Tunnel profile does not exist.",
+            ) from exc
         raise TunnelClientError(exc.code, "The Tunnel profile file is unsafe.") from exc
     except OSError as exc:
         raise TunnelClientError("TUNNEL_PROFILE_UNSAFE", "Unable to read the Tunnel profile.") from exc
@@ -919,6 +925,7 @@ def inspect_tunnel_profile(
             code=None,
             refresh_required=False,
             safe_to_refresh=False,
+            reinit_required=False,
             **common,
         )
     try:
@@ -928,6 +935,29 @@ def inspect_tunnel_profile(
         raise TunnelClientError(
             "TUNNEL_PROFILE_UNSAFE", "The Tunnel profile MCP command is malformed."
         ) from exc
+    canonical_observed = observed_command == shlex.join(observed_arguments)
+    entrypoint = observed_arguments[-2] if len(observed_arguments) >= 2 else ""
+    entrypoint_mismatch = (
+        len(observed_arguments) == len(expected_arguments)
+        and len(observed_arguments) >= 3
+        and observed_arguments[:-2] == expected_arguments[:-2]
+        and observed_arguments[-1] == expected_arguments[-1]
+        and observed_arguments[-2] != expected_arguments[-2]
+        and Path(entrypoint).is_absolute()
+        and Path(entrypoint).name == "gptpro_mcp.py"
+        and Path(entrypoint).parent.name == "scripts"
+        and not any(ord(character) < 32 for character in entrypoint)
+        and canonical_observed
+    )
+    if entrypoint_mismatch:
+        return TunnelProfileInspection(
+            ready=False,
+            code="MCP_SKILL_ENTRYPOINT_MISMATCH",
+            refresh_required=False,
+            safe_to_refresh=False,
+            reinit_required=True,
+            **common,
+        )
     interpreter = observed_arguments[0] if observed_arguments else ""
     refreshable = (
         len(observed_arguments) == len(expected_arguments)
@@ -935,7 +965,7 @@ def inspect_tunnel_profile(
         and observed_arguments[1:] == expected_arguments[1:]
         and Path(interpreter).is_absolute()
         and not any(ord(character) < 32 for character in interpreter)
-        and observed_command == shlex.join(observed_arguments)
+        and canonical_observed
     )
     if not refreshable:
         raise TunnelClientError(
@@ -947,6 +977,7 @@ def inspect_tunnel_profile(
         code="MCP_INTERPRETER_PATH_DRIFT",
         refresh_required=True,
         safe_to_refresh=True,
+        reinit_required=False,
         **common,
     )
 

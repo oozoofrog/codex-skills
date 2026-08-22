@@ -5021,6 +5021,7 @@ def command_mcp_profile_check(args: argparse.Namespace) -> int:
             "code": inspection.code,
             "refresh_required": inspection.refresh_required,
             "safe_to_refresh": inspection.safe_to_refresh,
+            "reinit_required": inspection.reinit_required,
             "tunnel_profile": args.tunnel_profile,
             "tunnel_profile_sha256": inspection.profile_sha256,
             "profile_dir_sha256": inspection.profile_dir_sha256,
@@ -5037,6 +5038,7 @@ def command_mcp_profile_check(args: argparse.Namespace) -> int:
             "code": exc.code,
             "refresh_required": False,
             "safe_to_refresh": False,
+            "reinit_required": exc.code == "TUNNEL_PROFILE_NOT_FOUND",
             "tunnel_profile": args.tunnel_profile,
             "credential_resolution": False,
             "tunnel_client_execution": False,
@@ -5323,7 +5325,7 @@ def _command_mcp_activate_with_profile_lease(
         if not profile_inspection.ready:
             raise TunnelClientError(
                 profile_inspection.code or "TUNNEL_PROFILE_UNSAFE",
-                "Run mcp-profile-check and explicitly refresh the stale Tunnel profile before activation.",
+                "Run mcp-profile-check and complete the reported attended profile action before activation.",
             )
         env = runtime_key_environment(args.runtime_api_key_ref)
         manifest = verified["manifest"]

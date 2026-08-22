@@ -108,6 +108,8 @@ Install or build the official `tunnel-client` separately, then use the attended 
   "<skill-dir>/scripts/gptpro_mcp.py" serve
 ```
 
+`--tunnel-profile` is the exact filename stem (`<name>.yaml`), not an auto-discovered alias. A profile is bound to the absolute Skill root used at init: `TUNNEL_PROFILE_NOT_FOUND` requires attended init, while `MCP_SKILL_ENTRYPOINT_MISMATCH` means another checkout/installation needs a separately named attended profile; neither case permits `mcp-profile-refresh`.
+
 Do not hand-edit that command. Isolated mode ignores user-site and `PYTHON*` configuration, `-S` suppresses `sitecustomize`, and the `/dev/null` pycache prefix prevents source-adjacent bytecode from replacing the hashed Skill source. The wrapper validates the narrow official init profile shape, owner-only profile path and bytes, canonical OpenAI endpoint, system-trust/no-proxy policy, single `main` command, and exact command hash before key-bearing `doctor` or `run`.
 
 The user creates/selects the Tunnel and runtime key, enables Developer Mode, and confirms the intended ChatGPT app/workspace. Do not paste keys into prompts, package files, receipts, audit records, or command-line literal arguments. Official profile initialization stores the Tunnel ID in the owner-only user profile; gptpro handoff/runtime/receipt/audit artifacts retain only its package-bound hash. `doctor` is configuration preflight only. During activation, health/admin is confined to an activation-owned owner-only Unix socket with no TCP listener, and readiness additionally requires the exact foreground process to pass:
