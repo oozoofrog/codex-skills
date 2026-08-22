@@ -52,6 +52,46 @@ def _string_property(*, maximum: int) -> dict[str, Any]:
     return {"type": "string", "minLength": 1, "maxLength": maximum}
 
 
+def _output_schema(tool: str, result_schema: dict[str, Any]) -> dict[str, Any]:
+    """Describe the exact structuredContent envelope for success and domain errors."""
+
+    return {
+        "type": "object",
+        "oneOf": [
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["ok", "tool", "package_id", "result"],
+                "properties": {
+                    "ok": {"const": True},
+                    "tool": {"const": tool},
+                    "package_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "result": result_schema,
+                },
+            },
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["ok", "error"],
+                "properties": {
+                    "ok": {"const": False},
+                    "error": {
+                        "type": "object",
+                        "additionalProperties": True,
+                        "required": ["code", "message", "retryable", "recovery"],
+                        "properties": {
+                            "code": {"type": "string"},
+                            "message": {"type": "string"},
+                            "retryable": {"type": "boolean"},
+                            "recovery": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        ],
+    }
+
+
 COMMON_ANNOTATIONS = {
     "readOnlyHint": True,
     "destructiveHint": False,
@@ -83,7 +123,7 @@ TOOL_CATALOG: tuple[dict[str, Any], ...] = (
                 "cursor": _string_property(maximum=4096),
             },
         },
-        "outputSchema": {
+        "outputSchema": _output_schema("gptpro_package_info", {
             "type": "object",
             "additionalProperties": True,
             "required": [
@@ -100,7 +140,7 @@ TOOL_CATALOG: tuple[dict[str, Any], ...] = (
                 "potential_files": {"type": "integer", "minimum": 0},
                 "potential_bytes": {"type": "integer", "minimum": 0},
             },
-        },
+        }),
         "annotations": COMMON_ANNOTATIONS,
     },
     {
@@ -122,7 +162,7 @@ TOOL_CATALOG: tuple[dict[str, Any], ...] = (
                 "cursor": _string_property(maximum=4096),
             },
         },
-        "outputSchema": {
+        "outputSchema": _output_schema("gptpro_repo_read", {
             "type": "object",
             "additionalProperties": True,
             "required": ["path", "file_sha256", "returned", "text", "fragment_sha256", "complete"],
@@ -134,7 +174,7 @@ TOOL_CATALOG: tuple[dict[str, Any], ...] = (
                 "fragment_sha256": {"type": "string"},
                 "complete": {"type": "boolean"},
             },
-        },
+        }),
         "annotations": COMMON_ANNOTATIONS,
     },
     {
@@ -172,7 +212,7 @@ TOOL_CATALOG: tuple[dict[str, Any], ...] = (
                 "cursor": _string_property(maximum=4096),
             },
         },
-        "outputSchema": {
+        "outputSchema": _output_schema("gptpro_repo_search", {
             "type": "object",
             "additionalProperties": True,
             "required": ["query_sha256", "matches", "returned_results", "complete"],
@@ -182,7 +222,7 @@ TOOL_CATALOG: tuple[dict[str, Any], ...] = (
                 "returned_results": {"type": "integer", "minimum": 0},
                 "complete": {"type": "boolean"},
             },
-        },
+        }),
         "annotations": COMMON_ANNOTATIONS,
     },
 )

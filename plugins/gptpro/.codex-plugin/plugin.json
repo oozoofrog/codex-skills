@@ -1,7 +1,7 @@
 {
   "name": "gptpro",
   "version": "0.1.0",
-  "description": "Secure attended ChatGPT Pro handoffs with an experimental Web MCP governance foundation.",
+  "description": "Secure attended ChatGPT Pro handoffs with an experimental read-only Web MCP foundation and protocol core.",
   "author": {
     "name": "oozoofrog",
     "url": "https://github.com/oozoofrog"
@@ -18,7 +18,7 @@
   "interface": {
     "displayName": "GPT Pro Collaborator",
     "shortDescription": "ChatGPT Pro handoffs and experimental Web MCP",
-    "longDescription": "Prepare an approved GitHub-first, immutable-SHA repository handoff with verified text fallback for logged-in ChatGPT Pro. An explicit experimental schema-3 foundation can bind a future read-only Web MCP disclosure without claiming that the runtime or ChatGPT connection is available.",
+    "longDescription": "Prepare an approved GitHub-first, immutable-SHA repository handoff with verified text fallback for logged-in ChatGPT Pro. An explicit experimental schema-3 foundation and deny-all protocol core can bind and locally test a future read-only Web MCP disclosure without claiming that authorization, Tunnel lifecycle, or ChatGPT connectivity is available.",
     "developerName": "oozoofrog",
     "category": "Productivity",
     "capabilities": [

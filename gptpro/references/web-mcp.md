@@ -7,16 +7,17 @@ This path is an attended, experimental way for ChatGPT Web to inspect an approve
 Keep implementation status separate from operational proof:
 
 - **Foundation:** schema and governance may support preparing, verifying, and approving an explicit `mcp-read` package.
-- **Runtime:** the local read-only MCP server, authorization, audit, and Tunnel lifecycle require their corresponding CLI commands and tests to be present.
+- **Protocol core:** this build may contain the local stdio server, strict immutable-archive reader, three bounded tools, and compatibility tests. Its standalone authorization provider is deny-all.
+- **Runtime:** persistent active authorization, fail-before-return audit, and Tunnel lifecycle require their corresponding CLI commands and tests to be present.
 - **E2E:** do not claim that ChatGPT Developer Mode can use the runtime until a harmless, logged-in account test has passed and its evidence has been recorded.
 
-Treat any command below as planned unless it appears in `python3 <skill-dir>/scripts/gptpro.py --help`. A foundation-only build must not imply that activation or ChatGPT connectivity is implemented.
+Treat any command below as planned unless it appears in `python3 <skill-dir>/scripts/gptpro.py --help`. The existence of `scripts/gptpro_mcp.py` proves only a local protocol core; it must not imply that activation or ChatGPT connectivity is implemented.
 
 ## Protocol compatibility evidence
 
 The profile name `openai-tunnel-legacy-tools-v1` is a narrow compatibility contract, not a claim of general latest-MCP support. The planned stdio runtime must accept legacy `2025-06-18` and `2025-11-25`; a current dual-era client may first probe `server/discover`, which a legacy-only server should answer promptly with JSON-RPC `-32601` before accepting legacy initialization.
 
-OpenAI's public `tunnel-client` v0.0.12 test fixture exercises `initialize` with `2025-06-18`, followed by `notifications/initialized` and a tool call. Its Go SDK dependency does not by itself prove an upper wire-version limit because the Tunnel transports raw JSON-RPC. The supported Platform binary, exact runtime commands/status JSON, and logged-in ChatGPT account path must therefore be tested before runtime code is merged or this path is called operational. No such client or account E2E is part of this foundation.
+OpenAI's public `tunnel-client` v0.0.12 test fixture exercises `initialize` with `2025-06-18`, followed by `notifications/initialized` and a tool call. Its Go SDK also parses `2025-11-25`, while its current default is `2025-06-18`; the local core accepts both plus `2025-03-26`. Local deterministic transcripts are not a logged-in ChatGPT account E2E. The official client, live control-plane poll, tool discovery, and account path must still be tested before this path is called operational.
 
 ## Three independent axes
 

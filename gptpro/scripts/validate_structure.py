@@ -18,6 +18,7 @@ REQUIRED_FILES = (
     "README.md",
     "agents/openai.yaml",
     "scripts/gptpro.py",
+    "scripts/gptpro_mcp.py",
     "scripts/validate_structure.py",
     "references/advisory-validation.md",
     "references/browser-handoff.md",
@@ -29,7 +30,14 @@ REQUIRED_FILES = (
     "references/workflow.md",
     "runtime/__init__.py",
     "runtime/gptpro_mcp/__init__.py",
+    "runtime/gptpro_mcp/archive.py",
+    "runtime/gptpro_mcp/authorization.py",
+    "runtime/gptpro_mcp/cursor.py",
+    "runtime/gptpro_mcp/errors.py",
+    "runtime/gptpro_mcp/protocol.py",
     "runtime/gptpro_mcp/schema.py",
+    "runtime/gptpro_mcp/server.py",
+    "runtime/gptpro_mcp/tools.py",
     "templates/base-prompt.md.tpl",
     "templates/mode-architecture.md.tpl",
     "templates/mode-ask.md.tpl",
@@ -37,6 +45,7 @@ REQUIRED_FILES = (
     "templates/mode-plan.md.tpl",
     "templates/mode-review.md.tpl",
     "tests/test_gptpro.py",
+    "tests/test_mcp_server.py",
     "tests/test_web_mcp_foundation.py",
 )
 
@@ -173,11 +182,20 @@ def validate_templates(skill_root: Path, errors: list[str]) -> None:
 def validate_python(skill_root: Path, errors: list[str]) -> None:
     python_files = (
         "scripts/gptpro.py",
+        "scripts/gptpro_mcp.py",
         "scripts/validate_structure.py",
         "runtime/__init__.py",
         "runtime/gptpro_mcp/__init__.py",
+        "runtime/gptpro_mcp/archive.py",
+        "runtime/gptpro_mcp/authorization.py",
+        "runtime/gptpro_mcp/cursor.py",
+        "runtime/gptpro_mcp/errors.py",
+        "runtime/gptpro_mcp/protocol.py",
         "runtime/gptpro_mcp/schema.py",
+        "runtime/gptpro_mcp/server.py",
+        "runtime/gptpro_mcp/tools.py",
         "tests/test_gptpro.py",
+        "tests/test_mcp_server.py",
         "tests/test_web_mcp_foundation.py",
     )
     for relative in python_files:
@@ -187,7 +205,11 @@ def validate_python(skill_root: Path, errors: list[str]) -> None:
             compile(source, str(path), "exec")
         except (OSError, UnicodeDecodeError, SyntaxError) as exc:
             errors.append(f"Python validation failed for {relative}: {exc}")
-    for relative in ("scripts/gptpro.py", "scripts/validate_structure.py"):
+    for relative in (
+        "scripts/gptpro.py",
+        "scripts/gptpro_mcp.py",
+        "scripts/validate_structure.py",
+    ):
         path = skill_root / relative
         if path.exists() and path.stat().st_mode & 0o111 == 0:
             errors.append(f"Executable script lacks an execute bit: {relative}")
@@ -245,6 +267,34 @@ def validate_mcp_foundation(skill_root: Path, errors: list[str]) -> None:
         errors.append(f"Web MCP schema fixture validation failed: {exc}")
 
 
+def validate_mcp_runtime_dependencies(skill_root: Path, errors: list[str]) -> None:
+    """Reject accidental third-party imports in the portable MCP runtime."""
+
+    paths = [skill_root / "scripts/gptpro_mcp.py"] + sorted(
+        (skill_root / "runtime/gptpro_mcp").glob("*.py")
+    )
+    stdlib = set(getattr(sys, "stdlib_module_names", ()))
+    allowed_local = {"runtime"}
+    for path in paths:
+        relative = path.relative_to(skill_root).as_posix()
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (OSError, UnicodeDecodeError, SyntaxError) as exc:
+            errors.append(f"Unable to inspect MCP runtime dependencies in {relative}: {exc}")
+            continue
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".", 1)[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                imported.add(node.module.split(".", 1)[0])
+        unexpected = sorted(imported - stdlib - allowed_local - {"__future__"})
+        if unexpected:
+            errors.append(
+                f"Portable MCP runtime imports third-party modules in {relative}: {unexpected}"
+            )
+
+
 def package_files(skill_root: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     for path in sorted(skill_root.rglob("*")):
@@ -267,7 +317,11 @@ def validate_mirror(skill_root: Path, mirror: Path, errors: list[str]) -> None:
             f"extra={sorted(set(mirror_files) - set(primary_files))}, "
             f"changed={sorted(path for path in set(primary_files) & set(mirror_files) if primary_files[path] != mirror_files[path])}"
         )
-    for relative in ("scripts/gptpro.py", "scripts/validate_structure.py"):
+    for relative in (
+        "scripts/gptpro.py",
+        "scripts/gptpro_mcp.py",
+        "scripts/validate_structure.py",
+    ):
         primary_mode = (skill_root / relative).stat().st_mode & 0o111
         mirror_mode = (mirror / relative).stat().st_mode & 0o111 if (mirror / relative).exists() else 0
         if primary_mode != mirror_mode:
@@ -289,6 +343,7 @@ def validate(skill_root: Path, mirror: Path | None) -> dict[str, object]:
             validate_templates(root, errors)
             validate_python(root, errors)
             validate_mcp_foundation(root, errors)
+            validate_mcp_runtime_dependencies(root, errors)
     if mirror is not None and root.is_dir():
         validate_mirror(root, mirror.expanduser().resolve(), errors)
     return {
@@ -302,6 +357,7 @@ def validate(skill_root: Path, mirror: Path | None) -> dict[str, object]:
             "prompt-placeholders",
             "python-syntax-and-mode",
             "web-mcp-read-only-schema",
+            "web-mcp-stdlib-runtime",
             *(("standalone-plugin-mirror",) if mirror else ()),
         ],
         "errors": errors,

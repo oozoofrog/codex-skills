@@ -4,7 +4,7 @@
 
 It initializes local handoff storage, scans and hashes selected repository files, records the exact Git state, excludes likely secrets and build noise, requires transport-specific user approval, guides the visible Chrome or human handoff, imports only the package-marked response, and records Codex's later evaluation. GitHub-first handoffs pin a remotely verified immutable commit and send only a prompt; text handoffs retain structured Markdown alternatives. A ZIP is retained locally for audit and integrity checks but is not uploaded by default.
 
-This build also contains an **experimental governance foundation** for an explicit `mcp-read` schema-3 package. It can prepare, verify, and approve a future maximum read-only disclosure contract, but it does not yet contain the MCP server, active authorization, `tunnel-client` lifecycle, or verified ChatGPT Web connection. Consequently, an `mcp-read` prompt must not be sent from this foundation-only build. See [Web MCP repository consultation](references/web-mcp.md).
+This build also contains an **experimental governance foundation and dependency-free MCP protocol core** for an explicit `mcp-read` schema-3 package. The core verifies and reads the immutable ZIP without extraction, exposes exactly three bounded read-only tools, and defaults to deny-all. Persistent active authorization, durable audit, `tunnel-client` lifecycle, and a verified ChatGPT Web connection are not present in this phase, so an `mcp-read` prompt must not be sent from this build. See [Web MCP repository consultation](references/web-mcp.md).
 
 ## Install
 
@@ -93,7 +93,7 @@ python3 scripts/gptpro.py prepare \
   --task "Review this approved immutable snapshot."
 ```
 
-Review `manifest.json`, `status`, and the exact maximum file/hash set before using both approval flags. Approval does not activate a Tunnel in this build.
+Review `manifest.json`, `status`, and the exact maximum file/hash set before using both approval flags. Approval does not activate a Tunnel in this build. `scripts/gptpro_mcp.py` is a protocol/compatibility entrypoint and deliberately denies every content call until the later governance layer supplies an active authorization.
 
 `human-handoff` is read-only: it verifies the package and prints the approved paths, hashes, model, user steps, expected return evidence, and retry rule. It does not change state, authorize transmission, or mark a message as sent. The five modes are `plan`, `ask`, `review`, `debug`, and `architecture`. Run `python3 scripts/gptpro.py --help` for the full lifecycle.
 
@@ -114,7 +114,7 @@ python3 gptpro/scripts/validate_structure.py \
   --json
 ```
 
-It checks required files, exact `name`/`description` frontmatter, local Markdown links, prompt placeholder contract, Python syntax/executable modes, the exact dependency-free read-only MCP schema fixture, and optional mirror hashes.
+It checks required files, exact `name`/`description` frontmatter, local Markdown links, prompt placeholder contract, Python syntax/executable modes, the exact dependency-free read-only MCP schema/runtime, and optional mirror hashes.
 
 ## Security posture
 

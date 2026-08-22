@@ -4,6 +4,7 @@
 
 ## [Unreleased]
 ### Added
+- `gptpro` dependency-free Phase-2 Web MCP stdio core: exact three-tool legacy catalog, deny-all default authorization boundary, strict no-extraction immutable ZIP verification, HMAC-bound pagination, bounded literal search/read, cancellation, stable sanitized errors, and protocol/entrypoint tests. Persistent authorization, audit, Tunnel lifecycle, and logged-in ChatGPT Web E2E remain separate gates
 - `gptpro` explicit `mcp-read` schema-3 foundation: browser delivery와 Secure MCP Tunnel connector를 context transport와 분리하고, immutable local ZIP의 최대 공개 file/hash set·정적 read-only tool schema·limits·TTL·package-bound Tunnel hash를 이중 사용자 승인에 결속. 이 단계에는 MCP server, Tunnel process lifecycle, 또는 실제 ChatGPT Web E2E가 포함되지 않음
 - `gptpro/references/web-mcp.md`와 dependency-free foundation tests: raw Tunnel ID 비지속, prompt-only outbound, schema-2 호환, 변조 및 허위 active-session 차단을 검증
 - `gptpro/scripts/validate_structure.py`: PyYAML 없이 standalone/Plugin 구조, frontmatter, 링크, prompt placeholder, Python 문법·실행 모드와 mirror hash를 검증하는 표준 라이브러리 도구
