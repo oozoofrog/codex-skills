@@ -770,7 +770,7 @@ class ProtocolTests(unittest.TestCase):
         responses, _, _ = self.transcript([self.initialize("2026-07-28")])
         self.assertEqual("2025-11-25", responses[0]["result"]["protocolVersion"])
 
-    def test_duplicate_initialize_after_ready_is_rejected_without_closing_tools(self) -> None:
+    def test_different_version_initialize_after_ready_is_rejected_without_closing_tools(self) -> None:
         responses, _, _ = self.transcript([
             self.initialize(),
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
@@ -780,6 +780,39 @@ class ProtocolTests(unittest.TestCase):
         ])
         self.assertEqual(-32600, responses[2]["error"]["code"])
         self.assertEqual(list(TOOL_CATALOG), responses[3]["result"]["tools"])
+
+    def test_same_version_initialize_after_ready_is_idempotent_without_discovery(self) -> None:
+        responses, _, _ = self.transcript([
+            self.initialize(request_id="first"),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            self.initialize(request_id="ready-replay-1"),
+            self.initialize(request_id="ready-replay-2"),
+            {"jsonrpc": "2.0", "id": "list", "method": "tools/list"},
+        ])
+        by_id = {response["id"]: response for response in responses}
+        self.assertEqual(by_id["first"]["result"], by_id["ready-replay-1"]["result"])
+        self.assertEqual(by_id["first"]["result"], by_id["ready-replay-2"]["result"])
+        self.assertEqual(list(TOOL_CATALOG), by_id["list"]["result"]["tools"])
+
+    def test_same_version_initialize_after_discovery_ready_remains_rejected(self) -> None:
+        responses, _, _ = self.transcript([
+            {
+                "jsonrpc": "2.0",
+                "id": "discover",
+                "method": "server/discover",
+                "params": {},
+            },
+            self.initialize(request_id="probe"),
+            self.initialize(request_id="connector"),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            self.initialize(request_id="ready-replay"),
+            {"jsonrpc": "2.0", "id": "list", "method": "tools/list"},
+        ])
+        by_id = {response["id"]: response for response in responses}
+        self.assertEqual(-32601, by_id["discover"]["error"]["code"])
+        self.assertEqual(by_id["probe"]["result"], by_id["connector"]["result"])
+        self.assertEqual(-32600, by_id["ready-replay"]["error"]["code"])
+        self.assertEqual(list(TOOL_CATALOG), by_id["list"]["result"]["tools"])
 
     def test_tunnel_reinitializes_after_modern_discovery_fallback(self) -> None:
         responses, _, _ = self.transcript([
@@ -1014,6 +1047,94 @@ class ProtocolTests(unittest.TestCase):
         )
         self.assertEqual([1, 2], [item["id"] for item in responses])
         self.assertEqual(-32602, responses[1]["error"]["code"])
+
+    def test_tool_call_accepts_optional_meta_without_forwarding_it(self) -> None:
+        class RecordingRuntime:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict[str, object]]] = []
+
+            def call(self, name, arguments, **kwargs):
+                del kwargs
+                self.calls.append((name, arguments))
+                return {"content": [], "structuredContent": {"ok": True}}
+
+        runtime = RecordingRuntime()
+        arguments = {"package_id": PACKAGE_ID}
+        responses, _, _ = self.transcript(
+            [
+                self.initialize(),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "gptpro_package_info",
+                        "arguments": arguments,
+                        "_meta": {"progressToken": "must-not-be-forwarded"},
+                    },
+                },
+            ],
+            runtime=runtime,
+        )
+        self.assertTrue(responses[1]["result"]["structuredContent"]["ok"])
+        self.assertEqual([("gptpro_package_info", arguments)], runtime.calls)
+
+    def test_tool_call_accepts_omitted_arguments_as_empty_object(self) -> None:
+        class RecordingRuntime:
+            def __init__(self) -> None:
+                self.arguments: list[dict[str, object]] = []
+
+            def call(self, name, arguments, **kwargs):
+                del name, kwargs
+                self.arguments.append(arguments)
+                return {"content": [], "structuredContent": {"ok": True}}
+
+        runtime = RecordingRuntime()
+        responses, _, _ = self.transcript(
+            [
+                self.initialize(),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {"name": "gptpro_package_info"},
+                },
+            ],
+            runtime=runtime,
+        )
+        self.assertTrue(responses[1]["result"]["structuredContent"]["ok"])
+        self.assertEqual([{}], runtime.arguments)
+
+    def test_tool_call_rejects_non_object_meta_and_task_augmentation(self) -> None:
+        responses, _, _ = self.transcript(
+            [
+                self.initialize(),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "gptpro_package_info",
+                        "arguments": {},
+                        "_meta": "not-an-object",
+                    },
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "gptpro_package_info",
+                        "arguments": {},
+                        "task": {"ttl": 1},
+                    },
+                },
+            ]
+        )
+        self.assertEqual([-32602, -32602], [item["error"]["code"] for item in responses[1:]])
 
     def test_valid_tool_domain_error_is_a_tool_result(self) -> None:
         responses, _, _ = self.transcript(

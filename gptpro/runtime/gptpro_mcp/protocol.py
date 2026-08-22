@@ -558,7 +558,13 @@ class LegacyMcpServer:
                         before == "initialize_acknowledged"
                         and not self._initialize_replay_used
                     )
-                    or (before == "ready" and self._request_scoped_compat)
+                    or (
+                        before == "ready"
+                        and (
+                            self._request_scoped_compat
+                            or not self._discovery_seen
+                        )
+                    )
                 )
                 and requested == self._protocol_version
             )
@@ -642,10 +648,12 @@ class LegacyMcpServer:
 
     @staticmethod
     def _valid_tool_call_params(params: dict[str, Any]) -> bool:
+        allowed_keys = {"name", "arguments", "_meta"}
         return (
-            set(params) == {"name", "arguments"}
+            set(params).issubset(allowed_keys)
             and params.get("name") in TOOL_NAMES
-            and isinstance(params.get("arguments"), dict)
+            and isinstance(params.get("arguments", {}), dict)
+            and ("_meta" not in params or isinstance(params.get("_meta"), dict))
         )
 
     def _tool_worker(

@@ -401,6 +401,66 @@ class ProtocolTraceTests(unittest.TestCase):
         ):
             self.assertNotIn(secret, persisted)
 
+    def test_ready_reinitialize_and_tool_meta_trace_remain_sanitized(self) -> None:
+        class RecordingRuntime:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def call(self, name, arguments, **kwargs):
+                del name, arguments, kwargs
+                self.calls += 1
+                return {"content": [], "structuredContent": {"ok": True}}
+
+        runtime = RecordingRuntime()
+        secrets = (
+            "first-secret-id",
+            "replay-secret-id",
+            "call-secret-id",
+            "secret-package-id",
+            "secret-progress-token",
+            "gptpro_package_info",
+        )
+        result, _, _ = self.transcript(
+            [
+                {
+                    "jsonrpc": "2.0",
+                    "id": secrets[0],
+                    "method": "initialize",
+                    "params": {"protocolVersion": "2025-11-25"},
+                },
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": secrets[1],
+                    "method": "initialize",
+                    "params": {"protocolVersion": "2025-11-25"},
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": secrets[2],
+                    "method": "tools/call",
+                    "params": {
+                        "name": secrets[5],
+                        "arguments": {"package_id": secrets[3]},
+                        "_meta": {"progressToken": secrets[4]},
+                    },
+                },
+            ],
+            runtime=runtime,
+        )
+        self.assertEqual(0, result)
+        self.assertEqual(1, runtime.calls)
+        decisions = [
+            event for event in self.trace.verify().events if event["stage"] == "decision"
+        ]
+        self.assertEqual(
+            ["accepted", "initialize_replayed", "tool_dispatched"],
+            [event["outcome"] for event in decisions],
+        )
+        persisted = self.trace.path.read_text(encoding="ascii")
+        for secret in secrets:
+            self.assertNotIn(secret, persisted)
+
     def test_unknown_method_and_unsafe_values_never_persist_raw_text(self) -> None:
         raw_method = "private/method/with/credential-tunnel_secret_value"
         result, _, _ = self.transcript(
