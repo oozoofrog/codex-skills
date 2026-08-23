@@ -77,12 +77,15 @@ class FakeTunnel:
         checks: list[TunnelCheck | BaseException],
         *,
         process_returncode: int | None = None,
+        correlation: dict | BaseException | None = None,
     ) -> None:
         self.events = events
         self.checks = list(checks)
         self.process = FakeProcess(events, returncode=process_returncode)
         self.spawn: dict[str, object] = {}
         self.health_pids: list[int] = []
+        self.correlation = correlation
+        self.correlation_keys: list[bytes] = []
 
     def spawn_run(self, profile: str, **kwargs):
         self.events.append("spawn")
@@ -97,6 +100,18 @@ class FakeTunnel:
         if isinstance(value, BaseException):
             raise value
         return value
+
+    def capture_request_correlation(self, files, *, hmac_key):
+        del files
+        self.events.append("capture_correlation")
+        self.correlation_keys.append(hmac_key)
+        if isinstance(self.correlation, BaseException):
+            raise self.correlation
+        return self.correlation or {
+            "schema_version": 1,
+            "status": "captured",
+            "events": [],
+        }
 
 
 class ControllerTests(unittest.TestCase):
@@ -233,6 +248,79 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.store.root / "control.sock", control_socket_path(self.store.root))
         self.assertEqual([tunnel.process.pid, tunnel.process.pid], tunnel.health_pids)
 
+    def test_optional_request_correlation_is_hmaced_after_revoke_before_exact_stop(self) -> None:
+        tunnel = FakeTunnel(
+            self.events,
+            [self.check(ok=True, poll=True)],
+            correlation={
+                "schema_version": 1,
+                "status": "captured",
+                "events": [{"outer_request_id_hmac_sha256": digest(b"outer")}],
+            },
+        )
+
+        def on_active(session) -> None:
+            self.assertTrue(
+                request_cooperative_stop(session.control_socket, session.session_id_sha256)
+            )
+
+        result = run_foreground(
+            tunnel_client=tunnel,
+            runtime_store=self.store,
+            tunnel_profile="gptpro-web",
+            child_environment={},
+            hooks=self.hooks(on_active=on_active),
+            health_poll_interval=0.01,
+            request_correlation_diagnostic=True,
+        )
+
+        self.assertTrue(tunnel.spawn["request_correlation_diagnostic"])
+        self.assertEqual(1, len(tunnel.correlation_keys))
+        self.assertEqual(32, len(tunnel.correlation_keys[0]))
+        self.assertEqual("captured", result.request_correlation["status"])
+        self.assertLess(
+            self.events.index("revoke:remote_stop"),
+            self.events.index("capture_correlation"),
+        )
+        self.assertLess(
+            self.events.index("capture_correlation"),
+            self.events.index("terminate"),
+        )
+
+    def test_request_correlation_failure_does_not_block_revoke_or_exact_stop(self) -> None:
+        tunnel = FakeTunnel(
+            self.events,
+            [self.check(ok=True, poll=True)],
+            correlation=TunnelClientError(
+                "REQUEST_CORRELATION_UNAVAILABLE",
+                "unsafe raw detail must not escape",
+            ),
+        )
+
+        def on_active(session) -> None:
+            self.assertTrue(
+                request_cooperative_stop(session.control_socket, session.session_id_sha256)
+            )
+
+        result = run_foreground(
+            tunnel_client=tunnel,
+            runtime_store=self.store,
+            tunnel_profile="gptpro-web",
+            child_environment={},
+            hooks=self.hooks(on_active=on_active),
+            health_poll_interval=0.01,
+            request_correlation_diagnostic=True,
+        )
+
+        self.assertTrue(result.authorization_revoked)
+        self.assertTrue(result.stopped_recorded)
+        self.assertEqual("unavailable", result.request_correlation["status"])
+        self.assertEqual(
+            "REQUEST_CORRELATION_UNAVAILABLE",
+            result.request_correlation["code"],
+        )
+        self.assertNotIn("unsafe raw detail", repr(result))
+
     def test_readiness_timeout_faults_before_terminating_and_does_not_record_stop(self) -> None:
         tunnel = FakeTunnel(
             self.events, [self.check(ok=False, code="TUNNEL_NOT_READY")]
@@ -344,6 +432,19 @@ class ControllerTests(unittest.TestCase):
                 hooks=self.hooks(),
             )
         self.assertEqual("MCP_INVALID_ARGUMENT", raised.exception.code)
+        self.assertEqual([], self.events)
+        self.assertIsNone(self.store.read())
+
+        with self.assertRaises(ControllerError) as diagnostic_flag:
+            run_foreground(
+                tunnel_client=tunnel,
+                runtime_store=self.store,
+                tunnel_profile="gptpro-web",
+                child_environment={},
+                hooks=self.hooks(),
+                request_correlation_diagnostic="true",  # type: ignore[arg-type]
+            )
+        self.assertEqual("MCP_INVALID_ARGUMENT", diagnostic_flag.exception.code)
         self.assertEqual([], self.events)
         self.assertIsNone(self.store.read())
 

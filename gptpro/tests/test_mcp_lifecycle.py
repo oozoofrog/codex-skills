@@ -820,6 +820,35 @@ else:
             process.terminate()
             process.wait(timeout=5)
 
+        diagnostic_files = prepare_runtime_files(
+            self.root / "runtime-diagnostic",
+            session_id_sha256=digest(b"diagnostic-run"),
+        )
+        diagnostic_process = client.spawn_run(
+            "gptpro-web",
+            env=runtime_env,
+            runtime_files=diagnostic_files,
+            extra_env={
+                "GPTPRO_MCP_SESSION_CAPABILITY": "B" * 43,
+                "GPTPRO_MCP_RUNTIME_DIR": str(diagnostic_files.url_file.parent),
+            },
+            profile_dir=profile_dir,
+            cwd=self.root,
+            request_correlation_diagnostic=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while (
+                diagnostic_files.url_file.stat().st_size == 0
+                and diagnostic_process.poll() is None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.02)
+            self.assertGreater(diagnostic_files.url_file.stat().st_size, 0)
+        finally:
+            diagnostic_process.terminate()
+            diagnostic_process.wait(timeout=5)
+
         drifted = client.doctor(
             "gptpro-web",
             env=runtime_env,
@@ -872,7 +901,11 @@ else:
         self.assertEqual("/", doctor_argv[doctor_argv.index("--control-plane.url-path") + 1])
         self.assertEqual("", doctor_argv[doctor_argv.index("--ca-bundle") + 1])
         self.assertEqual(os.devnull, doctor_argv[doctor_argv.index("--log.file") + 1])
-        run_argv = next(args for args in invocations if args and args[0] == "run" and "--help" not in args)
+        run_invocations = [
+            args for args in invocations if args and args[0] == "run" and "--help" not in args
+        ]
+        self.assertEqual(2, len(run_invocations))
+        run_argv, diagnostic_run_argv = run_invocations
         for required in (
             "--health.unix-socket",
             str(files.socket_file),
@@ -899,8 +932,17 @@ else:
         self.assertEqual("/", run_argv[run_argv.index("--control-plane.url-path") + 1])
         self.assertEqual("", run_argv[run_argv.index("--ca-bundle") + 1])
         self.assertEqual(os.devnull, run_argv[run_argv.index("--log.file") + 1])
+        self.assertEqual(
+            "info",
+            diagnostic_run_argv[diagnostic_run_argv.index("--log.level") + 1],
+        )
+        self.assertEqual(
+            os.devnull,
+            diagnostic_run_argv[diagnostic_run_argv.index("--log.file") + 1],
+        )
         self.assertFalse(self.profile_log.exists())
         self.assertFalse(any(files.url_file.parent.glob("*.log")))
+        self.assertFalse(any(diagnostic_files.url_file.parent.glob("*.log")))
         for runtime_path in files.url_file.parent.iterdir():
             if runtime_path.is_file():
                 self.assertNotIn(self.raw_tunnel.encode("utf-8"), runtime_path.read_bytes())

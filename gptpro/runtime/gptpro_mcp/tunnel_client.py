@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from .request_correlation import capture_request_correlation as _capture_request_correlation
 from .runtime_state import (
     RuntimeStateError,
     ensure_private_directory,
@@ -2188,6 +2189,7 @@ class TunnelClient:
         profile_dir: Path | None = None,
         cwd: Path | None = None,
         expected_mcp_target_sha256: str | None = None,
+        request_correlation_diagnostic: bool = False,
     ) -> subprocess.Popen[bytes]:
         self._assert_binary_unchanged()
         name = _profile(profile)
@@ -2245,7 +2247,7 @@ class TunnelClient:
                 "--log.file",
                 os.devnull,
                 "--log.level",
-                "warn",
+                "info" if request_correlation_diagnostic else "warn",
                 "--mcp.max-concurrent-requests",
                 "1",
                 "--mcp.command",
@@ -2285,6 +2287,24 @@ class TunnelClient:
             )
         except OSError as exc:
             raise TunnelClientError("TUNNEL_NOT_READY", "Unable to start tunnel-client foreground run.") from exc
+
+    def capture_request_correlation(
+        self,
+        runtime_files: TunnelRuntimeFiles,
+        *,
+        hmac_key: bytes,
+    ) -> dict[str, Any]:
+        """Read and sanitize one bounded private admin-log snapshot in memory."""
+
+        _validate_runtime_files(runtime_files, require_socket=True)
+        loopback_url_from_file(
+            runtime_files.url_file,
+            expected_socket=runtime_files.socket_file,
+        )
+        return _capture_request_correlation(
+            runtime_files.socket_file,
+            hmac_key=hmac_key,
+        )
 
 
 def _hash_or_error(value: str | None) -> str:

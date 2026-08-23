@@ -260,6 +260,26 @@ class AuditLog:
             self._append_record(record)
             return self._verify_locked().summary
 
+    def diagnostic_tool_records(self) -> tuple[dict[str, Any], ...]:
+        """Return only already-audited hashes/counters needed for correlation."""
+
+        with self._locked():
+            verified = self._verify_locked()
+            return tuple(
+                {
+                    "audit_sequence": record["sequence"],
+                    "tool": record["tool"],
+                    "jsonrpc_request_id_sha256": record[
+                        "jsonrpc_request_id_sha256"
+                    ],
+                    "arguments_sha256": record["arguments_sha256"],
+                    "disclosure_bytes": record["disclosure_bytes"],
+                    "result": record["result"],
+                }
+                for record in verified.records
+                if record.get("record_type") == "tool_call"
+            )
+
     def append_rejection(
         self,
         *,

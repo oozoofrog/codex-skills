@@ -3352,6 +3352,9 @@ class RuntimeIdentityBoundTunnelClient:
     def health(self, *args: Any, **kwargs: Any) -> Any:
         return self._delegate.health(*args, **kwargs)
 
+    def capture_request_correlation(self, *args: Any, **kwargs: Any) -> Any:
+        return self._delegate.capture_request_correlation(*args, **kwargs)
+
 
 def checked_schema3_handoff(path_arg: str, *, phase: str | None = None) -> tuple[Path, dict[str, Any]]:
     handoff_dir = validate_handoff_dir(path_arg)
@@ -5317,6 +5320,13 @@ def _command_mcp_activate_with_profile_lease(
 ) -> int:
     """Inspect, preflight, and run while the machine-global profile lease is held."""
 
+    diagnose_request_correlation = getattr(
+        args, "diagnose_request_correlation", False
+    )
+    if not isinstance(diagnose_request_correlation, bool):
+        raise HandoffError(
+            "MCP_INVALID_ARGUMENT: The request-correlation diagnostic flag is invalid"
+        )
     try:
         if not capabilities.supported or not capabilities.health_require_control_plane_poll:
             raise TunnelClientError(
@@ -5437,6 +5447,9 @@ def _command_mcp_activate_with_profile_lease(
             "control_plane_poll_confirmed": session.control_plane_poll_confirmed,
             "expires_at": active.get("expires_at") if isinstance(active, dict) else None,
             "foreground_controller_running": True,
+            "request_correlation_diagnostic_armed": bool(
+                diagnose_request_correlation
+            ),
         }
         print(json.dumps(payload, sort_keys=True, ensure_ascii=False), flush=True)
 
@@ -5462,22 +5475,40 @@ def _command_mcp_activate_with_profile_lease(
             hooks=hooks,
             profile_dir=tunnel_profile_dir_for(args),
             ready_timeout=float(args.ready_timeout),
+            request_correlation_diagnostic=diagnose_request_correlation,
         )
     except (ControllerError, TunnelClientError, RuntimeStateError) as exc:
         raise HandoffError(f"{exc.code}: {exc.message}") from exc
+    terminal_payload: dict[str, Any] = {
+        "event": "mcp_stopped",
+        "status": result.status,
+        "package_id": manifest["package_id"],
+        "session_id_sha256": result.session_id_sha256,
+        "stop_reason": result.stop_reason,
+        "control_plane_poll_confirmed": result.control_plane_poll_confirmed,
+        "authorization_revoked": result.authorization_revoked,
+        "tunnel_runtime_stopped": result.stopped_recorded,
+        "forced_exact_child": result.forced_exact_child,
+    }
+    if diagnose_request_correlation:
+        try:
+            diagnostic_verified = verify_package(handoff_dir)
+        except HandoffError:
+            terminal_payload["request_correlation_diagnostic"] = (
+                mcp_request_correlation_unavailable_payload(
+                    "PACKAGE_EVIDENCE_UNAVAILABLE"
+                )
+            )
+        else:
+            terminal_payload["request_correlation_diagnostic"] = (
+                mcp_request_correlation_payload(
+                    diagnostic_verified,
+                    result.request_correlation,
+                )
+            )
     print(
         json.dumps(
-            {
-                "event": "mcp_stopped",
-                "status": result.status,
-                "package_id": manifest["package_id"],
-                "session_id_sha256": result.session_id_sha256,
-                "stop_reason": result.stop_reason,
-                "control_plane_poll_confirmed": result.control_plane_poll_confirmed,
-                "authorization_revoked": result.authorization_revoked,
-                "tunnel_runtime_stopped": result.stopped_recorded,
-                "forced_exact_child": result.forced_exact_child,
-            },
+            terminal_payload,
             sort_keys=True,
             ensure_ascii=False,
         ),
@@ -5711,6 +5742,250 @@ def protocol_trace_terminal_evidence_payload(
         "protocol_eof_observed": protocol_eof_observed,
         "final_artifact_bound_to_stop_receipt": lifecycle_bound,
     }
+
+
+def mcp_request_correlation_unavailable_payload(
+    code: str = "REQUEST_CORRELATION_INVALID",
+) -> dict[str, Any]:
+    """Return one stable, secret-free diagnostic failure object."""
+
+    safe_code = (
+        code
+        if isinstance(code, str)
+        and re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", code) is not None
+        else "REQUEST_CORRELATION_INVALID"
+    )
+    return {
+        "schema_version": 1,
+        "status": "unavailable",
+        "code": safe_code,
+        "events": [],
+        "write_tool_gate": "blocked",
+        "deduplication_applied": False,
+        "physical_calls_counted": True,
+    }
+
+
+def mcp_request_correlation_payload(
+    verified: dict[str, Any],
+    captured: Any,
+) -> dict[str, Any]:
+    """Align ephemeral Tunnel ID HMACs with trace and disclosure-audit order."""
+
+    unavailable = mcp_request_correlation_unavailable_payload()
+    if not isinstance(captured, dict):
+        return unavailable
+    privacy = captured.get("privacy")
+    if captured.get("status") == "unavailable":
+        code = captured.get("code")
+        if isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", code):
+            unavailable["code"] = code
+        if isinstance(privacy, dict):
+            unavailable["privacy"] = {
+                key: privacy.get(key)
+                for key in (
+                    "scope",
+                    "raw_identifiers_persisted",
+                    "raw_payloads_persisted",
+                    "hmac_key_persisted",
+                    "raw_http_logging_enabled",
+                )
+            }
+        return unavailable
+    events = captured.get("events")
+    if (
+        captured.get("schema_version") != 1
+        or captured.get("status") != "captured"
+        or not isinstance(events, list)
+        or not isinstance(privacy, dict)
+        or any(
+            privacy.get(key) is not False
+            for key in (
+                "raw_identifiers_persisted",
+                "raw_payloads_persisted",
+                "hmac_key_persisted",
+                "raw_http_logging_enabled",
+            )
+        )
+    ):
+        return unavailable
+
+    sanitized_events: list[dict[str, Any]] = []
+    for ordinal, event in enumerate(events, 1):
+        if not isinstance(event, dict) or event.get("ordinal") != ordinal:
+            return unavailable
+        try:
+            outer = require_sha256(
+                event.get("outer_request_id_hmac_sha256"),
+                label="Outer Tunnel request ID HMAC",
+            )
+            rpc_hmac = require_sha256(
+                event.get("rpc_request_id_hmac_sha256"),
+                label="JSON-RPC request ID HMAC",
+            )
+            rpc_hash = require_sha256(
+                event.get("jsonrpc_request_id_sha256"),
+                label="JSON-RPC request ID hash",
+            )
+        except HandoffError:
+            return unavailable
+        outcome = event.get("outcome")
+        if outcome not in {"forwarded", "upstream_error", "transport_error", "downstream_error"}:
+            return unavailable
+        item: dict[str, Any] = {
+            "ordinal": ordinal,
+            "outcome": outcome,
+            "outer_request_id_hmac_sha256": outer,
+            "rpc_request_id_hmac_sha256": rpc_hmac,
+            "jsonrpc_request_id_sha256": rpc_hash,
+        }
+        connector = event.get("connector_request_id_hmac_sha256")
+        if connector is not None:
+            try:
+                item["connector_request_id_hmac_sha256"] = require_sha256(
+                    connector,
+                    label="Connector request ID HMAC",
+                )
+            except HandoffError:
+                return unavailable
+        sanitized_events.append(item)
+
+    try:
+        _, trace_summary, recorded_error, lifecycle_bound = verify_bound_protocol_trace(
+            verified
+        )
+    except HandoffError:
+        trace_summary = None
+        recorded_error = "PROTOCOL_TRACE_OR_STATE_MISMATCH"
+        lifecycle_bound = False
+    base: dict[str, Any] = {
+        "schema_version": 1,
+        "status": "inconclusive",
+        "source": "tunnel_client_private_admin_log",
+        "capture_window_complete": captured.get("capture_window_complete") is True,
+        "admin_events_observed": captured.get("admin_events_observed"),
+        "terminal_command_events": len(sanitized_events),
+        "events": sanitized_events,
+        "privacy": {
+            "scope": "ephemeral_session_hmac_sha256",
+            "raw_identifiers_persisted": False,
+            "raw_payloads_persisted": False,
+            "hmac_key_persisted": False,
+            "raw_http_logging_enabled": False,
+        },
+        "write_tool_gate": "blocked",
+        "deduplication_applied": False,
+        "physical_calls_counted": True,
+    }
+    admin_events_observed = captured.get("admin_events_observed")
+    if (
+        isinstance(admin_events_observed, bool)
+        or not isinstance(admin_events_observed, int)
+        or admin_events_observed < 0
+        or admin_events_observed > 2_000
+    ):
+        base["code"] = "REQUEST_CORRELATION_ADMIN_COUNT_INVALID"
+        return base
+    if captured.get("capture_window_complete") is not True:
+        base["code"] = "REQUEST_CORRELATION_CAPTURE_WINDOW_INCOMPLETE"
+        return base
+    if (
+        trace_summary is None
+        or recorded_error is not None
+        or not lifecycle_bound
+        or trace_summary.truncated
+    ):
+        base["code"] = recorded_error or "REQUEST_CORRELATION_TRACE_INCOMPLETE"
+        return base
+    response_events = [
+        event
+        for event in trace_summary.events
+        if event.get("stage") == "response"
+        and event.get("outcome") == "response_flushed"
+    ]
+    if len(response_events) != len(sanitized_events):
+        base["code"] = "REQUEST_CORRELATION_EVENT_COUNT_MISMATCH"
+        base["protocol_response_events"] = len(response_events)
+        return base
+
+    session = protocol_trace_session(verified)
+    try:
+        audit_records = list(
+            audit_log_for(
+                verified,
+                require_sha256(
+                    session.get("session_id_sha256"),
+                    label="MCP session ID hash",
+                ),
+            ).diagnostic_tool_records()
+        )
+    except (HandoffError, ToolError):
+        base["code"] = "REQUEST_CORRELATION_AUDIT_UNAVAILABLE"
+        return base
+
+    tool_index = 0
+    for item, trace_event in zip(sanitized_events, response_events):
+        item["method"] = trace_event["method"]
+        item["protocol_response_sequence"] = trace_event["sequence"]
+        if trace_event["method"] != "tools_call":
+            continue
+        if tool_index >= len(audit_records):
+            base["code"] = "REQUEST_CORRELATION_AUDIT_COUNT_MISMATCH"
+            return base
+        audit = audit_records[tool_index]
+        tool_index += 1
+        if item["jsonrpc_request_id_sha256"] != audit["jsonrpc_request_id_sha256"]:
+            base["code"] = "REQUEST_CORRELATION_RPC_ID_MISMATCH"
+            return base
+        item.update(audit)
+    if tool_index != len(audit_records):
+        base["code"] = "REQUEST_CORRELATION_AUDIT_COUNT_MISMATCH"
+        return base
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for item in sanitized_events:
+        if item.get("method") != "tools_call":
+            continue
+        key = (str(item["tool"]), str(item["arguments_sha256"]))
+        grouped.setdefault(key, []).append(item)
+    duplicate_groups: list[dict[str, Any]] = []
+    for (tool, arguments_hash), group in sorted(grouped.items()):
+        if len(group) <= 1:
+            continue
+        unique_outer = {
+            item["outer_request_id_hmac_sha256"] for item in group
+        }
+        if len(unique_outer) == 1:
+            classification = "same_outer_request_repeated"
+        elif len(unique_outer) == len(group):
+            classification = "distinct_outer_requests"
+        else:
+            classification = "mixed_outer_requests"
+        duplicate_groups.append(
+            {
+                "tool": tool,
+                "arguments_sha256": arguments_hash,
+                "physical_calls": len(group),
+                "unique_outer_request_ids": len(unique_outer),
+                "classification": classification,
+            }
+        )
+    classifications = {group["classification"] for group in duplicate_groups}
+    if not duplicate_groups:
+        attribution = "no_repeated_tool_arguments"
+    elif classifications == {"same_outer_request_repeated"}:
+        attribution = "same_outer_requests_repeated"
+    elif classifications == {"distinct_outer_requests"}:
+        attribution = "distinct_outer_requests_observed"
+    else:
+        attribution = "mixed_outer_request_pattern"
+    base["status"] = "correlated"
+    base["analysis"] = {
+        "tool_call_events": tool_index,
+        "duplicate_argument_groups": duplicate_groups,
+        "outer_request_attribution": attribution,
+    }
+    return base
 
 
 def bound_protocol_trace_payload(
@@ -6698,6 +6973,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mcp_activate.add_argument("--profile-dir")
     mcp_activate.add_argument("--ready-timeout", type=positive_int, default=60)
+    mcp_activate.add_argument(
+        "--diagnose-request-correlation",
+        action="store_true",
+        help=(
+            "Temporarily retain info-level Tunnel logs in the private in-memory admin ring, "
+            "then emit only session-scoped HMAC correlation after revoke"
+        ),
+    )
     mcp_activate.add_argument("--json", action="store_true", help="Compatibility flag; output is always JSON")
     mcp_activate.set_defaults(func=command_mcp_activate)
 

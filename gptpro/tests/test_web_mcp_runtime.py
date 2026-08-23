@@ -850,6 +850,24 @@ class WebMcpRuntimeTests(unittest.TestCase):
             ]
         )
         self.assertEqual(60, arguments.ready_timeout)
+        self.assertFalse(arguments.diagnose_request_correlation)
+        diagnostic_arguments = parser.parse_args(
+            [
+                "mcp-activate",
+                "--handoff-dir",
+                "/tmp/handoff",
+                "--tunnel-profile",
+                TUNNEL_PROFILE,
+                "--runtime-api-key-ref",
+                "env:CONTROL_PLANE_API_KEY",
+                "--tunnel-client",
+                "/tmp/tunnel-client",
+                "--confirm-tunnel-client-sha256",
+                "0" * 64,
+                "--diagnose-request-correlation",
+            ]
+        )
+        self.assertTrue(diagnostic_arguments.diagnose_request_correlation)
 
     def test_path_discovered_probe_never_receives_runtime_key_or_unrelated_secrets(self) -> None:
         fake_bin = self.root / "fake-bin"
@@ -1334,6 +1352,127 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertFalse(status["effective_authorized"])
         self.run_cli("verify", "--handoff-dir", str(handoff))
 
+    def test_request_correlation_aligns_outer_hmacs_with_trace_and_audit_order(self) -> None:
+        session_hash = "a" * 64
+        verified = {"state": {"mcp_session": {"session_id_sha256": session_hash}}}
+        rpc_hash = hashlib.sha256(b'"same-rpc-id"').hexdigest()
+        trace_events = tuple(
+            {
+                "sequence": index,
+                "method": "tools_call",
+                "stage": "response",
+                "outcome": "response_flushed",
+            }
+            for index in range(1, 7)
+        )
+        trace_summary = SimpleNamespace(
+            truncated=False,
+            events=trace_events,
+        )
+        audits = (
+            *(
+                {
+                    "audit_sequence": index,
+                    "tool": "gptpro_package_info",
+                    "jsonrpc_request_id_sha256": rpc_hash,
+                    "arguments_sha256": "1" * 64,
+                    "disclosure_bytes": 7,
+                    "result": "committed_for_return",
+                }
+                for index in range(1, 4)
+            ),
+            *(
+                {
+                    "audit_sequence": index,
+                    "tool": "gptpro_repo_search",
+                    "jsonrpc_request_id_sha256": rpc_hash,
+                    "arguments_sha256": "2" * 64,
+                    "disclosure_bytes": 50,
+                    "result": "committed_for_return",
+                }
+                for index in range(4, 7)
+            ),
+        )
+        outer = ["a" * 64, "a" * 64, "a" * 64, "b" * 64, "c" * 64, "d" * 64]
+        captured = {
+            "schema_version": 1,
+            "status": "captured",
+            "capture_window_complete": True,
+            "admin_events_observed": 10,
+            "events": [
+                {
+                    "ordinal": index,
+                    "outcome": "forwarded",
+                    "outer_request_id_hmac_sha256": outer[index - 1],
+                    "rpc_request_id_hmac_sha256": "e" * 64,
+                    "jsonrpc_request_id_sha256": rpc_hash,
+                }
+                for index in range(1, 7)
+            ],
+            "privacy": {
+                "scope": "ephemeral_session_hmac_sha256",
+                "raw_identifiers_persisted": False,
+                "raw_payloads_persisted": False,
+                "hmac_key_persisted": False,
+                "raw_http_logging_enabled": False,
+            },
+        }
+        fake_audit = SimpleNamespace(diagnostic_tool_records=lambda: audits)
+        with (
+            mock.patch.object(
+                self.module,
+                "verify_bound_protocol_trace",
+                return_value=(None, trace_summary, None, True),
+            ),
+            mock.patch.object(self.module, "audit_log_for", return_value=fake_audit),
+        ):
+            report = self.module.mcp_request_correlation_payload(verified, captured)
+
+        self.assertEqual("correlated", report["status"])
+        self.assertEqual("mixed_outer_request_pattern", report["analysis"]["outer_request_attribution"])
+        groups = {
+            group["tool"]: group
+            for group in report["analysis"]["duplicate_argument_groups"]
+        }
+        self.assertEqual(
+            "same_outer_request_repeated",
+            groups["gptpro_package_info"]["classification"],
+        )
+        self.assertEqual(
+            "distinct_outer_requests",
+            groups["gptpro_repo_search"]["classification"],
+        )
+        self.assertTrue(report["physical_calls_counted"])
+        self.assertFalse(report["deduplication_applied"])
+        self.assertEqual("blocked", report["write_tool_gate"])
+
+    def test_request_correlation_rejects_an_incomplete_admin_ring_window(self) -> None:
+        report = self.module.mcp_request_correlation_payload(
+            {"state": {}},
+            {
+                "schema_version": 1,
+                "status": "captured",
+                "capture_window_complete": False,
+                "admin_events_observed": 2_000,
+                "events": [],
+                "privacy": {
+                    "scope": "ephemeral_session_hmac_sha256",
+                    "raw_identifiers_persisted": False,
+                    "raw_payloads_persisted": False,
+                    "hmac_key_persisted": False,
+                    "raw_http_logging_enabled": False,
+                },
+            },
+        )
+
+        self.assertEqual("inconclusive", report["status"])
+        self.assertEqual(
+            "REQUEST_CORRELATION_CAPTURE_WINDOW_INCOMPLETE",
+            report["code"],
+        )
+        self.assertEqual("blocked", report["write_tool_gate"])
+        self.assertFalse(report["deduplication_applied"])
+
     def test_corrupt_trace_does_not_erase_exact_stop_or_disclosure_audit(self) -> None:
         handoff = self.prepare_and_approve()
         store, session_hash, _ = self.activate(handoff)
@@ -1700,6 +1839,13 @@ class WebMcpRuntimeTests(unittest.TestCase):
                 authorization_revoked=True,
                 stopped_recorded=False,
                 forced_exact_child=False,
+                request_correlation={
+                    "schema_version": 1,
+                    "status": "captured",
+                    "capture_window_complete": True,
+                    "admin_events_observed": 1,
+                    "events": [],
+                },
             )
 
         arguments = SimpleNamespace(
@@ -1711,6 +1857,7 @@ class WebMcpRuntimeTests(unittest.TestCase):
             confirm_workspace_binding=True,
             profile_dir=None,
             ready_timeout=1,
+            diagnose_request_correlation=True,
         )
         output = io.StringIO()
         with (
@@ -1744,6 +1891,16 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertEqual("faulted", store.read()["status"])
         self.assertEqual(
             observed["damaged"], (handoff / "receipt.json").read_bytes()
+        )
+        terminal = json.loads(output.getvalue().splitlines()[-1])
+        self.assertEqual("mcp_stopped", terminal["event"])
+        self.assertEqual(
+            "PACKAGE_EVIDENCE_UNAVAILABLE",
+            terminal["request_correlation_diagnostic"]["code"],
+        )
+        self.assertEqual(
+            "blocked",
+            terminal["request_correlation_diagnostic"]["write_tool_gate"],
         )
 
     def test_lazy_expiry_is_terminal_without_advancing_lifecycle_phase(self) -> None:
