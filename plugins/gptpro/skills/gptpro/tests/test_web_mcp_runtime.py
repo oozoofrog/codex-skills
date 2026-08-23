@@ -797,6 +797,49 @@ class WebMcpRuntimeTests(unittest.TestCase):
         secret_resolver.assert_not_called()
         client.doctor.assert_not_called()
 
+    def test_request_correlation_rejects_unpinned_tunnel_before_key_resolution(self) -> None:
+        arguments = SimpleNamespace(
+            handoff_dir="/approved/handoff",
+            tunnel_profile=TUNNEL_PROFILE,
+            runtime_api_key_ref="env:MUST_NOT_BE_READ",
+            tunnel_client="/trusted/tunnel-client",
+            confirm_tunnel_client_sha256="0" * 64,
+            confirm_workspace_binding=True,
+            profile_dir=None,
+            ready_timeout=1,
+            diagnose_request_correlation=True,
+        )
+        client = mock.Mock()
+        capabilities = SimpleNamespace(
+            supported=True,
+            health_require_control_plane_poll=True,
+            request_correlation_contract_supported=False,
+        )
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        with (
+            mock.patch.object(
+                self.module,
+                "checked_schema3_handoff",
+                return_value=(Path("/approved/handoff"), {"manifest": {}}),
+            ),
+            mock.patch.object(
+                self.module,
+                "confirmed_key_bearing_tunnel_client",
+                return_value=(client, capabilities),
+            ),
+            mock.patch.object(self.module, "runtime_store_for", return_value=store),
+            mock.patch.object(self.module, "inspect_tunnel_profile") as inspect,
+            mock.patch.object(self.module, "runtime_key_environment") as secret_resolver,
+            self.assertRaisesRegex(
+                self.module.HandoffError,
+                "REQUEST_CORRELATION_UNSUPPORTED_VERSION",
+            ),
+        ):
+            self.module.command_mcp_activate(arguments)
+        inspect.assert_not_called()
+        secret_resolver.assert_not_called()
+        client.doctor.assert_not_called()
+
     def test_lifecycle_cli_has_no_runtime_root_override(self) -> None:
         parser = self.module.build_parser()
         subcommands = next(
@@ -1355,7 +1398,7 @@ class WebMcpRuntimeTests(unittest.TestCase):
     def test_request_correlation_aligns_outer_hmacs_with_trace_and_audit_order(self) -> None:
         session_hash = "a" * 64
         verified = {"state": {"mcp_session": {"session_id_sha256": session_hash}}}
-        rpc_hash = hashlib.sha256(b'"same-rpc-id"').hexdigest()
+        rpc_hash = hashlib.sha256(b"7").hexdigest()
         trace_events = tuple(
             {
                 "sequence": index,
@@ -1367,6 +1410,7 @@ class WebMcpRuntimeTests(unittest.TestCase):
         )
         trace_summary = SimpleNamespace(
             truncated=False,
+            closed=True,
             events=trace_events,
         )
         audits = (
@@ -1397,8 +1441,13 @@ class WebMcpRuntimeTests(unittest.TestCase):
         captured = {
             "schema_version": 1,
             "status": "captured",
+            "private_contract": (
+                "tunnel-client-0.0.12-881c9a8fed7cccbe6607cd419863bbca506b8215"
+            ),
             "capture_window_complete": True,
             "admin_events_observed": 10,
+            "terminal_command_events": 6,
+            "terminal_error_events": 0,
             "events": [
                 {
                     "ordinal": index,
@@ -1410,10 +1459,11 @@ class WebMcpRuntimeTests(unittest.TestCase):
                 for index in range(1, 7)
             ],
             "privacy": {
-                "scope": "ephemeral_session_hmac_sha256",
+                "scope": "terminal_identifiers_ephemeral_session_hmac_sha256",
                 "raw_identifiers_persisted": False,
                 "raw_payloads_persisted": False,
                 "hmac_key_persisted": False,
+                "stable_join_hashes_exposed_in_terminal": False,
                 "raw_http_logging_enabled": False,
             },
         }
@@ -1445,6 +1495,15 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertTrue(report["physical_calls_counted"])
         self.assertFalse(report["deduplication_applied"])
         self.assertEqual("blocked", report["write_tool_gate"])
+        serialized = json.dumps(report, sort_keys=True)
+        self.assertNotIn("jsonrpc_request_id_sha256", serialized)
+        self.assertNotIn("arguments_sha256", serialized)
+        self.assertNotIn(rpc_hash, serialized)
+        self.assertFalse(
+            report["privacy"]["stable_join_hashes_exposed_in_terminal"]
+        )
+        self.assertEqual(1, groups["gptpro_package_info"]["argument_group_ordinal"])
+        self.assertEqual(2, groups["gptpro_repo_search"]["argument_group_ordinal"])
 
     def test_request_correlation_rejects_an_incomplete_admin_ring_window(self) -> None:
         report = self.module.mcp_request_correlation_payload(
@@ -1452,14 +1511,20 @@ class WebMcpRuntimeTests(unittest.TestCase):
             {
                 "schema_version": 1,
                 "status": "captured",
+                "private_contract": (
+                    "tunnel-client-0.0.12-881c9a8fed7cccbe6607cd419863bbca506b8215"
+                ),
                 "capture_window_complete": False,
                 "admin_events_observed": 2_000,
+                "terminal_command_events": 0,
+                "terminal_error_events": 0,
                 "events": [],
                 "privacy": {
-                    "scope": "ephemeral_session_hmac_sha256",
+                    "scope": "terminal_identifiers_ephemeral_session_hmac_sha256",
                     "raw_identifiers_persisted": False,
                     "raw_payloads_persisted": False,
                     "hmac_key_persisted": False,
+                    "stable_join_hashes_exposed_in_terminal": False,
                     "raw_http_logging_enabled": False,
                 },
             },
@@ -1472,6 +1537,174 @@ class WebMcpRuntimeTests(unittest.TestCase):
         )
         self.assertEqual("blocked", report["write_tool_gate"])
         self.assertFalse(report["deduplication_applied"])
+
+    def test_request_correlation_never_pairs_terminal_error_with_late_trace(self) -> None:
+        captured = {
+            "schema_version": 1,
+            "status": "captured",
+            "private_contract": (
+                "tunnel-client-0.0.12-881c9a8fed7cccbe6607cd419863bbca506b8215"
+            ),
+            "capture_window_complete": True,
+            "admin_events_observed": 2,
+            "terminal_command_events": 2,
+            "terminal_error_events": 1,
+            "events": [
+                {
+                    "ordinal": 1,
+                    "outcome": "upstream_error",
+                    "outer_request_id_hmac_sha256": "a" * 64,
+                    "rpc_request_id_hmac_sha256": "b" * 64,
+                    "jsonrpc_request_id_sha256": "c" * 64,
+                },
+                {
+                    "ordinal": 2,
+                    "outcome": "forwarded",
+                    "outer_request_id_hmac_sha256": "d" * 64,
+                    "rpc_request_id_hmac_sha256": "e" * 64,
+                    "jsonrpc_request_id_sha256": "f" * 64,
+                },
+            ],
+            "privacy": {
+                "scope": "terminal_identifiers_ephemeral_session_hmac_sha256",
+                "raw_identifiers_persisted": False,
+                "raw_payloads_persisted": False,
+                "hmac_key_persisted": False,
+                "stable_join_hashes_exposed_in_terminal": False,
+                "raw_http_logging_enabled": False,
+            },
+        }
+        trace_summary = SimpleNamespace(
+            truncated=False,
+            closed=True,
+            events=(
+                {
+                    "sequence": 1,
+                    "method": "tools_call",
+                    "stage": "response",
+                    "outcome": "response_flushed",
+                },
+                {
+                    "sequence": 2,
+                    "method": "tools_call",
+                    "stage": "response",
+                    "outcome": "response_flushed",
+                },
+            ),
+        )
+        with mock.patch.object(
+            self.module,
+            "verify_bound_protocol_trace",
+            return_value=(None, trace_summary, None, True),
+        ):
+            report = self.module.mcp_request_correlation_payload(
+                {"state": {}}, captured
+            )
+        self.assertEqual("inconclusive", report["status"])
+        self.assertEqual(
+            "REQUEST_CORRELATION_TERMINAL_ERROR_PRESENT", report["code"]
+        )
+
+    def test_request_correlation_detects_late_response_count_and_zero_tools(self) -> None:
+        captured = {
+            "schema_version": 1,
+            "status": "captured",
+            "private_contract": (
+                "tunnel-client-0.0.12-881c9a8fed7cccbe6607cd419863bbca506b8215"
+            ),
+            "capture_window_complete": True,
+            "admin_events_observed": 1,
+            "terminal_command_events": 1,
+            "terminal_error_events": 0,
+            "events": [
+                {
+                    "ordinal": 1,
+                    "outcome": "forwarded",
+                    "outer_request_id_hmac_sha256": "a" * 64,
+                    "rpc_request_id_hmac_sha256": "b" * 64,
+                    "jsonrpc_request_id_sha256": "c" * 64,
+                }
+            ],
+            "privacy": {
+                "scope": "terminal_identifiers_ephemeral_session_hmac_sha256",
+                "raw_identifiers_persisted": False,
+                "raw_payloads_persisted": False,
+                "hmac_key_persisted": False,
+                "stable_join_hashes_exposed_in_terminal": False,
+                "raw_http_logging_enabled": False,
+            },
+        }
+        open_trace = SimpleNamespace(
+            truncated=False,
+            closed=False,
+            events=(
+                {
+                    "sequence": 1,
+                    "method": "initialize",
+                    "stage": "response",
+                    "outcome": "response_flushed",
+                },
+            ),
+        )
+        with mock.patch.object(
+            self.module,
+            "verify_bound_protocol_trace",
+            return_value=(None, open_trace, None, True),
+        ):
+            open_result = self.module.mcp_request_correlation_payload(
+                {"state": {}}, captured
+            )
+        self.assertEqual("REQUEST_CORRELATION_TRACE_OPEN", open_result["code"])
+
+        late_trace = SimpleNamespace(
+            truncated=False,
+            closed=True,
+            events=tuple(
+                {
+                    "sequence": index,
+                    "method": "initialize",
+                    "stage": "response",
+                    "outcome": "response_flushed",
+                }
+                for index in (1, 2)
+            ),
+        )
+        with mock.patch.object(
+            self.module,
+            "verify_bound_protocol_trace",
+            return_value=(None, late_trace, None, True),
+        ):
+            late = self.module.mcp_request_correlation_payload(
+                {"state": {}}, captured
+            )
+        self.assertEqual("REQUEST_CORRELATION_EVENT_COUNT_MISMATCH", late["code"])
+
+        no_tool_trace = SimpleNamespace(
+            truncated=False,
+            closed=True,
+            events=(
+                {
+                    "sequence": 1,
+                    "method": "initialize",
+                    "stage": "response",
+                    "outcome": "response_flushed",
+                },
+            ),
+        )
+        fake_audit = SimpleNamespace(diagnostic_tool_records=lambda: ())
+        with (
+            mock.patch.object(
+                self.module,
+                "verify_bound_protocol_trace",
+                return_value=(None, no_tool_trace, None, True),
+            ),
+            mock.patch.object(self.module, "audit_log_for", return_value=fake_audit),
+        ):
+            no_tools = self.module.mcp_request_correlation_payload(
+                {"state": {"mcp_session": {"session_id_sha256": "a" * 64}}},
+                captured,
+            )
+        self.assertEqual("REQUEST_CORRELATION_NO_TOOL_EVENTS", no_tools["code"])
 
     def test_corrupt_trace_does_not_erase_exact_stop_or_disclosure_audit(self) -> None:
         handoff = self.prepare_and_approve()
@@ -1803,6 +2036,7 @@ class WebMcpRuntimeTests(unittest.TestCase):
             binary_sha256=TUNNEL_BINARY_HASH,
             supported=True,
             health_require_control_plane_poll=True,
+            request_correlation_contract_supported=True,
         )
         fake_client.doctor.return_value = SimpleNamespace(
             ok=True,

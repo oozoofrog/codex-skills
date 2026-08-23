@@ -5268,6 +5268,9 @@ def command_mcp_probe(args: argparse.Namespace) -> int:
                 "health_unix_socket": capabilities.health_unix_socket,
                 "health_exact_pid": capabilities.health_exact_pid,
                 "warn_log_level": capabilities.warn_log_level,
+                "request_correlation_contract_supported": (
+                    capabilities.request_correlation_contract_supported
+                ),
                 "supported": capabilities.supported,
             }
             payload["ok"] = payload["ok"] and bool(payload["tunnel_client"]["supported"])
@@ -5332,6 +5335,13 @@ def _command_mcp_activate_with_profile_lease(
             raise TunnelClientError(
                 "TUNNEL_CLIENT_UNSUPPORTED",
                 "The official tunnel-client lacks required foreground or control-plane health capabilities.",
+            )
+        if diagnose_request_correlation and not getattr(
+            capabilities, "request_correlation_contract_supported", False
+        ):
+            raise TunnelClientError(
+                "REQUEST_CORRELATION_UNSUPPORTED_VERSION",
+                "The selected tunnel-client does not match the pinned private diagnostic contract.",
             )
         profile_dir = tunnel_profile_dir_for(args)
         profile_inspection = inspect_tunnel_profile(
@@ -5780,16 +5790,23 @@ def mcp_request_correlation_payload(
         code = captured.get("code")
         if isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", code):
             unavailable["code"] = code
-        if isinstance(privacy, dict):
+        if isinstance(privacy, dict) and all(
+            privacy.get(key) is False
+            for key in (
+                "raw_identifiers_persisted",
+                "raw_payloads_persisted",
+                "hmac_key_persisted",
+                "stable_join_hashes_exposed_in_terminal",
+                "raw_http_logging_enabled",
+            )
+        ):
             unavailable["privacy"] = {
-                key: privacy.get(key)
-                for key in (
-                    "scope",
-                    "raw_identifiers_persisted",
-                    "raw_payloads_persisted",
-                    "hmac_key_persisted",
-                    "raw_http_logging_enabled",
-                )
+                "scope": "terminal_identifiers_ephemeral_session_hmac_sha256",
+                "raw_identifiers_persisted": False,
+                "raw_payloads_persisted": False,
+                "hmac_key_persisted": False,
+                "stable_join_hashes_exposed_in_terminal": False,
+                "raw_http_logging_enabled": False,
             }
         return unavailable
     events = captured.get("events")
@@ -5804,13 +5821,14 @@ def mcp_request_correlation_payload(
                 "raw_identifiers_persisted",
                 "raw_payloads_persisted",
                 "hmac_key_persisted",
+                "stable_join_hashes_exposed_in_terminal",
                 "raw_http_logging_enabled",
             )
         )
     ):
         return unavailable
 
-    sanitized_events: list[dict[str, Any]] = []
+    internal_events: list[dict[str, Any]] = []
     for ordinal, event in enumerate(events, 1):
         if not isinstance(event, dict) or event.get("ordinal") != ordinal:
             return unavailable
@@ -5837,7 +5855,7 @@ def mcp_request_correlation_payload(
             "outcome": outcome,
             "outer_request_id_hmac_sha256": outer,
             "rpc_request_id_hmac_sha256": rpc_hmac,
-            "jsonrpc_request_id_sha256": rpc_hash,
+            "_jsonrpc_request_id_sha256": rpc_hash,
         }
         connector = event.get("connector_request_id_hmac_sha256")
         if connector is not None:
@@ -5848,7 +5866,12 @@ def mcp_request_correlation_payload(
                 )
             except HandoffError:
                 return unavailable
-        sanitized_events.append(item)
+        internal_events.append(item)
+
+    public_events = [
+        {key: value for key, value in item.items() if not key.startswith("_")}
+        for item in internal_events
+    ]
 
     try:
         _, trace_summary, recorded_error, lifecycle_bound = verify_bound_protocol_trace(
@@ -5862,15 +5885,17 @@ def mcp_request_correlation_payload(
         "schema_version": 1,
         "status": "inconclusive",
         "source": "tunnel_client_private_admin_log",
+        "private_contract": captured.get("private_contract"),
         "capture_window_complete": captured.get("capture_window_complete") is True,
         "admin_events_observed": captured.get("admin_events_observed"),
-        "terminal_command_events": len(sanitized_events),
-        "events": sanitized_events,
+        "terminal_command_events": len(internal_events),
+        "events": public_events,
         "privacy": {
-            "scope": "ephemeral_session_hmac_sha256",
+            "scope": "terminal_identifiers_ephemeral_session_hmac_sha256",
             "raw_identifiers_persisted": False,
             "raw_payloads_persisted": False,
             "hmac_key_persisted": False,
+            "stable_join_hashes_exposed_in_terminal": False,
             "raw_http_logging_enabled": False,
         },
         "write_tool_gate": "blocked",
@@ -5878,6 +5903,11 @@ def mcp_request_correlation_payload(
         "physical_calls_counted": True,
     }
     admin_events_observed = captured.get("admin_events_observed")
+    if captured.get("private_contract") != (
+        "tunnel-client-0.0.12-881c9a8fed7cccbe6607cd419863bbca506b8215"
+    ):
+        base["code"] = "REQUEST_CORRELATION_CONTRACT_MISMATCH"
+        return base
     if (
         isinstance(admin_events_observed, bool)
         or not isinstance(admin_events_observed, int)
@@ -5889,6 +5919,18 @@ def mcp_request_correlation_payload(
     if captured.get("capture_window_complete") is not True:
         base["code"] = "REQUEST_CORRELATION_CAPTURE_WINDOW_INCOMPLETE"
         return base
+    if captured.get("terminal_command_events") != len(internal_events):
+        base["code"] = "REQUEST_CORRELATION_CONTRACT_MISMATCH"
+        return base
+    terminal_error_events = sum(
+        item["outcome"] != "forwarded" for item in internal_events
+    )
+    if captured.get("terminal_error_events") != terminal_error_events:
+        base["code"] = "REQUEST_CORRELATION_CONTRACT_MISMATCH"
+        return base
+    if terminal_error_events:
+        base["code"] = "REQUEST_CORRELATION_TERMINAL_ERROR_PRESENT"
+        return base
     if (
         trace_summary is None
         or recorded_error is not None
@@ -5897,13 +5939,16 @@ def mcp_request_correlation_payload(
     ):
         base["code"] = recorded_error or "REQUEST_CORRELATION_TRACE_INCOMPLETE"
         return base
+    if trace_summary.closed is not True:
+        base["code"] = "REQUEST_CORRELATION_TRACE_OPEN"
+        return base
     response_events = [
         event
         for event in trace_summary.events
         if event.get("stage") == "response"
         and event.get("outcome") == "response_flushed"
     ]
-    if len(response_events) != len(sanitized_events):
+    if len(response_events) != len(internal_events):
         base["code"] = "REQUEST_CORRELATION_EVENT_COUNT_MISMATCH"
         base["protocol_response_events"] = len(response_events)
         return base
@@ -5924,9 +5969,12 @@ def mcp_request_correlation_payload(
         return base
 
     tool_index = 0
-    for item, trace_event in zip(sanitized_events, response_events):
+    for item, public_item, trace_event in zip(
+        internal_events, public_events, response_events
+    ):
         item["method"] = trace_event["method"]
-        item["protocol_response_sequence"] = trace_event["sequence"]
+        public_item["method"] = trace_event["method"]
+        public_item["protocol_response_sequence"] = trace_event["sequence"]
         if trace_event["method"] != "tools_call":
             continue
         if tool_index >= len(audit_records):
@@ -5934,22 +5982,45 @@ def mcp_request_correlation_payload(
             return base
         audit = audit_records[tool_index]
         tool_index += 1
-        if item["jsonrpc_request_id_sha256"] != audit["jsonrpc_request_id_sha256"]:
+        if item["_jsonrpc_request_id_sha256"] != audit["jsonrpc_request_id_sha256"]:
             base["code"] = "REQUEST_CORRELATION_RPC_ID_MISMATCH"
             return base
-        item.update(audit)
+        try:
+            arguments_hash = require_sha256(
+                audit.get("arguments_sha256"), label="Audited tool arguments hash"
+            )
+            require_sha256(
+                audit.get("jsonrpc_request_id_sha256"),
+                label="Audited JSON-RPC request ID hash",
+            )
+        except HandoffError:
+            base["code"] = "REQUEST_CORRELATION_AUDIT_UNAVAILABLE"
+            return base
+        item["_arguments_sha256"] = arguments_hash
+        for key in ("audit_sequence", "tool", "disclosure_bytes", "result"):
+            public_item[key] = audit.get(key)
     if tool_index != len(audit_records):
         base["code"] = "REQUEST_CORRELATION_AUDIT_COUNT_MISMATCH"
         return base
+    if tool_index == 0:
+        base["code"] = "REQUEST_CORRELATION_NO_TOOL_EVENTS"
+        return base
 
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for item in sanitized_events:
+    group_ordinals: dict[tuple[str, str], int] = {}
+    for item, public_item in zip(internal_events, public_events):
         if item.get("method") != "tools_call":
             continue
-        key = (str(item["tool"]), str(item["arguments_sha256"]))
+        key = (str(public_item["tool"]), str(item["_arguments_sha256"]))
+        if key not in group_ordinals:
+            group_ordinals[key] = len(group_ordinals) + 1
+        public_item["argument_group_ordinal"] = group_ordinals[key]
         grouped.setdefault(key, []).append(item)
     duplicate_groups: list[dict[str, Any]] = []
-    for (tool, arguments_hash), group in sorted(grouped.items()):
+    for key, group in sorted(
+        grouped.items(), key=lambda entry: group_ordinals[entry[0]]
+    ):
+        tool, _ = key
         if len(group) <= 1:
             continue
         unique_outer = {
@@ -5963,8 +6034,8 @@ def mcp_request_correlation_payload(
             classification = "mixed_outer_requests"
         duplicate_groups.append(
             {
+                "argument_group_ordinal": group_ordinals[key],
                 "tool": tool,
-                "arguments_sha256": arguments_hash,
                 "physical_calls": len(group),
                 "unique_outer_request_ids": len(unique_outer),
                 "classification": classification,

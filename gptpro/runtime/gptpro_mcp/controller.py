@@ -124,6 +124,7 @@ class TunnelRuntime(Protocol):
         files: TunnelRuntimeFiles,
         *,
         hmac_key: bytes,
+        expected_peer_pid: int,
     ) -> Mapping[str, Any]: ...
 
 
@@ -203,6 +204,7 @@ def run_foreground(
     revocation_succeeded = False
     stopped_recorded = False
     process_started = False
+    started_process: subprocess.Popen[bytes] | None = None
     health_confirmed = False
     stop_reason = "controller_exit"
     failure_code = "MCP_ACTIVATION_FAILED"
@@ -248,7 +250,7 @@ def run_foreground(
         }
 
         def process_factory() -> subprocess.Popen[bytes]:
-            nonlocal failure_code, process_started
+            nonlocal failure_code, process_started, started_process
             try:
                 process = tunnel_client.spawn_run(
                     tunnel_profile,
@@ -263,6 +265,7 @@ def run_foreground(
                 failure_code = _exception_code(exc, "TUNNEL_NOT_READY")
                 raise
             process_started = True
+            started_process = process
             return process
 
         def after_start(process: subprocess.Popen[bytes]) -> None:
@@ -348,10 +351,21 @@ def run_foreground(
                                 "REQUEST_CORRELATION_KEY_INVALID",
                                 "The request-correlation key is unavailable.",
                             )
+                        if started_process is None or started_process.poll() is not None:
+                            raise ControllerError(
+                                "REQUEST_CORRELATION_PEER_UNVERIFIED",
+                                "The exact Tunnel child is not live for diagnostic capture.",
+                            )
                         request_correlation_report = tunnel_client.capture_request_correlation(
                             runtime_files,
                             hmac_key=request_correlation_key,
+                            expected_peer_pid=started_process.pid,
                         )
+                        if started_process.poll() is not None:
+                            raise ControllerError(
+                                "REQUEST_CORRELATION_PEER_UNVERIFIED",
+                                "The exact Tunnel child exited during diagnostic capture.",
+                            )
                     except Exception as exc:
                         request_correlation_report = unavailable_request_correlation(
                             _exception_code(exc, "REQUEST_CORRELATION_UNAVAILABLE")

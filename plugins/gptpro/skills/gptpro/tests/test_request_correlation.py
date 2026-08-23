@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import http.server
 import json
+import os
+import socket
 import socketserver
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -39,6 +42,7 @@ class RequestCorrelationTests(unittest.TestCase):
         connector_id: str | None = None,
     ) -> dict[str, object]:
         attrs: dict[str, object] = {
+            "component": "dispatcher",
             "request_id": outer_id,
             "rpc_request_id": rpc_id,
             "tunnel_id": "tunnel_raw_secret",
@@ -131,13 +135,13 @@ class RequestCorrelationTests(unittest.TestCase):
             second["jsonrpc_request_id_sha256"],
         )
 
-    def test_unknown_messages_are_ignored_and_incomplete_window_is_explicit(self) -> None:
-        ignored = self.event(9, outer_id="ignored", rpc_id="ignored")
+    def test_unknown_messages_are_ignored_and_sequence_gap_is_incomplete(self) -> None:
+        ignored = self.event(1, outer_id="ignored", rpc_id="ignored")
         ignored["message"] = "unrelated diagnostic"
         report = sanitize_admin_log_payload(
             self.payload(
                 ignored,
-                self.event(10, outer_id="selected", rpc_id="rpc"),
+                self.event(3, outer_id="selected", rpc_id="rpc"),
             ),
             hmac_key=self.key,
         )
@@ -167,6 +171,7 @@ class RequestCorrelationTests(unittest.TestCase):
                 rpc_id=sequence,
             )
             event["message"] = message
+            event["level"] = "WARN"
             events.append(event)
 
         report = sanitize_admin_log_payload(
@@ -180,7 +185,9 @@ class RequestCorrelationTests(unittest.TestCase):
         )
 
     def test_invalid_sequence_identifier_and_key_fail_closed(self) -> None:
-        with self.assertRaisesRegex(RequestCorrelationError, "REQUEST_CORRELATION_INVALID"):
+        with self.assertRaisesRegex(
+            RequestCorrelationError, "REQUEST_CORRELATION_CONTRACT_MISMATCH"
+        ):
             sanitize_admin_log_payload(
                 self.payload(
                     self.event(2, outer_id="a", rpc_id=1),
@@ -194,6 +201,19 @@ class RequestCorrelationTests(unittest.TestCase):
             sanitize_admin_log_payload(self.payload(invalid), hmac_key=self.key)
         with self.assertRaisesRegex(RequestCorrelationError, "REQUEST_CORRELATION_KEY_INVALID"):
             sanitize_admin_log_payload(self.payload(), hmac_key=b"short")
+
+    def test_recognized_event_requires_exact_component_and_level(self) -> None:
+        wrong_component = self.event(1, outer_id="a", rpc_id=1)
+        wrong_component["attrs"]["component"] = "other"
+        wrong_level = self.event(1, outer_id="a", rpc_id=1)
+        wrong_level["level"] = "WARN"
+        for event in (wrong_component, wrong_level):
+            with self.subTest(event=event):
+                with self.assertRaisesRegex(
+                    RequestCorrelationError,
+                    "REQUEST_CORRELATION_CONTRACT_MISMATCH",
+                ):
+                    sanitize_admin_log_payload(self.payload(event), hmac_key=self.key)
 
     def test_unavailable_report_contains_only_stable_code_and_privacy_flags(self) -> None:
         report = unavailable_request_correlation("unsafe raw value")
@@ -225,9 +245,16 @@ class RequestCorrelationTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
+                peer_reader = (
+                    {}
+                    if sys.platform == "darwin"
+                    else {"_peer_pid_reader": lambda connection: os.getpid()}
+                )
                 report = capture_request_correlation(
                     socket_path,
                     hmac_key=self.key,
+                    expected_peer_pid=os.getpid(),
+                    **peer_reader,
                 )
             finally:
                 server.shutdown()
@@ -237,6 +264,88 @@ class RequestCorrelationTests(unittest.TestCase):
         self.assertEqual(["/api/logs?limit=2000"], requested_paths)
         self.assertEqual("captured", report["status"])
         self.assertNotIn("outer-private", json.dumps(report, sort_keys=True))
+
+    def test_capture_rejects_a_different_unix_socket_peer(self) -> None:
+        response_body = self.payload(self.event(1, outer_id="outer", rpc_id="rpc"))
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 - stdlib handler contract
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = Path(directory) / "admin.sock"
+            server = socketserver.UnixStreamServer(str(socket_path), Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with self.assertRaisesRegex(
+                    RequestCorrelationError, "REQUEST_CORRELATION_PEER_UNVERIFIED"
+                ):
+                    capture_request_correlation(
+                        socket_path,
+                        hmac_key=self.key,
+                        expected_peer_pid=4242,
+                        _peer_pid_reader=lambda connection: 4243,
+                    )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+    def test_total_deadline_interrupts_a_slow_drip_response(self) -> None:
+        response_body = self.payload(self.event(1, outer_id="outer", rpc_id="rpc"))
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = Path(directory) / "admin.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(socket_path))
+            listener.listen(1)
+
+            def serve() -> None:
+                try:
+                    connection, _ = listener.accept()
+                except OSError:
+                    return
+                with connection:
+                    try:
+                        connection.recv(4096)
+                        connection.sendall(
+                            (
+                                "HTTP/1.1 200 OK\r\n"
+                                f"Content-Length: {len(response_body)}\r\n"
+                                "Content-Type: application/json\r\n\r\n"
+                            ).encode("ascii")
+                        )
+                        for byte in response_body:
+                            connection.sendall(bytes((byte,)))
+                            time.sleep(0.02)
+                    except OSError:
+                        pass
+
+            thread = threading.Thread(target=serve, daemon=True)
+            thread.start()
+            started = time.monotonic()
+            try:
+                with self.assertRaisesRegex(
+                    RequestCorrelationError, "REQUEST_CORRELATION_TIMEOUT"
+                ):
+                    capture_request_correlation(
+                        socket_path,
+                        hmac_key=self.key,
+                        expected_peer_pid=os.getpid(),
+                        timeout=0.1,
+                        _peer_pid_reader=lambda connection: os.getpid(),
+                    )
+            finally:
+                elapsed = time.monotonic() - started
+                listener.close()
+                thread.join(timeout=1)
+        self.assertLess(elapsed, 0.6)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -389,6 +390,15 @@ class AuditTests(unittest.TestCase):
         payload = self.path.read_text(encoding="utf-8")
         for forbidden in ("repository body", "raw search query", "sk-", "tunnel_"):
             self.assertNotIn(forbidden, payload)
+        records = tuple(json.loads(line) for line in payload.splitlines())
+        committed = next(
+            record
+            for record in records
+            if record.get("record_type") == "tool_call"
+            and record.get("result") == "committed_for_return"
+        )
+        self.assertEqual(digest(b"request"), committed["jsonrpc_request_id_sha256"])
+        self.assertEqual(digest(b"arguments"), committed["arguments_sha256"])
         with self.assertRaises(ToolError) as raised:
             self.commit(log, calls=3, disclosed=42)
         self.assertEqual("AUDIT_CHAIN_INVALID", raised.exception.code)
@@ -582,7 +592,7 @@ with open({str(self.log)!r}, 'a', encoding='utf-8') as handle:
 with open({str(self.environment_log)!r}, 'a', encoding='utf-8') as handle:
     handle.write(json.dumps(dict(os.environ), sort_keys=True) + '\\n')
 if args == ['--version']:
-    print('tunnel-client v0.0.12')
+    print('0.0.12+881c9a8fed7cccbe6607cd419863bbca506b8215 (git sha: 881c9a8fed7cccbe6607cd419863bbca506b8215)')
 elif args[:2] == ['help', 'quickstart']:
     print('quickstart'); sys.exit(0)
 elif args[:2] == ['init', '--help']:
@@ -1767,6 +1777,30 @@ time.sleep(60)
             warn_log_level=True,
         )
         self.assertFalse(missing_exact_pid.supported)
+
+    def test_private_request_correlation_contract_is_exact_version_only(self) -> None:
+        exact = TunnelCapabilities(
+            binary_sha256=digest(b"binary"),
+            version=(
+                "0.0.12+881c9a8fed7cccbe6607cd419863bbca506b8215 "
+                "(git sha: 881c9a8fed7cccbe6607cd419863bbca506b8215)"
+            ),
+            quickstart_help=True,
+            init_profile=True,
+            doctor_profile=True,
+            foreground_run=True,
+            run_mcp_command_override=True,
+            health_require_control_plane_poll=True,
+            health_unix_socket=True,
+            health_exact_pid=True,
+            warn_log_level=True,
+        )
+        self.assertTrue(exact.supported)
+        self.assertTrue(exact.request_correlation_contract_supported)
+
+        unknown = replace(exact, version="v99.0.0")
+        self.assertTrue(unknown.supported)
+        self.assertFalse(unknown.request_correlation_contract_supported)
 
     def test_probe_does_not_treat_pid_file_as_exact_pid_support(self) -> None:
         pid_file_only = self.root / "tunnel-client-pid-file-only"

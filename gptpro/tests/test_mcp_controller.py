@@ -86,6 +86,7 @@ class FakeTunnel:
         self.health_pids: list[int] = []
         self.correlation = correlation
         self.correlation_keys: list[bytes] = []
+        self.correlation_pids: list[int] = []
 
     def spawn_run(self, profile: str, **kwargs):
         self.events.append("spawn")
@@ -101,10 +102,11 @@ class FakeTunnel:
             raise value
         return value
 
-    def capture_request_correlation(self, files, *, hmac_key):
+    def capture_request_correlation(self, files, *, hmac_key, expected_peer_pid):
         del files
         self.events.append("capture_correlation")
         self.correlation_keys.append(hmac_key)
+        self.correlation_pids.append(expected_peer_pid)
         if isinstance(self.correlation, BaseException):
             raise self.correlation
         return self.correlation or {
@@ -277,6 +279,7 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(tunnel.spawn["request_correlation_diagnostic"])
         self.assertEqual(1, len(tunnel.correlation_keys))
         self.assertEqual(32, len(tunnel.correlation_keys[0]))
+        self.assertEqual([tunnel.process.pid], tunnel.correlation_pids)
         self.assertEqual("captured", result.request_correlation["status"])
         self.assertLess(
             self.events.index("revoke:remote_stop"),
