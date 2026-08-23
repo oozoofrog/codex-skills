@@ -1,15 +1,31 @@
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "gptpro.py"
 STRUCTURE_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "validate_structure.py"
+
+
+def load_gptpro_module():
+    spec = importlib.util.spec_from_file_location("gptpro_cli_scanner_tests", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+GPTPRO = load_gptpro_module()
 
 
 class GptProCliTests(unittest.TestCase):
@@ -45,13 +61,16 @@ class GptProCliTests(unittest.TestCase):
             check=True,
         )
 
-    def run_cli(self, *args: str, expected: int = 0) -> subprocess.CompletedProcess[str]:
+    def run_cli(
+        self, *args: str, expected: int = 0, umask: int = -1
+    ) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
             ["python3", str(SCRIPT), *args],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
+            umask=umask,
         )
         self.assertEqual(expected, result.returncode, msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}")
         return result
@@ -138,6 +157,157 @@ class GptProCliTests(unittest.TestCase):
         self.assertIn("secret.txt", finding_paths)
         self.assertNotIn(self.secret_value, manifest_text)
         self.assertEqual(0, self.run_cli("verify", "--handoff-dir", str(handoff)).returncode)
+
+    def test_json_boundaries_normalize_surrogates_and_excessive_depth(self) -> None:
+        surrogate = json.loads(r'{"value":"\ud800"}')
+        receipt_event = {
+            "sequence": 1,
+            "timestamp": "2026-08-22T00:00:00Z",
+            "type": "prepared",
+            "data": surrogate,
+            "previous_event_hash": None,
+            "event_hash": "0" * 64,
+        }
+        for label, action in (
+            ("canonical", lambda: GPTPRO.canonical_json_bytes(surrogate)),
+            ("pretty", lambda: GPTPRO.pretty_json_bytes(surrogate)),
+            ("receipt-hash", lambda: GPTPRO.event_hash(receipt_event)),
+        ):
+            with self.subTest(boundary=label), self.assertRaises(GPTPRO.HandoffError):
+                action()
+
+        artifact = self.root / "surrogate.json"
+        artifact.write_text(r'{"value":"\ud800"}', encoding="utf-8")
+        with self.assertRaises(GPTPRO.HandoffError):
+            GPTPRO.load_json(artifact)
+
+        nested: object = 0
+        for _ in range(GPTPRO.MAX_JSON_NESTING_DEPTH + 1):
+            nested = [nested]
+        with self.assertRaises(GPTPRO.HandoffError):
+            GPTPRO.canonical_json_bytes({"nested": nested})
+
+        receipt = GPTPRO.new_receipt(
+            "package-one", {"manifest_sha256": "0" * 64}, schema_version=2
+        )
+        receipt["unexpected_nested_value"] = nested
+        with self.assertRaises(GPTPRO.HandoffError):
+            GPTPRO.receipt_with_event(receipt, "approved", {})
+
+    def test_schema3_handoff_and_all_artifacts_are_owner_only_under_common_umasks(self) -> None:
+        tunnel_id = self.root / "tunnel-id"
+        tunnel_id.write_text("tunnel_" + "permissiontest" * 2, encoding="utf-8")
+        tunnel_id.chmod(0o600)
+        for process_umask in (0o022, 0o002):
+            with self.subTest(umask=oct(process_umask)):
+                output = self.root / f"handoffs-{process_umask:o}"
+                result = self.run_cli(
+                    "prepare",
+                    "--repo",
+                    str(self.repo),
+                    "--mode",
+                    "review",
+                    "--task",
+                    "Verify private package modes.",
+                    "--transport",
+                    "mcp-read",
+                    "--output-root",
+                    str(output),
+                    "--tunnel-runtime-alias",
+                    "permission-test",
+                    "--tunnel-id-ref",
+                    f"file:{tunnel_id}",
+                    "--chatgpt-app-name",
+                    "GPT Pro Repository Reader",
+                    "--chatgpt-workspace-label",
+                    "Permission Test Workspace",
+                    umask=process_umask,
+                )
+                handoff = Path(json.loads(result.stdout)["handoff_dir"])
+                self.assertEqual(0o700, handoff.stat().st_mode & 0o777)
+                artifacts = [path for path in handoff.iterdir() if path.is_file()]
+                self.assertTrue(artifacts)
+                self.assertTrue(
+                    all((path.stat().st_mode & 0o777) == 0o600 for path in artifacts),
+                    {path.name: oct(path.stat().st_mode & 0o777) for path in artifacts},
+                )
+                self.run_cli("verify", "--handoff-dir", str(handoff))
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY"), "requires openat")
+    def test_scan_rejects_final_component_symlink_swap_without_reading_outside_file(self) -> None:
+        outside = self.root / "outside.txt"
+        outside.write_text(f"OPENAI_API_KEY={self.secret_value}\n", encoding="utf-8")
+        original = self.repo / "README.md"
+        backup = self.repo / "README.original"
+        real_open = os.open
+        swapped = False
+
+        def swapping_open(path, flags, mode=0o777, *, dir_fd=None):
+            nonlocal swapped
+            if dir_fd is not None and path == "README.md" and not swapped:
+                swapped = True
+                original.rename(backup)
+                original.symlink_to(outside)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        with mock.patch.object(GPTPRO.os, "open", side_effect=swapping_open):
+            scan = GPTPRO.scan_repository(
+                self.repo,
+                include_patterns=[],
+                exclude_patterns=[],
+                file_list_entries=[],
+                max_files=100,
+                max_bytes=1024 * 1024,
+                max_file_bytes=1024 * 1024,
+            )
+
+        self.assertTrue(swapped)
+        self.assertNotIn("README.md", {item.path for item in scan["included"]})
+        self.assertIn(
+            {"path": "README.md", "reason": "symlink"},
+            scan["excluded"],
+        )
+        self.assertNotIn("README.md", {item["path"] for item in scan["security"]})
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY"), "requires openat")
+    def test_scan_rejects_intermediate_component_symlink_swap_without_reading_outside_file(self) -> None:
+        outside = self.root / "outside-src"
+        outside.mkdir()
+        (outside / "main.py").write_text(
+            f"OPENAI_API_KEY={self.secret_value}\n",
+            encoding="utf-8",
+        )
+        original = self.repo / "src"
+        backup = self.repo / "src.original"
+        real_open = os.open
+        swapped = False
+
+        def swapping_open(path, flags, mode=0o777, *, dir_fd=None):
+            nonlocal swapped
+            if dir_fd is not None and path == "src" and not swapped:
+                swapped = True
+                original.rename(backup)
+                original.symlink_to(outside, target_is_directory=True)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        with mock.patch.object(GPTPRO.os, "open", side_effect=swapping_open):
+            scan = GPTPRO.scan_repository(
+                self.repo,
+                include_patterns=[],
+                exclude_patterns=[],
+                file_list_entries=[],
+                max_files=100,
+                max_bytes=1024 * 1024,
+                max_file_bytes=1024 * 1024,
+            )
+
+        self.assertTrue(swapped)
+        self.assertNotIn("src/main.py", {item.path for item in scan["included"]})
+        self.assertIn(
+            {"path": "src/main.py", "reason": "unreadable"},
+            scan["excluded"],
+        )
+        self.assertNotIn("src/main.py", {item["path"] for item in scan["security"]})
 
     def test_init_previews_then_applies_local_git_exclude_idempotently(self) -> None:
         preview = json.loads(

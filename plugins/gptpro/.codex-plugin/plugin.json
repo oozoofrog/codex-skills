@@ -1,7 +1,7 @@
 {
   "name": "gptpro",
   "version": "0.1.0",
-  "description": "Secure attended ChatGPT Pro handoffs with an experimental Web MCP governance foundation.",
+  "description": "Secure attended ChatGPT Pro handoffs with an experimental read-only Web MCP runtime.",
   "author": {
     "name": "oozoofrog",
     "url": "https://github.com/oozoofrog"
@@ -17,8 +17,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "GPT Pro Collaborator",
-    "shortDescription": "ChatGPT Pro handoffs and experimental Web MCP",
-    "longDescription": "Prepare an approved GitHub-first, immutable-SHA repository handoff with verified text fallback for logged-in ChatGPT Pro. An explicit experimental schema-3 foundation can bind a future read-only Web MCP disclosure without claiming that the runtime or ChatGPT connection is available.",
+    "shortDescription": "Approved ChatGPT Pro handoffs and read-only Web MCP",
+    "longDescription": "Prepare approved immutable repository consultations for logged-in ChatGPT Pro using GitHub-first text handoffs or an explicitly selected experimental read-only Web MCP session. The MCP path binds one approved package to a foreground official Secure MCP Tunnel client, private local authorization state, bounded tools, and a fail-before-return audit; account and Developer Mode steps remain attended.",
     "developerName": "oozoofrog",
     "category": "Productivity",
     "capabilities": [
@@ -26,7 +26,7 @@
     ],
     "defaultPrompt": [
       "Use $gptpro to prepare an approved repository consultation with ChatGPT Pro.",
-      "Use $gptpro to prepare an experimental read-only Web MCP package for attended review.",
+      "Use $gptpro for an attended read-only Web MCP review after package-specific approval.",
       "Use $gptpro to independently validate ChatGPT Pro advice before applying it."
     ]
   }

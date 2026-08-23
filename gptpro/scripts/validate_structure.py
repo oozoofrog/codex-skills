@@ -17,6 +17,7 @@ REQUIRED_FILES = (
     "README.md",
     "agents/openai.yaml",
     "scripts/gptpro.py",
+    "scripts/gptpro_mcp.py",
     "scripts/validate_structure.py",
     "references/advisory-validation.md",
     "references/browser-handoff.md",
@@ -28,7 +29,24 @@ REQUIRED_FILES = (
     "references/workflow.md",
     "runtime/__init__.py",
     "runtime/gptpro_mcp/__init__.py",
+    "runtime/gptpro_mcp/archive.py",
+    "runtime/gptpro_mcp/audit.py",
+    "runtime/gptpro_mcp/authorization.py",
+    "runtime/gptpro_mcp/clock.py",
+    "runtime/gptpro_mcp/controller.py",
+    "runtime/gptpro_mcp/cursor.py",
+    "runtime/gptpro_mcp/errors.py",
+    "runtime/gptpro_mcp/live.py",
+    "runtime/gptpro_mcp/package_lock.py",
+    "runtime/gptpro_mcp/package_tx.py",
+    "runtime/gptpro_mcp/protocol.py",
+    "runtime/gptpro_mcp/protocol_trace.py",
+    "runtime/gptpro_mcp/runtime_state.py",
     "runtime/gptpro_mcp/schema.py",
+    "runtime/gptpro_mcp/server.py",
+    "runtime/gptpro_mcp/supervisor.py",
+    "runtime/gptpro_mcp/tools.py",
+    "runtime/gptpro_mcp/tunnel_client.py",
     "templates/base-prompt.md.tpl",
     "templates/mode-architecture.md.tpl",
     "templates/mode-ask.md.tpl",
@@ -36,7 +54,15 @@ REQUIRED_FILES = (
     "templates/mode-plan.md.tpl",
     "templates/mode-review.md.tpl",
     "tests/test_gptpro.py",
+    "tests/test_mcp_lifecycle.py",
+    "tests/test_mcp_live.py",
+    "tests/test_mcp_package_lock.py",
+    "tests/test_mcp_package_tx.py",
+    "tests/test_mcp_controller.py",
+    "tests/test_mcp_server.py",
+    "tests/test_protocol_trace.py",
     "tests/test_web_mcp_foundation.py",
+    "tests/test_web_mcp_runtime.py",
 )
 
 EXPECTED_FRONTMATTER_KEYS = {"name", "description"}
@@ -58,7 +84,7 @@ EXPECTED_BASE_PLACEHOLDERS = {
     "TREE_SHA",
 }
 IGNORED_NAMES = {"__pycache__", ".DS_Store"}
-EXPECTED_MCP_SCHEMA_SHA256 = "779a811eb9904a4a23fc230d99e251e61ae05601d80cc02b6e1692d3d4e5425e"
+EXPECTED_MCP_SCHEMA_SHA256 = "f8a33d728e32df946d72106a3db3369dcf051ebc110312d054a3d380b784c723"
 
 
 class ValidationError(Exception):
@@ -171,23 +197,25 @@ def validate_templates(skill_root: Path, errors: list[str]) -> None:
 
 
 def validate_python(skill_root: Path, errors: list[str]) -> None:
-    python_files = (
-        "scripts/gptpro.py",
-        "scripts/validate_structure.py",
-        "runtime/__init__.py",
-        "runtime/gptpro_mcp/__init__.py",
-        "runtime/gptpro_mcp/schema.py",
-        "tests/test_gptpro.py",
-        "tests/test_web_mcp_foundation.py",
-    )
-    for relative in python_files:
-        path = skill_root / relative
+    python_files = {
+        skill_root / "scripts/gptpro.py",
+        skill_root / "scripts/gptpro_mcp.py",
+        skill_root / "scripts/validate_structure.py",
+        *sorted((skill_root / "runtime").rglob("*.py")),
+        *sorted((skill_root / "tests").rglob("*.py")),
+    }
+    for path in sorted(python_files):
+        relative = path.relative_to(skill_root).as_posix()
         try:
             source = path.read_text(encoding="utf-8")
             compile(source, str(path), "exec")
         except (OSError, UnicodeDecodeError, SyntaxError) as exc:
             errors.append(f"Python validation failed for {relative}: {exc}")
-    for relative in ("scripts/gptpro.py", "scripts/validate_structure.py"):
+    for relative in (
+        "scripts/gptpro.py",
+        "scripts/gptpro_mcp.py",
+        "scripts/validate_structure.py",
+    ):
         path = skill_root / relative
         if path.exists() and path.stat().st_mode & 0o111 == 0:
             errors.append(f"Executable script lacks an execute bit: {relative}")
@@ -238,6 +266,7 @@ def validate_mcp_foundation(skill_root: Path, errors: list[str]) -> None:
     }
     allowed_functions = {
         "_string_property",
+        "_output_schema",
         "canonical_json_bytes",
         "tool_schema_payload",
         "tool_schema_sha256",
@@ -336,16 +365,26 @@ def validate_mcp_foundation(skill_root: Path, errors: list[str]) -> None:
             if not isinstance(annotation_node, ast.Name) or annotation_node.id != "COMMON_ANNOTATIONS":
                 raise ValidationError(f"Web MCP tool {name_node.value!r} has unsafe annotations")
             for call in (node for node in ast.walk(entry) if isinstance(node, ast.Call)):
-                if (
-                    not isinstance(call.func, ast.Name)
-                    or call.func.id != "_string_property"
-                    or call.args
-                    or len(call.keywords) != 1
-                    or call.keywords[0].arg != "maximum"
-                    or not isinstance(call.keywords[0].value, ast.Constant)
-                    or isinstance(call.keywords[0].value.value, bool)
-                    or not isinstance(call.keywords[0].value.value, int)
-                ):
+                function_name = call.func.id if isinstance(call.func, ast.Name) else None
+                safe_string_property = (
+                    function_name == "_string_property"
+                    and not call.args
+                    and len(call.keywords) == 1
+                    and call.keywords[0].arg == "maximum"
+                    and isinstance(call.keywords[0].value, ast.Constant)
+                    and not isinstance(call.keywords[0].value.value, bool)
+                    and isinstance(call.keywords[0].value.value, int)
+                )
+                safe_output_schema = (
+                    function_name == "_output_schema"
+                    and len(call.args) == 2
+                    and not call.keywords
+                    and isinstance(call.args[0], ast.Constant)
+                    and call.args[0].value == name_node.value
+                    and isinstance(call.args[1], ast.Dict)
+                    and not any(isinstance(node, ast.Call) for node in ast.walk(call.args[1]))
+                )
+                if not safe_string_property and not safe_output_schema:
                     raise ValidationError("TOOL_CATALOG contains an unsafe call expression")
         found_names_tuple = tuple(sorted(found_names))
         if found_names_tuple != expected_names:
@@ -363,6 +402,55 @@ def validate_mcp_foundation(skill_root: Path, errors: list[str]) -> None:
             errors.append("Web MCP TOOL_NAMES must derive only from the static catalog")
     except (TypeError, ValueError, ValidationError) as exc:
         errors.append(f"Web MCP schema fixture validation failed: {exc}")
+
+
+def validate_mcp_runtime_dependencies(skill_root: Path, errors: list[str]) -> None:
+    """Reject accidental third-party imports in the portable MCP runtime."""
+
+    paths = [skill_root / "scripts/gptpro_mcp.py"] + sorted(
+        (skill_root / "runtime/gptpro_mcp").glob("*.py")
+    )
+    stdlib = set(getattr(sys, "stdlib_module_names", ()))
+    allowed_local = {"runtime"}
+    for path in paths:
+        relative = path.relative_to(skill_root).as_posix()
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (OSError, UnicodeDecodeError, SyntaxError) as exc:
+            errors.append(f"Unable to inspect MCP runtime dependencies in {relative}: {exc}")
+            continue
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".", 1)[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                imported.add(node.module.split(".", 1)[0])
+        local_modules = set(allowed_local)
+        if relative == "scripts/gptpro_mcp.py":
+            # The stdio entrypoint loads its sibling governance module only after
+            # an activation capability is present. It is packaged local code,
+            # not a third-party runtime dependency.
+            local_modules.add("gptpro")
+        unexpected = sorted(imported - stdlib - local_modules - {"__future__"})
+        if unexpected:
+            errors.append(
+                f"Portable MCP runtime imports third-party modules in {relative}: {unexpected}"
+            )
+
+
+def validate_canonical_runtime_slot(skill_root: Path, errors: list[str]) -> None:
+    """Prevent a second public authorization namespace from reappearing."""
+
+    path = skill_root / "scripts/gptpro.py"
+    try:
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        errors.append(f"Unable to inspect the lifecycle CLI runtime slot: {exc}")
+        return
+    if "--runtime-dir" in source:
+        errors.append(
+            "The lifecycle CLI must not expose --runtime-dir; all commands share one per-user slot"
+        )
 
 
 def package_files(skill_root: Path) -> dict[str, str]:
@@ -387,7 +475,11 @@ def validate_mirror(skill_root: Path, mirror: Path, errors: list[str]) -> None:
             f"extra={sorted(set(mirror_files) - set(primary_files))}, "
             f"changed={sorted(path for path in set(primary_files) & set(mirror_files) if primary_files[path] != mirror_files[path])}"
         )
-    for relative in ("scripts/gptpro.py", "scripts/validate_structure.py"):
+    for relative in (
+        "scripts/gptpro.py",
+        "scripts/gptpro_mcp.py",
+        "scripts/validate_structure.py",
+    ):
         primary_mode = (skill_root / relative).stat().st_mode & 0o111
         mirror_mode = (mirror / relative).stat().st_mode & 0o111 if (mirror / relative).exists() else 0
         if primary_mode != mirror_mode:
@@ -409,6 +501,8 @@ def validate(skill_root: Path, mirror: Path | None) -> dict[str, object]:
             validate_templates(root, errors)
             validate_python(root, errors)
             validate_mcp_foundation(root, errors)
+            validate_mcp_runtime_dependencies(root, errors)
+            validate_canonical_runtime_slot(root, errors)
     if mirror is not None and root.is_dir():
         validate_mirror(root, mirror.expanduser().resolve(), errors)
     return {
@@ -422,6 +516,8 @@ def validate(skill_root: Path, mirror: Path | None) -> dict[str, object]:
             "prompt-placeholders",
             "python-syntax-and-mode",
             "web-mcp-read-only-schema",
+            "web-mcp-stdlib-runtime",
+            "web-mcp-canonical-runtime-slot",
             *(("standalone-plugin-mirror",) if mirror else ()),
         ],
         "errors": errors,
