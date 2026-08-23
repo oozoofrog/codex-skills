@@ -58,6 +58,7 @@ EXPECTED_BASE_PLACEHOLDERS = {
     "TREE_SHA",
 }
 IGNORED_NAMES = {"__pycache__", ".DS_Store"}
+EXPECTED_MCP_SCHEMA_SHA256 = "779a811eb9904a4a23fc230d99e251e61ae05601d80cc02b6e1692d3d4e5425e"
 
 
 class ValidationError(Exception):
@@ -195,6 +196,17 @@ def validate_python(skill_root: Path, errors: list[str]) -> None:
 def validate_mcp_foundation(skill_root: Path, errors: list[str]) -> None:
     relative = "runtime/gptpro_mcp/schema.py"
     path = skill_root / relative
+    try:
+        schema_sha256 = sha256_file(path)
+    except OSError as exc:
+        errors.append(f"Unable to hash Web MCP schema fixture: {exc}")
+        return
+    if schema_sha256 != EXPECTED_MCP_SCHEMA_SHA256:
+        errors.append(
+            "Web MCP schema fixture does not match the trusted canonical source; "
+            f"sha256={schema_sha256}"
+        )
+        return
     try:
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(path))
