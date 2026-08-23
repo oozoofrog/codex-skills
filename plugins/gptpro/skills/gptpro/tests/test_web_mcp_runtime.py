@@ -1262,6 +1262,21 @@ class WebMcpRuntimeTests(unittest.TestCase):
             self.run_cli("mcp-verify-audit", "--handoff-dir", str(handoff)).stdout
         )
         self.assertTrue(verified_audit["audit"]["valid"])
+        diagnostic = json.loads(
+            self.run_cli(
+                "mcp-protocol-trace", "--handoff-dir", str(handoff), "--json"
+            ).stdout
+        )["protocol_trace"]
+        self.assertEqual(
+            "runtime_stopped_stdio_eof_observed",
+            diagnostic["terminal_evidence"]["status"],
+        )
+        self.assertTrue(diagnostic["terminal_evidence"]["runtime_stop_observed"])
+        self.assertTrue(diagnostic["terminal_evidence"]["protocol_stream_closed"])
+        self.assertTrue(diagnostic["terminal_evidence"]["protocol_eof_observed"])
+        self.assertTrue(
+            diagnostic["terminal_evidence"]["final_artifact_bound_to_stop_receipt"]
+        )
 
         tampered_state = json.loads(json.dumps(state))
         tampered_state["mcp_session"]["protocol_trace_head_sha256"] = "f" * 64
@@ -1304,6 +1319,19 @@ class WebMcpRuntimeTests(unittest.TestCase):
         )
         self.assertTrue(diagnostic["protocol_trace"]["artifact_valid"])
         self.assertFalse(diagnostic["protocol_trace"]["closed"])
+        terminal = diagnostic["protocol_trace"]["terminal_evidence"]
+        self.assertEqual("runtime_stopped_protocol_eof_unobserved", terminal["status"])
+        self.assertTrue(terminal["runtime_stop_observed"])
+        self.assertFalse(terminal["protocol_stream_closed"])
+        self.assertFalse(terminal["protocol_eof_observed"])
+        self.assertTrue(terminal["final_artifact_bound_to_stop_receipt"])
+        status = json.loads(
+            self.run_cli(
+                "mcp-status", "--handoff-dir", str(handoff), "--json"
+            ).stdout
+        )
+        self.assertEqual(terminal, status["protocol_trace"]["terminal_evidence"])
+        self.assertFalse(status["effective_authorized"])
         self.run_cli("verify", "--handoff-dir", str(handoff))
 
     def test_corrupt_trace_does_not_erase_exact_stop_or_disclosure_audit(self) -> None:

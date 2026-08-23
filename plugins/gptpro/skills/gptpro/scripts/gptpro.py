@@ -5559,12 +5559,17 @@ def protocol_trace_for_runtime_state(
         raise HandoffError("PROTOCOL_TRACE_UNSAFE: protocol trace binding is invalid") from exc
 
 
-def protocol_trace_for(verified: dict[str, Any]) -> ProtocolTrace:
+def protocol_trace_session(verified: dict[str, Any]) -> dict[str, Any]:
     session = verified["state"].get("mcp_session")
     if not isinstance(session, dict):
         session = verified["state"].get("mcp_protocol_trace")
     if not isinstance(session, dict):
         raise HandoffError("This package has no bound MCP protocol trace to verify")
+    return session
+
+
+def protocol_trace_for(verified: dict[str, Any]) -> ProtocolTrace:
+    session = protocol_trace_session(verified)
     if session.get("protocol_trace_file") != TRACE_FILE_NAME:
         raise HandoffError("This package has no bound MCP protocol trace")
     return protocol_trace_for_runtime_state(
@@ -5672,6 +5677,42 @@ def protocol_trace_summary_payload(summary: ProtocolTraceSummary) -> dict[str, A
     }
 
 
+def protocol_trace_terminal_evidence_payload(
+    verified: dict[str, Any],
+    *,
+    summary: ProtocolTraceSummary | None,
+    artifact_valid: bool,
+    lifecycle_bound: bool,
+) -> dict[str, Any]:
+    """Explain protocol closure separately from observed runtime termination."""
+
+    session = protocol_trace_session(verified)
+    runtime_stop_observed = session.get("tunnel_runtime_stopped") is True
+    protocol_stream_closed = summary.closed if summary is not None else None
+    protocol_eof_observed = (
+        summary.close_reason == "stdio_eof" if summary is not None else None
+    )
+    if not runtime_stop_observed:
+        status = "runtime_stop_unobserved"
+    elif not lifecycle_bound:
+        status = "runtime_stopped_trace_artifact_unbound"
+    elif not artifact_valid:
+        status = "runtime_stopped_invalid_trace_artifact_bound"
+    elif summary is not None and summary.close_reason == "stdio_eof":
+        status = "runtime_stopped_stdio_eof_observed"
+    elif summary is not None and summary.close_reason == "protocol_broken":
+        status = "runtime_stopped_protocol_break_observed"
+    else:
+        status = "runtime_stopped_protocol_eof_unobserved"
+    return {
+        "status": status,
+        "runtime_stop_observed": runtime_stop_observed,
+        "protocol_stream_closed": protocol_stream_closed,
+        "protocol_eof_observed": protocol_eof_observed,
+        "final_artifact_bound_to_stop_receipt": lifecycle_bound,
+    }
+
+
 def bound_protocol_trace_payload(
     verified: dict[str, Any],
 ) -> tuple[ProtocolTrace, dict[str, Any]]:
@@ -5679,7 +5720,7 @@ def bound_protocol_trace_payload(
         verified
     )
     if summary is None:
-        return trace, {
+        payload = {
             "valid": False,
             "artifact_valid": False,
             "artifact_identity_bound": lifecycle_bound,
@@ -5689,11 +5730,24 @@ def bound_protocol_trace_payload(
             "trace_schema_version": TRACE_SCHEMA_VERSION,
             "max_events": MAX_TRACE_EVENTS,
         }
+        payload["terminal_evidence"] = protocol_trace_terminal_evidence_payload(
+            verified,
+            summary=None,
+            artifact_valid=False,
+            lifecycle_bound=lifecycle_bound,
+        )
+        return trace, payload
     payload = protocol_trace_summary_payload(summary)
     payload["artifact_valid"] = True
     payload["artifact_identity_bound"] = lifecycle_bound
     payload["header_binding_valid"] = True
     payload["lifecycle_binding_valid"] = lifecycle_bound
+    payload["terminal_evidence"] = protocol_trace_terminal_evidence_payload(
+        verified,
+        summary=summary,
+        artifact_valid=True,
+        lifecycle_bound=lifecycle_bound,
+    )
     return trace, payload
 
 

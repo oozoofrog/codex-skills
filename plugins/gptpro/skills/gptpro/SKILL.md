@@ -129,6 +129,8 @@ python3 <skill-dir>/scripts/gptpro.py mcp-stop --handoff-dir .gptpro/handoffs/<p
 python3 <skill-dir>/scripts/gptpro.py mcp-protocol-trace --handoff-dir .gptpro/handoffs/<package-id> --json
 ```
 
+Read `protocol_trace.terminal_evidence` as a conjunction: protocol footer observation, controller-observed runtime stop, and final artifact binding are separate facts. `runtime_stopped_protocol_eof_unobserved` is terminal stop evidence with an honestly open protocol prefix; it is not an active authorization and must not be rewritten as `closed: true`.
+
 `init` defaults to repository-local Git metadata (`.git/info/exclude`) so it does not change tracked files. Use `--ignore-scope repository` only when the user explicitly wants `.gitignore` updated, or `--ignore-scope none` to create storage without Git exclusion. The prepare command prints the created handoff directory. Keep `.gptpro/` out of commits unless the user explicitly requests preserving a receipt artifact.
 
 ## Action-time approval
