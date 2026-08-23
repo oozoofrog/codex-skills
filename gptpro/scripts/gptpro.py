@@ -575,16 +575,20 @@ def load_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def git_child_environment() -> dict[str, str]:
+    git_env = os.environ.copy()
+    for name in _GIT_SECRET_ENV_NAMES.get():
+        git_env.pop(name, None)
+    git_env["GIT_TERMINAL_PROMPT"] = "0"
+    return git_env
+
+
 def run_git(
     repo: Path,
     *args: str,
     binary: bool = False,
     timeout_seconds: int | None = None,
 ) -> str | bytes:
-    git_env = os.environ.copy()
-    for name in _GIT_SECRET_ENV_NAMES.get():
-        git_env.pop(name, None)
-    git_env["GIT_TERMINAL_PROMPT"] = "0"
     try:
         result = subprocess.run(
             ["git", "-C", str(repo), *args],
@@ -592,7 +596,7 @@ def run_git(
             stderr=subprocess.PIPE,
             text=not binary,
             check=False,
-            env=git_env,
+            env=git_child_environment(),
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
@@ -630,13 +634,18 @@ def resolve_output_root(root: Path, output_arg: str | None) -> tuple[Path, str |
 
 
 def git_ignore_match(root: Path, rel_path: str) -> str | None:
-    result = subprocess.run(
-        ["git", "-C", str(root), "check-ignore", "-v", "--no-index", "--", rel_path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "check-ignore", "-v", "--no-index", "--", rel_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            env=git_child_environment(),
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HandoffError("git check-ignore timed out") from exc
     if result.returncode == 0:
         return result.stdout.strip()
     if result.returncode == 1:
