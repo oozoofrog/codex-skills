@@ -49,6 +49,8 @@ Phase 1 exposes only:
 - `gptpro_repo_search`: bounded literal UTF-8 search within approved files;
 - `gptpro_repo_read`: bounded UTF-8 line-range reads from one approved file.
 
+The generated prompt includes the exact package-specific hard limits and tells the advisory model not to rely on broader static schema defaults. Its first package-info request is pinned to `include_paths=true` and `path_page_size=1`; search requests must explicitly set their result, context, and path bounds. Invalid and rejected attempts still consume the approved call budget, so this guidance prevents a model from exhausting a narrow session merely while discovering its limits without weakening fail-closed accounting.
+
 There is no write, patch, shell, command execution, Git mutation, network fetch, arbitrary file read, or local tool relay. Every content call must name the active package and revalidate authorization, manifest/archive hashes, tool-schema binding, expiry, counters, and budgets. Cursor state is authenticated and package-bound.
 
 ## Runtime and audit boundary

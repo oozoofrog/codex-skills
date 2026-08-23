@@ -203,6 +203,7 @@ class WebMcpFoundationTests(unittest.TestCase):
         self.assertEqual("openai-tunnel-legacy-tools-v1", connector["protocol_profile"])
 
         disclosure = manifest["mcp_disclosure"]
+        prompt = (handoff / "prompt.md").read_text(encoding="utf-8")
         expected_files = [
             {key: item[key] for key in ("path", "size", "sha256")}
             for item in manifest["files"]
@@ -223,6 +224,12 @@ class WebMcpFoundationTests(unittest.TestCase):
         self.assertEqual(7, disclosure["limits"]["max_tool_calls"])
         self.assertEqual(600, disclosure["limits"]["session_ttl_seconds"])
         self.assertEqual(300, disclosure["limits"]["idle_ttl_seconds"])
+        compact_limits = json.dumps(
+            disclosure["limits"], sort_keys=True, separators=(",", ":")
+        )
+        self.assertIn(f"Approved hard limits (compact JSON): `{compact_limits}`.", prompt)
+        self.assertIn("`include_paths=true` and `path_page_size=1`", prompt)
+        self.assertIn("Invalid and rejected tool attempts consume", prompt)
         expiry = datetime.fromisoformat(
             disclosure["approval_valid_until"].removesuffix("Z") + "+00:00"
         )
