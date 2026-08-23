@@ -24,6 +24,10 @@
     "capabilities": [
       "Interactive"
     ],
-    "defaultPrompt": "Use $gptpro in review mode to prepare and verify an approved repository consultation, preserve the explicitly approved context transport and delivery channel, use the experimental read-only Web MCP runtime only when requested and ready, pause for human trust/account steps, and independently validate the ChatGPT Pro advice."
+    "defaultPrompt": [
+      "Use $gptpro to prepare an approved repository consultation with ChatGPT Pro.",
+      "Use $gptpro for an attended read-only Web MCP review after package-specific approval.",
+      "Use $gptpro to independently validate ChatGPT Pro advice before applying it."
+    ]
   }
 }
