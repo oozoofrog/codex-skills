@@ -25,6 +25,10 @@ from .live import (
     decode_session_capability,
     new_session_capability,
 )
+from .request_correlation import (
+    derive_request_correlation_key,
+    unavailable_request_correlation,
+)
 from .runtime_state import RuntimeStateError, RuntimeStateStore, ensure_private_directory
 from .supervisor import ForegroundSupervisor, SupervisorResult
 from .tunnel_client import (
@@ -75,6 +79,7 @@ class ControllerResult:
     forced_exact_child: bool
     authorization_revoked: bool
     stopped_recorded: bool
+    request_correlation: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +108,7 @@ class TunnelRuntime(Protocol):
         extra_env: Mapping[str, str] | None = None,
         profile_dir: Path | None = None,
         cwd: Path | None = None,
+        request_correlation_diagnostic: bool = False,
     ) -> subprocess.Popen[bytes]: ...
 
     def health(
@@ -112,6 +118,14 @@ class TunnelRuntime(Protocol):
         env: Mapping[str, str],
         expected_pid: int,
     ) -> TunnelCheck: ...
+
+    def capture_request_correlation(
+        self,
+        files: TunnelRuntimeFiles,
+        *,
+        hmac_key: bytes,
+        expected_peer_pid: int,
+    ) -> Mapping[str, Any]: ...
 
 
 def control_socket_path(runtime_root: Path) -> Path:
@@ -144,6 +158,7 @@ def run_foreground(
     supervisor_factory: Callable[..., ForegroundSupervisor] = ForegroundSupervisor,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    request_correlation_diagnostic: bool = False,
 ) -> ControllerResult:
     """Run one approved package until an attended or child-exit stop.
 
@@ -157,6 +172,7 @@ def run_foreground(
         ready_timeout=ready_timeout,
         health_poll_interval=health_poll_interval,
         stop_timeout=stop_timeout,
+        request_correlation_diagnostic=request_correlation_diagnostic,
     )
     environment = dict(child_environment)
     raw_capability, encoded_capability, session_id_sha256 = capability_factory()
@@ -175,6 +191,11 @@ def run_foreground(
         or hashlib.sha256(raw_capability).hexdigest() != session_id_sha256
     ):
         raise ControllerError("SESSION_CONFLICT", "The generated session identity is invalid.")
+    request_correlation_key = (
+        derive_request_correlation_key(raw_capability)
+        if request_correlation_diagnostic
+        else None
+    )
     del decoded_capability, raw_capability
 
     begun = False
@@ -183,11 +204,13 @@ def run_foreground(
     revocation_succeeded = False
     stopped_recorded = False
     process_started = False
+    started_process: subprocess.Popen[bytes] | None = None
     health_confirmed = False
     stop_reason = "controller_exit"
     failure_code = "MCP_ACTIVATION_FAILED"
     audit_header_sha256 = ""
     supervisor_result: SupervisorResult | None = None
+    request_correlation_report: Mapping[str, Any] | None = None
 
     def mark_failed(code: str) -> None:
         nonlocal failure_attempted
@@ -227,7 +250,7 @@ def run_foreground(
         }
 
         def process_factory() -> subprocess.Popen[bytes]:
-            nonlocal failure_code, process_started
+            nonlocal failure_code, process_started, started_process
             try:
                 process = tunnel_client.spawn_run(
                     tunnel_profile,
@@ -236,11 +259,13 @@ def run_foreground(
                     extra_env=child_extra_environment,
                     profile_dir=profile_dir,
                     cwd=cwd,
+                    request_correlation_diagnostic=request_correlation_diagnostic,
                 )
             except Exception as exc:
                 failure_code = _exception_code(exc, "TUNNEL_NOT_READY")
                 raise
             process_started = True
+            started_process = process
             return process
 
         def after_start(process: subprocess.Popen[bytes]) -> None:
@@ -310,6 +335,7 @@ def run_foreground(
                 sleep(min(health_poll_interval, max(0.0, deadline - monotonic())))
 
         def revoke_before_terminate(reason: str) -> None:
+            nonlocal request_correlation_key, request_correlation_report
             nonlocal revocation_succeeded, stop_reason
             stop_reason = reason
             if activation_completed:
@@ -318,6 +344,34 @@ def run_foreground(
                     runtime_store, session_id_sha256, {"revoked", "expired", "faulted"}
                 )
                 revocation_succeeded = True
+                if request_correlation_diagnostic:
+                    try:
+                        if request_correlation_key is None:
+                            raise ControllerError(
+                                "REQUEST_CORRELATION_KEY_INVALID",
+                                "The request-correlation key is unavailable.",
+                            )
+                        if started_process is None or started_process.poll() is not None:
+                            raise ControllerError(
+                                "REQUEST_CORRELATION_PEER_UNVERIFIED",
+                                "The exact Tunnel child is not live for diagnostic capture.",
+                            )
+                        request_correlation_report = tunnel_client.capture_request_correlation(
+                            runtime_files,
+                            hmac_key=request_correlation_key,
+                            expected_peer_pid=started_process.pid,
+                        )
+                        if started_process.poll() is not None:
+                            raise ControllerError(
+                                "REQUEST_CORRELATION_PEER_UNVERIFIED",
+                                "The exact Tunnel child exited during diagnostic capture.",
+                            )
+                    except Exception as exc:
+                        request_correlation_report = unavailable_request_correlation(
+                            _exception_code(exc, "REQUEST_CORRELATION_UNAVAILABLE")
+                        )
+                    finally:
+                        request_correlation_key = None
             else:
                 mark_failed(failure_code)
 
@@ -363,6 +417,7 @@ def run_foreground(
             raise
         raise _as_controller_error(exc, failure_code) from None
     finally:
+        request_correlation_key = None
         controller_lease.close()
 
     if supervisor_result is None:
@@ -377,6 +432,7 @@ def run_foreground(
         forced_exact_child=supervisor_result.forced_exact_child,
         authorization_revoked=revocation_succeeded,
         stopped_recorded=stopped_recorded,
+        request_correlation=request_correlation_report,
     )
 
 
@@ -386,6 +442,7 @@ def _validate_inputs(
     ready_timeout: float,
     health_poll_interval: float,
     stop_timeout: float,
+    request_correlation_diagnostic: bool,
 ) -> None:
     if not isinstance(tunnel_profile, str) or _PROFILE.fullmatch(tunnel_profile) is None:
         raise ControllerError("MCP_INVALID_ARGUMENT", "The Tunnel profile alias is invalid.")
@@ -399,6 +456,11 @@ def _validate_inputs(
     if health_poll_interval > ready_timeout:
         raise ControllerError(
             "MCP_INVALID_ARGUMENT", "The health poll interval exceeds the readiness timeout."
+        )
+    if not isinstance(request_correlation_diagnostic, bool):
+        raise ControllerError(
+            "MCP_INVALID_ARGUMENT",
+            "The request-correlation diagnostic flag is invalid.",
         )
 
 

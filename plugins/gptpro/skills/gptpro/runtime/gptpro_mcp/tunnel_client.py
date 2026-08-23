@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from .request_correlation import capture_request_correlation as _capture_request_correlation
 from .runtime_state import (
     RuntimeStateError,
     ensure_private_directory,
@@ -72,6 +73,10 @@ _PROFILE_MAX_BYTES = 64 * 1024
 _MAX_UNIX_SOCKET_PATH_BYTES = 100
 _MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
 _COMMAND_STOP_GRACE_SECONDS = 1.0
+_REQUEST_CORRELATION_TUNNEL_VERSION = re.compile(
+    r"0\.0\.12\+881c9a8fed7cccbe6607cd419863bbca506b8215 "
+    r"\(git sha: 881c9a8fed7cccbe6607cd419863bbca506b8215\)"
+)
 _OFFICIAL_PROFILE_PATHS = frozenset(
     {
         ("config_version",),
@@ -200,6 +205,12 @@ class TunnelCapabilities:
             and self.health_exact_pid
             and self.warn_log_level
         )
+
+    @property
+    def request_correlation_contract_supported(self) -> bool:
+        """Whether this exact binary version has the pinned private log contract."""
+
+        return _REQUEST_CORRELATION_TUNNEL_VERSION.fullmatch(self.version) is not None
 
 
 @dataclass(frozen=True)
@@ -2188,6 +2199,7 @@ class TunnelClient:
         profile_dir: Path | None = None,
         cwd: Path | None = None,
         expected_mcp_target_sha256: str | None = None,
+        request_correlation_diagnostic: bool = False,
     ) -> subprocess.Popen[bytes]:
         self._assert_binary_unchanged()
         name = _profile(profile)
@@ -2196,6 +2208,14 @@ class TunnelClient:
             raise TunnelClientError(
                 "TUNNEL_CLIENT_UNSUPPORTED",
                 "The tunnel-client lacks required init, doctor, run, or health capabilities.",
+            )
+        if (
+            request_correlation_diagnostic
+            and not capabilities.request_correlation_contract_supported
+        ):
+            raise TunnelClientError(
+                "REQUEST_CORRELATION_UNSUPPORTED_VERSION",
+                "The selected tunnel-client does not match the pinned private diagnostic contract.",
             )
         _validate_runtime_files(runtime_files)
         child_env = _minimal_tunnel_environment(
@@ -2245,7 +2265,7 @@ class TunnelClient:
                 "--log.file",
                 os.devnull,
                 "--log.level",
-                "warn",
+                "info" if request_correlation_diagnostic else "warn",
                 "--mcp.max-concurrent-requests",
                 "1",
                 "--mcp.command",
@@ -2285,6 +2305,32 @@ class TunnelClient:
             )
         except OSError as exc:
             raise TunnelClientError("TUNNEL_NOT_READY", "Unable to start tunnel-client foreground run.") from exc
+
+    def capture_request_correlation(
+        self,
+        runtime_files: TunnelRuntimeFiles,
+        *,
+        hmac_key: bytes,
+        expected_peer_pid: int,
+    ) -> dict[str, Any]:
+        """Read and sanitize one bounded private admin-log snapshot in memory."""
+
+        capabilities = self._capabilities or self.probe()
+        if not capabilities.request_correlation_contract_supported:
+            raise TunnelClientError(
+                "REQUEST_CORRELATION_UNSUPPORTED_VERSION",
+                "The selected tunnel-client does not match the pinned private diagnostic contract.",
+            )
+        _validate_runtime_files(runtime_files, require_socket=True)
+        loopback_url_from_file(
+            runtime_files.url_file,
+            expected_socket=runtime_files.socket_file,
+        )
+        return _capture_request_correlation(
+            runtime_files.socket_file,
+            hmac_key=hmac_key,
+            expected_peer_pid=expected_peer_pid,
+        )
 
 
 def _hash_or_error(value: str | None) -> str:

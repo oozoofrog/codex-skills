@@ -24,6 +24,7 @@ REQUIRED_FILES = (
     "references/github-transport.md",
     "references/human-takeover.md",
     "references/manifest-schema.md",
+    "references/request-correlation.md",
     "references/security.md",
     "references/web-mcp.md",
     "references/workflow.md",
@@ -41,6 +42,7 @@ REQUIRED_FILES = (
     "runtime/gptpro_mcp/package_tx.py",
     "runtime/gptpro_mcp/protocol.py",
     "runtime/gptpro_mcp/protocol_trace.py",
+    "runtime/gptpro_mcp/request_correlation.py",
     "runtime/gptpro_mcp/runtime_state.py",
     "runtime/gptpro_mcp/schema.py",
     "runtime/gptpro_mcp/server.py",
@@ -61,6 +63,7 @@ REQUIRED_FILES = (
     "tests/test_mcp_controller.py",
     "tests/test_mcp_server.py",
     "tests/test_protocol_trace.py",
+    "tests/test_request_correlation.py",
     "tests/test_web_mcp_foundation.py",
     "tests/test_web_mcp_runtime.py",
 )
