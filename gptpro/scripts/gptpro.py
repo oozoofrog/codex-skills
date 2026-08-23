@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextvars
 import copy
 import fnmatch
 import hashlib
@@ -67,6 +68,11 @@ DEFAULT_MAX_PASTE_BYTES = 128 * 1024
 SCHEMA3_INTERNAL_MANIFEST_MAX_BYTES = 4 * 1024 * 1024
 SCHEMA3_CENTRAL_DIRECTORY_MAX_BYTES = 2 * 1024 * 1024
 IGNORE_COMMENT = "# gptpro local handoff artifacts"
+
+_GIT_SECRET_ENV_NAMES: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
+    "gptpro_git_secret_env_names",
+    default=frozenset(),
+)
 
 EXCLUDED_DIR_NAMES = {
     ".git",
@@ -392,6 +398,8 @@ def run_git(
     timeout_seconds: int | None = None,
 ) -> str | bytes:
     git_env = os.environ.copy()
+    for name in _GIT_SECRET_ENV_NAMES.get():
+        git_env.pop(name, None)
     git_env["GIT_TERMINAL_PROMPT"] = "0"
     try:
         result = subprocess.run(
@@ -1088,18 +1096,35 @@ def write_archive(
     # runtime's compression-ratio boundary. Keep schema-2 bytes compressed for
     # compatibility with the established local audit artifact format.
     compression = zipfile.ZIP_STORED if schema_version == SCHEMA_V3 else zipfile.ZIP_DEFLATED
-    with zipfile.ZipFile(path, "w", compression=compression, compresslevel=9) as archive:
-        for item in sorted(files, key=lambda value: value.path):
-            info = zipfile.ZipInfo(item.archive_path)
-            info.date_time = (1980, 1, 1, 0, 0, 0)
-            info.external_attr = 0o100644 << 16
-            info.compress_type = compression
-            archive.writestr(info, item.content)
-        info = zipfile.ZipInfo("_gptpro/file-manifest.json")
-        info.date_time = (1980, 1, 1, 0, 0, 0)
-        info.external_attr = 0o100644 << 16
-        info.compress_type = compression
-        archive.writestr(info, internal_manifest)
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        with os.fdopen(descriptor, "w+b") as handle:
+            descriptor = -1
+            with zipfile.ZipFile(handle, "w", compression=compression, compresslevel=9) as archive:
+                for item in sorted(files, key=lambda value: value.path):
+                    info = zipfile.ZipInfo(item.archive_path)
+                    info.date_time = (1980, 1, 1, 0, 0, 0)
+                    info.external_attr = 0o100644 << 16
+                    info.compress_type = compression
+                    archive.writestr(info, item.content)
+                info = zipfile.ZipInfo("_gptpro/file-manifest.json")
+                info.date_time = (1980, 1, 1, 0, 0, 0)
+                info.external_attr = 0o100644 << 16
+                info.compress_type = compression
+                archive.writestr(info, internal_manifest)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def event_hash(event: dict[str, Any]) -> str:
@@ -1511,7 +1536,7 @@ def create_package(args: argparse.Namespace) -> int:
     handoff_dir = output_root / package_id
     if handoff_dir.exists():
         raise HandoffError(f"Handoff directory already exists: {handoff_dir}")
-    handoff_dir.mkdir(parents=True)
+    handoff_dir.mkdir(parents=True, mode=0o700)
     prompt_path = handoff_dir / "prompt.md"
     context_path: Path | None = None
     archive_path = handoff_dir / f"context-{package_id}.zip"
@@ -3114,11 +3139,21 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    secret_env_names = frozenset(
+        reference.removeprefix("env:")
+        for attribute in ("tunnel_id_ref", "tunnel_api_key_ref")
+        if isinstance((reference := getattr(args, attribute, None)), str)
+        and reference.startswith("env:")
+        and reference != "env:"
+    )
+    token = _GIT_SECRET_ENV_NAMES.set(secret_env_names)
     try:
         return int(args.func(args))
     except HandoffError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
+    finally:
+        _GIT_SECRET_ENV_NAMES.reset(token)
 
 
 if __name__ == "__main__":

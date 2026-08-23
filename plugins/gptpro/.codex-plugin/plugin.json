@@ -24,6 +24,10 @@
     "capabilities": [
       "Interactive"
     ],
-    "defaultPrompt": "Use $gptpro in review mode, initialize local handoff storage if needed, prepare a GitHub-first approved repository handoff with text fallback, consult ChatGPT Pro with human takeover at trust or browser boundaries when needed, and validate the advisory response."
+    "defaultPrompt": [
+      "Use $gptpro to prepare an approved repository consultation with ChatGPT Pro.",
+      "Use $gptpro to prepare an experimental read-only Web MCP package for attended review.",
+      "Use $gptpro to independently validate ChatGPT Pro advice before applying it."
+    ]
   }
 }

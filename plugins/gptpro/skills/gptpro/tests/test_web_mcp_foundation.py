@@ -5,6 +5,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -14,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "gptpro.py"
+VALIDATOR = Path(__file__).resolve().parents[1] / "scripts" / "validate_structure.py"
+SKILL_ROOT = Path(__file__).resolve().parents[1]
 TUNNEL_ENV_NAME = "GPTPRO_TEST_TUNNEL_ID"
 TUNNEL_REFERENCE = f"env:{TUNNEL_ENV_NAME}"
 RAW_TUNNEL_ID = "tunnel_" + "foundationtest" * 2
@@ -167,6 +171,11 @@ class WebMcpFoundationTests(unittest.TestCase):
         self.assertNotIn("paste_payload_sha256", manifest["hashes"])
         self.assertNotIn("context_markers", manifest)
         self.assertEqual(["prompt.md"], sorted(path.name for path in handoff.glob("*.md")))
+        self.assertEqual(0o700, stat.S_IMODE(handoff.stat().st_mode))
+        self.assertEqual(
+            0o600,
+            stat.S_IMODE((handoff / f"context-{manifest['package_id']}.zip").stat().st_mode),
+        )
 
         self.assertEqual(
             {"channel": "browser", "approval_required": True},
@@ -178,6 +187,7 @@ class WebMcpFoundationTests(unittest.TestCase):
         self.assertEqual(APP_NAME, connector["app_name"])
         self.assertEqual(WORKSPACE_LABEL, connector["workspace_label"])
         self.assertTrue(connector["workspace_binding_required"])
+
         self.assertRegex(connector["tunnel_id_binding_sha256"], r"^[0-9a-f]{64}$")
         self.assertRegex(connector["tool_schema_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual("openai-tunnel-legacy-tools-v1", connector["protocol_profile"])
@@ -237,6 +247,47 @@ class WebMcpFoundationTests(unittest.TestCase):
             for member in archive.namelist():
                 self.assert_tunnel_secret_absent(archive.read(member))
         self.assertNotIn(RAW_TUNNEL_ID, json.dumps(summary, sort_keys=True))
+
+    def test_tunnel_id_environment_is_not_forwarded_to_git_hooks(self) -> None:
+        capture = self.root / "git-hook-environment.txt"
+        hook = self.root / "fsmonitor-hook.py"
+        hook.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            f"Path({str(capture)!r}).write_text(os.environ.get({TUNNEL_ENV_NAME!r}, '<absent>'))\n"
+            "raise SystemExit(1)\n",
+            encoding="utf-8",
+        )
+        hook.chmod(0o700)
+        self.git("config", "core.fsmonitor", str(hook))
+
+        self.prepare_mcp()
+
+        self.assertTrue(capture.is_file(), "Git fsmonitor hook was not exercised")
+        self.assertEqual("<absent>", capture.read_text(encoding="utf-8"))
+
+    def test_structure_validator_never_executes_candidate_schema(self) -> None:
+        candidate = self.root / "candidate-skill"
+        marker = self.root / "validator-side-effect.txt"
+        shutil.copytree(SKILL_ROOT, candidate)
+        schema = candidate / "runtime" / "gptpro_mcp" / "schema.py"
+        schema.write_text(
+            schema.read_text(encoding="utf-8")
+            + f"\nopen({str(marker)!r}, 'w', encoding='utf-8').write('executed')\n",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [sys.executable, str(VALIDATOR), "--skill-dir", str(candidate), "--json"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertFalse(marker.exists())
+        self.assertIn("unsafe or unexpected top-level structure", result.stdout)
 
     def test_auto_remains_schema2_and_never_resolves_mcp_read(self) -> None:
         result = self.run_cli(
