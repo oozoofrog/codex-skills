@@ -222,6 +222,19 @@ class ProtocolTraceTests(unittest.TestCase):
         self.assertFalse(verified.closed)
         self.assertEqual(recorded.head_sha256, verified.head_sha256)
 
+    def test_parent_shutdown_footer_requires_the_normal_eof_path(self) -> None:
+        source = io.StringIO("")
+        output = io.StringIO()
+        stderr = io.StringIO()
+        server = LegacyMcpServer(NoDisclosureRuntime(), trace=self.trace)
+        server.note_parent_shutdown()
+
+        self.assertEqual(0, server.serve(source, output, stderr))
+        summary = self.trace.verify()
+        self.assertTrue(summary.closed)
+        self.assertEqual("parent_shutdown", summary.close_reason)
+        self.assertEqual("", stderr.getvalue())
+
     def test_response_flush_gap_is_preserved_as_ambiguous_protocol_break(self) -> None:
         class FlushFailure(io.StringIO):
             def flush(self) -> None:
@@ -230,15 +243,16 @@ class ProtocolTraceTests(unittest.TestCase):
         source = io.StringIO(json.dumps({"jsonrpc": "2.0", "id": "secret", "method": "ping"}) + "\n")
         output = FlushFailure()
         stderr = io.StringIO()
-        result = LegacyMcpServer(NoDisclosureRuntime(), trace=self.trace).serve(
-            source, output, stderr
-        )
+        server = LegacyMcpServer(NoDisclosureRuntime(), trace=self.trace)
+        server.note_parent_shutdown()
+        result = server.serve(source, output, stderr)
 
         self.assertEqual(1, result)
         summary = self.trace.verify()
         self.assertEqual(["decision"], [event["stage"] for event in summary.events])
         self.assertEqual(["pong"], [event["outcome"] for event in summary.events])
         self.assertTrue(summary.closed)
+        # A protocol failure takes precedence over an observed parent stop.
         self.assertEqual("protocol_broken", summary.close_reason)
         self.assertNotIn("secret", self.trace.path.read_text(encoding="ascii"))
         self.assertEqual("gptpro-mcp: MCP_BROKEN_PIPE\n", stderr.getvalue())

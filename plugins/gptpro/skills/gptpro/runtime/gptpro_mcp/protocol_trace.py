@@ -64,7 +64,7 @@ SAFE_VERSION_CLASSES = frozenset(
 SAFE_PROTOCOL_VERSIONS = frozenset(
     {"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
 )
-SAFE_CLOSE_REASONS = frozenset({"stdio_eof", "protocol_broken"})
+SAFE_CLOSE_REASONS = frozenset({"stdio_eof", "parent_shutdown", "protocol_broken"})
 SAFE_TRACE_FAILURE_CODES = frozenset(
     {
         "PROTOCOL_TRACE_BINDING_MISMATCH",

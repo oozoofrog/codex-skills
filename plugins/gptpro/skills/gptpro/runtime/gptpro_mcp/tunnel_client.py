@@ -14,6 +14,7 @@ import selectors
 import secrets
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -65,7 +66,11 @@ _CANONICAL_CONTROL_PLANE_BASE_URL = "https://api.openai.com"
 # non-empty at precedence selection time and normalizes to an empty URL prefix.
 _CANONICAL_CONTROL_PLANE_URL_PATH = "/"
 _TRUSTED_GPTPRO_CHILD_ENV_NAMES = frozenset(
-    {"GPTPRO_MCP_SESSION_CAPABILITY", "GPTPRO_MCP_RUNTIME_DIR"}
+    {
+        "GPTPRO_MCP_SESSION_CAPABILITY",
+        "GPTPRO_MCP_RUNTIME_DIR",
+        "GPTPRO_MCP_PARENT_SHUTDOWN_CONTRACT",
+    }
 )
 _SESSION_CAPABILITY = re.compile(r"[A-Za-z0-9_-]{43}")
 _PROFILE_KEY = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,127}")
@@ -73,10 +78,76 @@ _PROFILE_MAX_BYTES = 64 * 1024
 _MAX_UNIX_SOCKET_PATH_BYTES = 100
 _MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
 _COMMAND_STOP_GRACE_SECONDS = 1.0
-_REQUEST_CORRELATION_TUNNEL_VERSION = re.compile(
+_PINNED_TUNNEL_V012_VERSION = re.compile(
     r"0\.0\.12\+881c9a8fed7cccbe6607cd419863bbca506b8215 "
     r"\(git sha: 881c9a8fed7cccbe6607cd419863bbca506b8215\)"
 )
+
+_SIGNAL_MASK_LAUNCHER = """\
+import os
+import signal
+import sys
+
+mask = {
+    signal.Signals(int(value))
+    for value in sys.argv[1].split(",")
+    if value
+}
+signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+os.execve(sys.argv[2], sys.argv[2:], os.environ)
+"""
+
+
+def popen_with_signal_mask(
+    argv: list[str],
+    *,
+    child_signal_mask: set[signal.Signals] | None,
+    **kwargs: Any,
+) -> subprocess.Popen[bytes]:
+    """Spawn ``argv`` with an exact inherited mask without a threaded preexec hook.
+
+    The foreground supervisor blocks stop signals across its spawn commit.  A
+    tiny isolated Python launcher restores the caller's prior mask and then
+    replaces itself with the already-pinned Tunnel binary, preserving the same
+    PID/Popen ownership.  This avoids ``preexec_fn`` in the multi-threaded
+    controller and makes a parent stop accepted only after child creation.
+    """
+
+    if (
+        not argv
+        or not isinstance(argv[0], str)
+        or not argv[0]
+        or not all(isinstance(value, str) for value in argv)
+    ):
+        raise ValueError("spawn argv must contain a non-empty executable and string arguments")
+    if child_signal_mask is None:
+        return subprocess.Popen(argv, **kwargs)
+    pthread_sigmask = getattr(signal, "pthread_sigmask", None)
+    if pthread_sigmask is None:
+        raise TunnelClientError(
+            "CONTROL_SIGNAL_UNSAFE",
+            "The Tunnel child signal mask cannot be restored safely.",
+        )
+    del pthread_sigmask
+    try:
+        encoded_mask = ",".join(
+            str(int(value)) for value in sorted(child_signal_mask, key=int)
+        )
+    except (TypeError, ValueError) as exc:
+        raise TunnelClientError(
+            "CONTROL_SIGNAL_UNSAFE",
+            "The Tunnel child signal mask is invalid.",
+        ) from exc
+    command = [
+        sys.executable,
+        "-I",
+        "-S",
+        "-c",
+        _SIGNAL_MASK_LAUNCHER,
+        encoded_mask,
+        *argv,
+    ]
+    return subprocess.Popen(command, **kwargs)
 _OFFICIAL_PROFILE_PATHS = frozenset(
     {
         ("config_version",),
@@ -210,7 +281,13 @@ class TunnelCapabilities:
     def request_correlation_contract_supported(self) -> bool:
         """Whether this exact binary version has the pinned private log contract."""
 
-        return _REQUEST_CORRELATION_TUNNEL_VERSION.fullmatch(self.version) is not None
+        return _PINNED_TUNNEL_V012_VERSION.fullmatch(self.version) is not None
+
+    @property
+    def parent_shutdown_contract_supported(self) -> bool:
+        """Whether this exact binary closes MCP stdin while forwarding SIGTERM."""
+
+        return _PINNED_TUNNEL_V012_VERSION.fullmatch(self.version) is not None
 
 
 @dataclass(frozen=True)
@@ -1179,12 +1256,22 @@ def _minimal_tunnel_environment(
 
     if trusted_child_environment is not None:
         supplied_names = set(trusted_child_environment)
-        if supplied_names != _TRUSTED_GPTPRO_CHILD_ENV_NAMES:
+        required_names = {
+            "GPTPRO_MCP_SESSION_CAPABILITY",
+            "GPTPRO_MCP_RUNTIME_DIR",
+        }
+        if (
+            not required_names.issubset(supplied_names)
+            or not supplied_names.issubset(_TRUSTED_GPTPRO_CHILD_ENV_NAMES)
+        ):
             raise TunnelClientError(
                 "RUNTIME_STATE_UNSAFE", "The MCP child capability environment is incomplete or unsafe."
             )
         capability = trusted_child_environment.get("GPTPRO_MCP_SESSION_CAPABILITY")
         runtime_directory = trusted_child_environment.get("GPTPRO_MCP_RUNTIME_DIR")
+        parent_shutdown_contract = trusted_child_environment.get(
+            "GPTPRO_MCP_PARENT_SHUTDOWN_CONTRACT"
+        )
         if not isinstance(capability, str) or _SESSION_CAPABILITY.fullmatch(capability) is None:
             raise TunnelClientError(
                 "RUNTIME_STATE_UNSAFE", "The MCP child session capability is invalid."
@@ -1198,12 +1285,19 @@ def _minimal_tunnel_environment(
             raise TunnelClientError(
                 "RUNTIME_STATE_UNSAFE", "The MCP child runtime directory is invalid."
             )
+        if parent_shutdown_contract is not None and parent_shutdown_contract != "1":
+            raise TunnelClientError(
+                "RUNTIME_STATE_UNSAFE",
+                "The MCP child parent-shutdown contract is invalid.",
+            )
         child.update(
             {
                 "GPTPRO_MCP_SESSION_CAPABILITY": capability,
                 "GPTPRO_MCP_RUNTIME_DIR": runtime_directory,
             }
         )
+        if parent_shutdown_contract == "1":
+            child["GPTPRO_MCP_PARENT_SHUTDOWN_CONTRACT"] = "1"
     return child
 
 
@@ -2200,6 +2294,7 @@ class TunnelClient:
         cwd: Path | None = None,
         expected_mcp_target_sha256: str | None = None,
         request_correlation_diagnostic: bool = False,
+        child_signal_mask: set[signal.Signals] | None = None,
     ) -> subprocess.Popen[bytes]:
         self._assert_binary_unchanged()
         name = _profile(profile)
@@ -2292,15 +2387,19 @@ class TunnelClient:
                 "The MCP interpreter or entrypoint changed before foreground execution.",
             )
         try:
-            return subprocess.Popen(
+            return popen_with_signal_mask(
                 argv,
+                child_signal_mask=child_signal_mask,
                 shell=False,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 cwd=None if cwd is None else str(cwd),
                 env=child_env,
-                start_new_session=False,
+                # Keep terminal/process-group stop signals on the controller.
+                # The supervisor must revoke authorization before it signals
+                # this exact Popen-owned Tunnel PID.
+                start_new_session=True,
                 umask=0o077,
             )
         except OSError as exc:

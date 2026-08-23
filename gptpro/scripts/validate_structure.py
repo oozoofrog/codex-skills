@@ -534,7 +534,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(Path(__file__).resolve().parent.parent),
         help="Skill directory; defaults to the parent of this script",
     )
-    parser.add_argument("--mirror", help="Optional Plugin mirror directory to compare byte-for-byte")
+    parser.add_argument(
+        "--mirror",
+        help="Optional Plugin mirror directory whose distributable files are compared byte-for-byte",
+    )
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     return parser
 

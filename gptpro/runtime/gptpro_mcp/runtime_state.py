@@ -33,7 +33,9 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
     "revoked": frozenset(),
 }
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_ERROR_CODE = re.compile(r"[A-Z][A-Z0-9_]{1,63}")
 _PACKAGE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_STOP_REASON = re.compile(r"[a-z][a-z0-9_-]{0,63}")
 _SECRET_VALUE = re.compile(r"(?:\bsk-[A-Za-z0-9_-]{16,}|\btunnel_[A-Za-z0-9_-]{16,128}\b)")
 _SECRET_OBJECT_KEY = re.compile(
     r"(?:sk-[A-Za-z0-9_-]{16,}|tunnel_[A-Za-z0-9_-]{16,128})", re.IGNORECASE
@@ -44,6 +46,8 @@ _SAFE_TUNNEL_OBJECT_KEYS = frozenset(
         "tunnel_id_binding_sha256",
         "tunnel_profile_sha256",
         "tunnel_client_binary_sha256",
+        "orphan_tunnel_termination_manually_confirmed",
+        "orphan_tunnel_termination_confirmation_recorded_at",
     }
 )
 _MAX_STATE_NESTING = 64
@@ -383,11 +387,22 @@ def validate_active_state(state: Mapping[str, Any]) -> dict[str, Any]:
         "mcp_target_sha256",
         "mcp_runtime_tree_sha256",
         "protocol_trace_header_sha256",
+        "runtime_stop_receipt_event_sha256",
+        "runtime_protocol_trace_artifact_sha256",
+        "activation_stop_receipt_event_sha256",
+        "activation_protocol_trace_artifact_sha256",
     ):
         if key in value and _SHA256.fullmatch(str(value[key])) is None:
             raise RuntimeStateError("RUNTIME_STATE_UNSAFE", f"Runtime binding {key} is invalid.")
     timestamps: dict[str, datetime] = {}
-    for key in ("activated_at", "expires_at", "updated_at"):
+    for key in (
+        "activated_at",
+        "expires_at",
+        "updated_at",
+        "runtime_stop_recorded_at",
+        "activation_stop_recorded_at",
+        "orphan_tunnel_termination_confirmation_recorded_at",
+    ):
         if key in value:
             try:
                 timestamps[key] = parse_utc(str(value[key]))
@@ -437,6 +452,49 @@ def validate_active_state(state: Mapping[str, Any]) -> dict[str, Any]:
         )
     if timestamps["expires_at"] <= timestamps["activated_at"]:
         raise RuntimeStateError("RUNTIME_STATE_UNSAFE", "Runtime session expiry is invalid.")
+    _validate_optional_stop_evidence(value, prefix="runtime")
+    _validate_optional_stop_evidence(value, prefix="activation")
+    manual_orphan_confirmation = value.get(
+        "orphan_tunnel_termination_manually_confirmed"
+    )
+    manual_orphan_confirmation_at = value.get(
+        "orphan_tunnel_termination_confirmation_recorded_at"
+    )
+    if (
+        manual_orphan_confirmation is not None
+        or manual_orphan_confirmation_at is not None
+    ) and (
+        manual_orphan_confirmation is not True
+        or "orphan_tunnel_termination_confirmation_recorded_at" not in timestamps
+        or value.get("status") not in TERMINAL_STATUSES
+    ):
+        raise RuntimeStateError(
+            "RUNTIME_STATE_UNSAFE",
+            "Runtime manual orphan-termination confirmation is invalid.",
+        )
+    if value.get("runtime_child_stopped") is True and value.get("status") not in TERMINAL_STATUSES:
+        raise RuntimeStateError(
+            "RUNTIME_STATE_UNSAFE",
+            "Runtime child-stop evidence requires terminal authorization.",
+        )
+    if value.get("activation_child_stopped") is True and value.get("status") not in {
+        "faulted",
+        "revoked",
+    }:
+        raise RuntimeStateError(
+            "RUNTIME_STATE_UNSAFE",
+            "Failed-activation child-stop evidence requires faulted or recovered-revoked authorization.",
+        )
+    activation_failure_code = value.get("activation_failure_code")
+    if activation_failure_code is not None and (
+        not isinstance(activation_failure_code, str)
+        or _ERROR_CODE.fullmatch(activation_failure_code) is None
+        or value.get("status") not in {"faulted", "revoked"}
+    ):
+        raise RuntimeStateError(
+            "RUNTIME_STATE_UNSAFE",
+            "Runtime activation-failure evidence is invalid.",
+        )
     wall_duration = (timestamps["expires_at"] - timestamps["activated_at"]).total_seconds()
     monotonic_duration = (
         monotonic_values["expires_monotonic"] - monotonic_values["activated_monotonic"]
@@ -447,6 +505,45 @@ def validate_active_state(state: Mapping[str, Any]) -> dict[str, Any]:
         )
     _reject_secret_material(value)
     return value
+
+
+def _validate_optional_stop_evidence(value: Mapping[str, Any], *, prefix: str) -> None:
+    required_fields = {
+        f"{prefix}_child_stopped",
+        f"{prefix}_child_returncode",
+        f"{prefix}_forced_exact_child",
+        f"{prefix}_stop_reason",
+        f"{prefix}_stop_receipt_recorded",
+        f"{prefix}_stop_recorded_at",
+    }
+    receipt_hash_key = f"{prefix}_stop_receipt_event_sha256"
+    trace_hash_key = f"{prefix}_protocol_trace_artifact_sha256"
+    evidence_fields = required_fields | {receipt_hash_key, trace_hash_key}
+    present = evidence_fields & set(value)
+    if not present:
+        return
+    if not required_fields.issubset(value):
+        raise RuntimeStateError(
+            "RUNTIME_STATE_UNSAFE", "Runtime exact-child stop evidence is incomplete."
+        )
+    returncode = value[f"{prefix}_child_returncode"]
+    reason = value[f"{prefix}_stop_reason"]
+    receipt_recorded = value[f"{prefix}_stop_receipt_recorded"]
+    if (
+        value[f"{prefix}_child_stopped"] is not True
+        or isinstance(returncode, bool)
+        or not isinstance(returncode, int)
+        or not isinstance(value[f"{prefix}_forced_exact_child"], bool)
+        or not isinstance(reason, str)
+        or _STOP_REASON.fullmatch(reason) is None
+        or not isinstance(receipt_recorded, bool)
+        or (receipt_recorded and receipt_hash_key not in value)
+        or (not receipt_recorded and receipt_hash_key in value)
+        or (not receipt_recorded and trace_hash_key in value)
+    ):
+        raise RuntimeStateError(
+            "RUNTIME_STATE_UNSAFE", "Runtime exact-child stop evidence is invalid."
+        )
 
 
 class RuntimeTransaction:
@@ -498,6 +595,74 @@ class RuntimeStateStore:
         with self.locked() as transaction:
             return transaction.read()
 
+    def read_archived_session(self, session_id_sha256: str) -> dict[str, Any] | None:
+        """Read one exact terminal session without trusting the active pointer.
+
+        A new activation archives the previous terminal state before replacing
+        ``active.json``.  Stop/status observers that are already bound to that
+        previous session may therefore need its immutable archived evidence.
+        The archive basename is derived only from a validated SHA-256 identity,
+        and every directory/file property is revalidated under the runtime lock.
+        """
+
+        if not isinstance(session_id_sha256, str) or _SHA256.fullmatch(
+            session_id_sha256
+        ) is None:
+            raise RuntimeStateError(
+                "RUNTIME_STATE_UNSAFE", "The archived runtime session hash is invalid."
+            )
+        with self.locked():
+            try:
+                directory = _directory_fd(self.sessions_path)
+            except RuntimeStateError as exc:
+                try:
+                    self.sessions_path.lstat()
+                except FileNotFoundError:
+                    return None
+                raise exc
+            descriptor = -1
+            try:
+                directory_metadata = os.fstat(directory)
+                if (
+                    not stat.S_ISDIR(directory_metadata.st_mode)
+                    or directory_metadata.st_uid != os.getuid()
+                    or stat.S_IMODE(directory_metadata.st_mode) != 0o700
+                ):
+                    raise RuntimeStateError(
+                        "RUNTIME_STATE_UNSAFE",
+                        "The archived runtime directory must be owner-only.",
+                    )
+                try:
+                    descriptor = os.open(
+                        f"{session_id_sha256}.json",
+                        os.O_RDONLY
+                        | getattr(os, "O_NOFOLLOW")
+                        | getattr(os, "O_CLOEXEC", 0),
+                        dir_fd=directory,
+                    )
+                except FileNotFoundError:
+                    return None
+                except OSError as exc:
+                    raise RuntimeStateError(
+                        "RUNTIME_STATE_UNSAFE",
+                        "Unable to open archived runtime state safely.",
+                    ) from exc
+                _validate_private_fd(descriptor)
+                value = self._read_state_descriptor(descriptor)
+                if (
+                    value.get("session_id_sha256") != session_id_sha256
+                    or value.get("status") not in TERMINAL_STATUSES
+                ):
+                    raise RuntimeStateError(
+                        "RUNTIME_STATE_UNSAFE",
+                        "Archived runtime state does not match its terminal session identity.",
+                    )
+                return value
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                os.close(directory)
+
     def begin_activation(self, candidate: Mapping[str, Any]) -> dict[str, Any]:
         value = dict(candidate)
         value["schema_version"] = RUNTIME_SCHEMA_VERSION
@@ -512,9 +677,88 @@ class RuntimeStateStore:
                     "SESSION_CONFLICT", "Another package authorization is already live."
                 )
             if current is not None:
+                exact_child_stopped = (
+                    current.get("runtime_child_stopped") is True
+                    or current.get("activation_child_stopped") is True
+                )
+                manual_orphan_clearance = (
+                    current.get("orphan_tunnel_termination_manually_confirmed") is True
+                )
+                try:
+                    controller_live = self._controller_lease_is_live_unlocked(
+                        str(current["session_id_sha256"])
+                    )
+                except RuntimeStateError as exc:
+                    if not (exact_child_stopped or manual_orphan_clearance):
+                        raise RuntimeStateError(
+                            "CONTROLLER_ORPHANED",
+                            "The previous terminal controller lease is unavailable and exact-child stop is unproven; use explicit recovery.",
+                        ) from exc
+                    controller_live = False
+                if controller_live:
+                    raise RuntimeStateError(
+                        "SESSION_CONFLICT",
+                        "The previous terminal session controller is still finalizing exact-child evidence.",
+                    )
+                if not (exact_child_stopped or manual_orphan_clearance):
+                    raise RuntimeStateError(
+                        "CONTROLLER_ORPHANED",
+                        "The previous terminal controller exited without exact-child stop evidence; complete attended orphan-process review before activating another package.",
+                    )
                 self._archive_terminal_unlocked(current)
                 value["revision"] = current["revision"] + 1
             return transaction.write(value)
+
+    def _controller_lease_is_live_unlocked(self, session_id_sha256: str) -> bool:
+        """Check one terminal controller lease while the runtime lock is held."""
+
+        if _SHA256.fullmatch(session_id_sha256) is None:
+            raise RuntimeStateError(
+                "RUNTIME_STATE_UNSAFE", "The terminal controller session hash is invalid."
+            )
+        path = self.root / f"controller-{session_id_sha256}.lock"
+        descriptor = open_private_regular(path, flags=os.O_RDWR)
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            else:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                return False
+        finally:
+            os.close(descriptor)
+
+    def confirm_orphan_tunnel_termination(
+        self, session_id_sha256: str
+    ) -> dict[str, Any]:
+        """Record an attended assertion without fabricating exact-child evidence."""
+
+        if _SHA256.fullmatch(session_id_sha256) is None:
+            raise RuntimeStateError(
+                "RUNTIME_STATE_UNSAFE", "The terminal controller session hash is invalid."
+            )
+        with self.locked() as transaction:
+            current = transaction.read()
+            if (
+                current is None
+                or current.get("session_id_sha256") != session_id_sha256
+                or current.get("status") not in TERMINAL_STATUSES
+            ):
+                raise RuntimeStateError(
+                    "SESSION_CONFLICT",
+                    "Manual orphan-process review does not match a terminal authorization.",
+                )
+            if current.get("orphan_tunnel_termination_manually_confirmed") is True:
+                return current
+            updated = dict(current)
+            updated["orphan_tunnel_termination_manually_confirmed"] = True
+            updated["orphan_tunnel_termination_confirmation_recorded_at"] = utc_text(
+                datetime.now(timezone.utc)
+            )
+            updated["revision"] = int(current["revision"]) + 1
+            updated["updated_at"] = utc_text(datetime.now(timezone.utc))
+            return transaction.write(updated)
 
     def transition(
         self,
@@ -558,20 +802,24 @@ class RuntimeStateStore:
             del exists
             raise exc
         try:
-            metadata = os.fstat(descriptor)
-            if metadata.st_size > 1024 * 1024:
-                raise RuntimeStateError("RUNTIME_STATE_UNSAFE", "Runtime state is unexpectedly large.")
-            with os.fdopen(descriptor, "rb", closefd=False) as handle:
-                payload = handle.read()
-            try:
-                value = json.loads(payload.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError, RecursionError) as exc:
-                raise RuntimeStateError("RUNTIME_STATE_UNSAFE", "Runtime state is not valid JSON.") from exc
-            if not isinstance(value, dict):
-                raise RuntimeStateError("RUNTIME_STATE_UNSAFE", "Runtime state must be an object.")
-            return validate_active_state(value)
+            return self._read_state_descriptor(descriptor)
         finally:
             os.close(descriptor)
+
+    @staticmethod
+    def _read_state_descriptor(descriptor: int) -> dict[str, Any]:
+        metadata = os.fstat(descriptor)
+        if metadata.st_size > 1024 * 1024:
+            raise RuntimeStateError("RUNTIME_STATE_UNSAFE", "Runtime state is unexpectedly large.")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            payload = handle.read()
+        try:
+            value = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+            raise RuntimeStateError("RUNTIME_STATE_UNSAFE", "Runtime state is not valid JSON.") from exc
+        if not isinstance(value, dict):
+            raise RuntimeStateError("RUNTIME_STATE_UNSAFE", "Runtime state must be an object.")
+        return validate_active_state(value)
 
     def _write_unlocked(self, state: Mapping[str, Any]) -> None:
         data = _pretty_json(state)

@@ -24,7 +24,7 @@ import tempfile
 import time
 import unicodedata
 import zipfile
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -75,7 +75,10 @@ from runtime.gptpro_mcp.runtime_state import (
     RuntimeStateStore,
     fsync_directory,
 )
-from runtime.gptpro_mcp.supervisor import request_cooperative_stop
+from runtime.gptpro_mcp.supervisor import (
+    _claim_and_unlink_control_socket_if_matches,
+    request_cooperative_stop,
+)
 from runtime.gptpro_mcp.tunnel_client import (
     ProfileControllerLease,
     TunnelCapabilities,
@@ -98,6 +101,7 @@ PHASES = ("prepared", "approved", "submitted", "response_imported", "evaluated")
 MCP_AUXILIARY_EVENTS = (
     "mcp_activated",
     "mcp_activation_failed",
+    "mcp_activation_stopped",
     "mcp_expired",
     "mcp_revoked",
     "mcp_stopped",
@@ -279,6 +283,44 @@ def _with_package_lock(path_getter: Any) -> Any:
     return decorate
 
 
+def _with_package_lock_or_global_stop(path_getter: Any) -> Any:
+    """Use the package lock when available, otherwise permit global-only stop evidence.
+
+    Exact-child cleanup can outlive deletion or replacement of its handoff
+    directory.  Only a failure while *entering* the package lock may take the
+    global-only branch; lock contention and failures after entry remain hard
+    errors so package/global receipt ordering cannot be bypassed.
+    """
+
+    def decorate(function: Any) -> Any:
+        @functools.wraps(function)
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            if "_package_evidence_allowed" in kwargs:
+                raise TypeError("package evidence availability is internal")
+            handoff_dir = Path(path_getter(args, kwargs))
+            entered = False
+            try:
+                with package_lifecycle_lock(handoff_dir):
+                    entered = True
+                    return function(
+                        *args,
+                        **kwargs,
+                        _package_evidence_allowed=True,
+                    )
+            except RuntimeStateError as exc:
+                if not entered and exc.code == "RUNTIME_STATE_UNSAFE":
+                    return function(
+                        *args,
+                        **kwargs,
+                        _package_evidence_allowed=False,
+                    )
+                raise HandoffError(f"{exc.code}: {exc.message}") from exc
+
+        return wrapped
+
+    return decorate
+
+
 def _first_handoff_arg(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Path:
     value = args[0] if args else kwargs["handoff_dir"]
     return Path(value)
@@ -347,6 +389,43 @@ def pretty_json_bytes(value: Any) -> bytes:
         ).encode("utf-8")
     except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
         raise HandoffError("Unable to serialize JSON safely") from exc
+
+
+def _write_atomic_json_line_nonblocking(
+    value: dict[str, Any], *, error_code: str
+) -> None:
+    """Write one bounded event line without waiting on stdout backpressure."""
+
+    payload = canonical_json_bytes(value) + b"\n"
+    if len(payload) > 4096:
+        raise ControllerError(error_code, "The foreground event exceeds its atomic limit.")
+    try:
+        descriptor = sys.stdout.fileno()
+    except (AttributeError, OSError, ValueError):
+        # unittest's in-memory redirect has no descriptor and cannot exert
+        # external backpressure. Keep this path deterministic for local tests.
+        sys.stdout.write(payload.decode("utf-8"))
+        sys.stdout.flush()
+        return
+    try:
+        was_blocking = os.get_blocking(descriptor)
+        if was_blocking:
+            os.set_blocking(descriptor, False)
+        try:
+            written = os.write(descriptor, payload)
+        finally:
+            if was_blocking:
+                os.set_blocking(descriptor, True)
+    except (BlockingIOError, OSError) as exc:
+        raise ControllerError(
+            error_code,
+            "The foreground event could not be emitted without blocking.",
+        ) from exc
+    if written != len(payload):
+        raise ControllerError(
+            error_code,
+            "The foreground event was not emitted as one complete line.",
+        )
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -1555,7 +1634,7 @@ def commit_state_receipt_event(
     state: dict[str, Any],
     event_type: str,
     data: dict[str, Any],
-) -> None:
+) -> dict[str, Any]:
     receipt = load_json(handoff_dir / "receipt.json")
     next_receipt = receipt_with_event(receipt, event_type, data)
     if (
@@ -1572,16 +1651,95 @@ def commit_state_receipt_event(
         )
     except RuntimeStateError as exc:
         raise runtime_failure(exc) from exc
+    return copy.deepcopy(next_receipt["events"][-1])
 
 
 @_with_package_lock(_first_handoff_arg)
-def append_receipt_event(handoff_dir: Path, event_type: str, data: dict[str, Any]) -> None:
+def append_receipt_event(
+    handoff_dir: Path, event_type: str, data: dict[str, Any]
+) -> dict[str, Any]:
     state = load_json(handoff_dir / "state.json")
-    commit_state_receipt_event(handoff_dir, state, event_type, data)
+    return commit_state_receipt_event(handoff_dir, state, event_type, data)
 
 
 def receipt_events(receipt: dict[str, Any], event_type: str) -> list[dict[str, Any]]:
     return [event for event in receipt["events"] if event.get("type") == event_type]
+
+
+def _verify_activation_stop_receipt_data(data: dict[str, Any]) -> None:
+    """Validate additive exact-child stop evidence for a failed activation."""
+
+    base_fields = {
+        "phase_before",
+        "phase_after",
+        "session_id_sha256",
+        "reason",
+        "exact_child_stop_observed",
+        "child_returncode",
+        "forced_exact_child",
+        "protocol_trace_valid",
+        "protocol_trace_closed",
+        "protocol_trace_artifact_identity_bound",
+        "protocol_trace_artifact_sha256",
+        "protocol_trace_artifact_bytes",
+    }
+    valid_fields = {
+        "protocol_trace_head_sha256",
+        "protocol_trace_event_count",
+        "protocol_trace_truncated",
+        "protocol_trace_close_reason",
+    }
+    invalid_fields = {"protocol_trace_error_code"}
+    trace_valid = data.get("protocol_trace_valid")
+    expected_fields = base_fields | (valid_fields if trace_valid is True else invalid_fields)
+    if (
+        set(data) != expected_fields
+        or data.get("exact_child_stop_observed") is not True
+        or not isinstance(data.get("forced_exact_child"), bool)
+        or isinstance(data.get("child_returncode"), bool)
+        or not isinstance(data.get("child_returncode"), int)
+        or not isinstance(data.get("reason"), str)
+        or re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", data["reason"]) is None
+        or data.get("protocol_trace_artifact_identity_bound") is not True
+    ):
+        raise HandoffError("Schema-3 failed-activation exact-child stop evidence is invalid")
+    require_sha256(
+        data.get("protocol_trace_artifact_sha256"),
+        label="Schema-3 failed-activation final trace artifact hash",
+    )
+    artifact_bytes = data.get("protocol_trace_artifact_bytes")
+    if (
+        isinstance(artifact_bytes, bool)
+        or not isinstance(artifact_bytes, int)
+        or not 0 <= artifact_bytes <= MAX_TRACE_BYTES
+    ):
+        raise HandoffError("Schema-3 failed-activation final trace artifact length is invalid")
+    if trace_valid is True:
+        require_sha256(
+            data.get("protocol_trace_head_sha256"),
+            label="Schema-3 failed-activation final trace head hash",
+        )
+        event_count = data.get("protocol_trace_event_count")
+        trace_closed = data.get("protocol_trace_closed")
+        close_reason = data.get("protocol_trace_close_reason")
+        if (
+            isinstance(event_count, bool)
+            or not isinstance(event_count, int)
+            or not 0 <= event_count <= MAX_TRACE_EVENTS
+            or not isinstance(data.get("protocol_trace_truncated"), bool)
+            or not isinstance(trace_closed, bool)
+            or (trace_closed and close_reason not in SAFE_CLOSE_REASONS)
+            or (not trace_closed and close_reason is not None)
+        ):
+            raise HandoffError("Schema-3 failed-activation final trace closure is invalid")
+    elif trace_valid is False:
+        if (
+            data.get("protocol_trace_closed") is not False
+            or data.get("protocol_trace_error_code") not in SAFE_TRACE_FAILURE_CODES
+        ):
+            raise HandoffError("Schema-3 failed-activation final trace failure is invalid")
+    else:
+        raise HandoffError("Schema-3 failed-activation final trace validity is invalid")
 
 
 def verify_schema3_mcp_session(
@@ -1605,6 +1763,7 @@ def verify_schema3_mcp_session(
             raise HandoffError("Schema-3 submitted state is missing its MCP session evidence")
         diagnostic = state.get("mcp_protocol_trace")
         failure_events = receipt_events(receipt, "mcp_activation_failed")
+        activation_stop_events = receipt_events(receipt, "mcp_activation_stopped")
         event_diagnostics = [
             event["data"].get("protocol_trace")
             for event in failure_events
@@ -1612,7 +1771,11 @@ def verify_schema3_mcp_session(
             and "protocol_trace" in event["data"]
         ]
         if diagnostic is None:
-            if event_diagnostics:
+            if len(failure_events) > 1:
+                raise HandoffError(
+                    "Schema-3 package has duplicate activation-failure receipts"
+                )
+            if event_diagnostics or activation_stop_events:
                 raise HandoffError(
                     "Schema-3 failed-activation trace receipt lacks package state"
                 )
@@ -1644,20 +1807,48 @@ def verify_schema3_mcp_session(
                 label=f"Schema-3 failed-activation trace {key}",
             )
         approval_events = receipt_events(receipt, "approved")
+        diagnostic_session = diagnostic.get("session_id_sha256")
+        matching_failures = [
+            event
+            for event in failure_events
+            if isinstance(event.get("data"), dict)
+            and event["data"].get("session_id_sha256") == diagnostic_session
+        ]
         if (
             len(approval_events) != 1
             or diagnostic.get("approval_event_sha256")
             != approval_events[0].get("event_hash")
+            or len(failure_events) != 1
+            or len(matching_failures) != 1
             or len(event_diagnostics) != 1
             or event_diagnostics[0] != diagnostic
         ):
             raise HandoffError(
                 "Schema-3 failed-activation trace differs from its receipt"
             )
+        if len(activation_stop_events) > 1:
+            raise HandoffError("Schema-3 failed activation has duplicate exact-child stop receipts")
+        if activation_stop_events:
+            stopped = activation_stop_events[0]
+            stopped_data = stopped.get("data")
+            if (
+                not isinstance(stopped_data, dict)
+                or stopped["sequence"] <= matching_failures[0]["sequence"]
+                or stopped_data.get("session_id_sha256")
+                != diagnostic_session
+            ):
+                raise HandoffError(
+                    "Schema-3 failed-activation stop receipt is not ordered or session-bound"
+                )
+            _verify_activation_stop_receipt_data(stopped_data)
         return
     if not isinstance(session, dict) or phase == "prepared":
         raise HandoffError(
             "Schema-3 runtime sessions are not supported without verified package-local evidence"
+        )
+    if receipt_events(receipt, "mcp_activation_stopped"):
+        raise HandoffError(
+            "Schema-3 active-session evidence cannot contain a failed-activation stop receipt"
         )
     if state.get("mcp_protocol_trace") is not None:
         raise HandoffError("Schema-3 active session has conflicting failed trace evidence")
@@ -3683,6 +3874,7 @@ def complete_mcp_activation(
     session_id_sha256: str,
     audit_header_sha256: str,
     successful_control_plane_poll_observed: bool,
+    on_published: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Publish package evidence, then make authorization active as the final step."""
 
@@ -3790,11 +3982,60 @@ def complete_mcp_activation(
             },
         )
         raise runtime_failure(exc) from exc
+    if on_published is not None:
+        # The decorator still holds the package lifecycle lock here.  Publish
+        # the local active signal in the same cross-process critical section
+        # as the package/global activation commit.
+        on_published()
     return {"authorization": active, "audit": audit_summary_payload(audit_summary)}
 
 
+def _fault_mcp_activation_runtime_first(
+    handoff_dir: str | Path,
+    runtime_store: RuntimeStateStore,
+    *,
+    session_id_sha256: str,
+    error_code: str,
+) -> dict[str, Any]:
+    """Deny the exact machine-global activation without trusting package bytes."""
+
+    expected_handoff = _runtime_handoff_identity(handoff_dir)
+    try:
+        with runtime_store.locked() as transaction:
+            current = transaction.read()
+            if current is None:
+                raise HandoffError("No machine-global MCP authorization exists")
+            if current.get("session_id_sha256") != session_id_sha256:
+                raise HandoffError(
+                    "Machine-global authorization belongs to a different session"
+                )
+            if current.get("handoff_dir") != expected_handoff:
+                raise HandoffError(
+                    "Machine-global authorization belongs to a different handoff"
+                )
+            status = current.get("status")
+            if status in {"activating", "active", "revoking"}:
+                denied = dict(current)
+                denied.update(
+                    {
+                        "status": "faulted",
+                        "revision": int(current["revision"]) + 1,
+                        "updated_at": utc_now(),
+                        "activation_failure_code": error_code,
+                    }
+                )
+                return transaction.write(denied)
+            if status in {"faulted", "revoked"}:
+                return current
+            raise HandoffError(
+                "Machine-global MCP activation is not in a failure-deniable state"
+            )
+    except RuntimeStateError as exc:
+        raise runtime_failure(exc) from exc
+
+
 @_with_package_lock(_first_handoff_arg)
-def fail_mcp_activation(
+def _record_mcp_activation_failure_package(
     handoff_dir: Path,
     runtime_store: RuntimeStateStore,
     *,
@@ -3814,47 +4055,53 @@ def fail_mcp_activation(
         for event in receipt["events"]
     ):
         return
-    current: dict[str, Any] | None = None
-    failed_trace: dict[str, Any] | None = None
+    # The runtime-first denial and this package transaction are separated on
+    # purpose so denial never depends on package bytes. Re-read the exact
+    # global binding while the package lock is now held: an external stop may
+    # have completed faulted -> revoked in between, and that normal terminal
+    # package must never be rewritten as an activation failure.
     try:
         current = runtime_store.read()
     except RuntimeStateError:
-        current = None
-    if current is not None and current.get("session_id_sha256") == session_hash:
-        try:
-            audit_summary = audit_log_for(
-                verified, session_hash, runtime_store=runtime_store
-            ).verify()
-            trace_summary = protocol_trace_for_runtime_state(
-                verified,
-                current,
-                session_id_sha256=session_hash,
-                audit_header_sha256=audit_summary.header_sha256,
-            ).verify()
-            failed_trace = {
-                "status": "activation_failed",
-                "session_id_sha256": session_hash,
-                "manifest_sha256": verified["manifest_sha256"],
-                "approval_event_sha256": schema3_approval_event(verified)[
-                    "event_hash"
-                ],
-                "audit_header_sha256": audit_summary.header_sha256,
-                "protocol_trace_file": TRACE_FILE_NAME,
-                "protocol_trace_header_sha256": trace_summary.header_sha256,
-                "tunnel_profile_sha256": current["tunnel_profile_sha256"],
-                "tunnel_client_binary_sha256": current[
-                    "tunnel_client_binary_sha256"
-                ],
-                "mcp_target_sha256": current["mcp_target_sha256"],
-                "mcp_runtime_tree_sha256": current["mcp_runtime_tree_sha256"],
-            }
-        except (HandoffError, KeyError, ProtocolTraceError, RuntimeStateError, ToolError):
-            failed_trace = None
-        try:
-            if current.get("status") in {"activating", "active"}:
-                runtime_store.transition(session_hash, current["status"], "faulted")
-        except RuntimeStateError:
-            pass
+        return
+    if (
+        current.get("session_id_sha256") != session_hash
+        or current.get("handoff_dir") != _runtime_handoff_identity(handoff_dir)
+        or current.get("status") == "revoked"
+    ):
+        return
+    if current.get("status") != "faulted":
+        return
+    failed_trace: dict[str, Any] | None = None
+    try:
+        audit_summary = audit_log_for(
+            verified, session_hash, runtime_store=runtime_store
+        ).verify()
+        trace_summary = protocol_trace_for_runtime_state(
+            verified,
+            current,
+            session_id_sha256=session_hash,
+            audit_header_sha256=audit_summary.header_sha256,
+        ).verify()
+        failed_trace = {
+            "status": "activation_failed",
+            "session_id_sha256": session_hash,
+            "manifest_sha256": verified["manifest_sha256"],
+            "approval_event_sha256": schema3_approval_event(verified)[
+                "event_hash"
+            ],
+            "audit_header_sha256": audit_summary.header_sha256,
+            "protocol_trace_file": TRACE_FILE_NAME,
+            "protocol_trace_header_sha256": trace_summary.header_sha256,
+            "tunnel_profile_sha256": current["tunnel_profile_sha256"],
+            "tunnel_client_binary_sha256": current[
+                "tunnel_client_binary_sha256"
+            ],
+            "mcp_target_sha256": current["mcp_target_sha256"],
+            "mcp_runtime_tree_sha256": current["mcp_runtime_tree_sha256"],
+        }
+    except (HandoffError, KeyError, ProtocolTraceError, RuntimeStateError, ToolError):
+        failed_trace = None
     event_type = "mcp_activation_failed"
     if isinstance(state.get("mcp_session"), dict):
         state["mcp_session"]["status"] = "faulted"
@@ -3879,6 +4126,50 @@ def fail_mcp_activation(
         event_type,
         event_data,
     )
+
+
+def fail_mcp_activation(
+    handoff_dir: Path,
+    runtime_store: RuntimeStateStore,
+    *,
+    session_id_sha256: str,
+    error_code: str,
+) -> None:
+    """Deny globally first, then record package-local failure evidence best-effort."""
+
+    if re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", error_code) is None:
+        error_code = "MCP_ACTIVATION_FAILED"
+    session_hash = require_sha256(session_id_sha256, label="MCP session ID hash")
+    denied = _fault_mcp_activation_runtime_first(
+        handoff_dir,
+        runtime_store,
+        session_id_sha256=session_hash,
+        error_code=error_code,
+    )
+    if denied.get("status") == "revoked":
+        # A successful activation may have been terminally revoked by an
+        # external mcp-stop immediately after its package-lock publication
+        # point. A late local failure observation must not rewrite that normal
+        # terminal package as a failed activation.
+        return
+    recorded_error_code = denied.get("activation_failure_code", error_code)
+    if (
+        not isinstance(recorded_error_code, str)
+        or re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", recorded_error_code) is None
+    ):
+        recorded_error_code = error_code
+    try:
+        _record_mcp_activation_failure_package(
+            Path(handoff_dir),
+            runtime_store,
+            session_id_sha256=session_hash,
+            error_code=recorded_error_code,
+        )
+    except HandoffError:
+        # Package evidence is useful but not authoritative for denial.  If it
+        # is missing, damaged, or cannot be committed, retain the exact
+        # machine-global fault and let child-stop evidence remain global-only.
+        return
 
 
 def _inspect_orphan_audit(
@@ -4294,8 +4585,14 @@ def revoke_mcp_authorization_fail_closed(
     """Close valid evidence normally, or deny globally without rewriting it."""
 
     package_error: HandoffError | None = None
+    canonical_handoff: Path | None = None
     try:
-        checked_dir, verified = checked_schema3_handoff(str(handoff_dir))
+        # Resolve the handoff identity independently from package verification.
+        # A symlink spelling that resolved to the approved directory at
+        # activation must retain that same canonical binding when damaged
+        # package evidence forces the machine-global denial path.
+        canonical_handoff = validate_handoff_dir(str(handoff_dir))
+        checked_dir, verified = checked_schema3_handoff(str(canonical_handoff))
         if isinstance(verified["state"].get("mcp_session"), dict):
             result = stop_mcp_authorization(checked_dir, runtime_store, reason=reason)
         else:
@@ -4304,17 +4601,39 @@ def revoke_mcp_authorization_fail_closed(
                 runtime_store,
                 reason=reason,
             )
+        authorization_status = str(result["authorization"].get("status", "unknown"))
+        latest = verify_package(checked_dir)
+        session = latest["state"].get("mcp_session")
+        session_hash = result["authorization"].get("session_id_sha256")
+        matching_revocations = [
+            event
+            for event in receipt_events(latest["receipt"], "mcp_revoked")
+            if isinstance(event.get("data"), dict)
+            and event["data"].get("session_id_sha256") == session_hash
+        ]
+        revocation_receipt_recorded = bool(
+            authorization_status == "revoked"
+            and isinstance(session, dict)
+            and session.get("status") == "revoked"
+            and len(matching_revocations) == 1
+        )
         return {
             **result,
             "package_evidence_available": True,
             "package_evidence_status": "verified",
+            "authorization_denied": authorization_status
+            in {"revoked", "expired", "faulted"},
+            "authorization_status": authorization_status,
+            "revocation_receipt_recorded": revocation_receipt_recorded,
+            "authorization_revoked": authorization_status == "revoked"
+            and revocation_receipt_recorded,
         }
     except HandoffError as exc:
         package_error = exc
 
     try:
         denied = deny_mcp_authorization_without_package(
-            handoff_dir,
+            canonical_handoff if canonical_handoff is not None else handoff_dir,
             runtime_store,
             expected_session_id_sha256=expected_session_id_sha256,
         )
@@ -4330,6 +4649,11 @@ def revoke_mcp_authorization_fail_closed(
         },
         "package_evidence_available": False,
         "package_evidence_status": "unavailable",
+        "authorization_denied": denied.get("status")
+        in {"revoked", "expired", "faulted"},
+        "authorization_status": str(denied.get("status", "unknown")),
+        "revocation_receipt_recorded": False,
+        "authorization_revoked": False,
     }
 
 
@@ -4382,6 +4706,10 @@ def expire_mcp_authorization(
             return {
                 "expired": False,
                 "authorization": current,
+                "authorization_denied": False,
+                "authorization_status": "active",
+                "revocation_receipt_recorded": False,
+                "authorization_revoked": False,
                 "audit": audit_summary_payload(before),
             }
         reason = (
@@ -4429,6 +4757,10 @@ def expire_mcp_authorization(
     return {
         "expired": True,
         "authorization": current,
+        "authorization_denied": True,
+        "authorization_status": "expired",
+        "revocation_receipt_recorded": False,
+        "authorization_revoked": False,
         "audit": audit_summary_payload(summary),
     }
 
@@ -4486,7 +4818,7 @@ def record_mcp_stopped(
     *,
     session_id_sha256: str,
     reason: str = "user_requested",
-) -> None:
+) -> dict[str, Any]:
     verified = verify_package(handoff_dir)
     state = verified["state"]
     session = state.get("mcp_session")
@@ -4498,9 +4830,15 @@ def record_mcp_stopped(
         raise HandoffError("Tunnel stop evidence does not match a terminal MCP authorization")
     existing = receipt_events(verified["receipt"], "mcp_stopped")
     if existing:
-        if len(existing) != 1 or existing[0]["data"].get("session_id_sha256") != session_id_sha256:
+        existing_data = existing[0].get("data") if len(existing) == 1 else None
+        if (
+            not isinstance(existing_data, dict)
+            or existing_data.get("session_id_sha256") != session_id_sha256
+            or existing_data.get("reason") != reason
+            or existing_data.get("tunnel_runtime_stopped") is not True
+        ):
             raise HandoffError("Existing MCP tunnel-stop receipt does not match this session")
-        return
+        return copy.deepcopy(existing[0])
     trace_final: dict[str, Any] = {}
     if session.get("protocol_trace_file") == TRACE_FILE_NAME:
         trace: ProtocolTrace | None = None
@@ -4562,7 +4900,7 @@ def record_mcp_stopped(
     state["mcp_session"].update(trace_final)
     state["revision"] += 1
     state["updated_at"] = utc_now()
-    commit_state_receipt_event(
+    return commit_state_receipt_event(
         handoff_dir,
         state,
         "mcp_stopped",
@@ -4581,8 +4919,510 @@ def record_mcp_stopped(
     )
 
 
+def _record_machine_runtime_stop(
+    runtime_store: RuntimeStateStore,
+    *,
+    handoff_dir: str | Path,
+    session_id_sha256: str,
+    reason: str,
+    child_returncode: int,
+    forced_exact_child: bool,
+    receipt_event_sha256: str | None,
+    trace_artifact_sha256: str | None,
+) -> dict[str, Any]:
+    expected_handoff = _runtime_handoff_identity(handoff_dir)
+    with runtime_store.locked() as transaction:
+        current = transaction.read()
+        if (
+            current is None
+            or current.get("session_id_sha256") != session_id_sha256
+            or current.get("handoff_dir") != expected_handoff
+            or current.get("status") not in {"revoked", "expired", "faulted"}
+        ):
+            raise HandoffError(
+                "Exact-child stop does not match a terminal runtime authorization"
+            )
+        expected = {
+            "runtime_child_stopped": True,
+            "runtime_child_returncode": child_returncode,
+            "runtime_forced_exact_child": forced_exact_child,
+            "runtime_stop_reason": reason,
+            "runtime_stop_receipt_recorded": receipt_event_sha256 is not None,
+        }
+        if receipt_event_sha256 is not None:
+            expected["runtime_stop_receipt_event_sha256"] = receipt_event_sha256
+        if trace_artifact_sha256 is not None:
+            expected["runtime_protocol_trace_artifact_sha256"] = trace_artifact_sha256
+        if current.get("runtime_child_stopped") is True:
+            stable_keys = {
+                "runtime_child_stopped",
+                "runtime_child_returncode",
+                "runtime_forced_exact_child",
+                "runtime_stop_reason",
+            }
+            if any(current.get(key) != expected[key] for key in stable_keys):
+                raise HandoffError("Existing machine-global runtime-stop evidence conflicts")
+            existing_receipt = current.get("runtime_stop_receipt_recorded")
+            if existing_receipt is True:
+                if any(current.get(key) != value for key, value in expected.items()):
+                    raise HandoffError("Existing machine-global runtime-stop evidence conflicts")
+                return current
+            if existing_receipt is not False:
+                raise HandoffError("Existing machine-global runtime-stop evidence is invalid")
+            if receipt_event_sha256 is None:
+                if trace_artifact_sha256 is not None:
+                    raise HandoffError("Runtime-stop trace evidence lacks a receipt binding")
+                return current
+            # A restored and re-verified package may monotonically reconcile a
+            # prior global-only stop from receipt=false to the exact receipt
+            # hash.  Never permit the reverse transition or a different hash.
+            updated = dict(current)
+            updated.update(expected)
+            updated["runtime_stop_recorded_at"] = utc_now()
+            updated["revision"] = int(current["revision"]) + 1
+            updated["updated_at"] = utc_now()
+            return transaction.write(updated)
+        updated = dict(current)
+        updated.update(expected)
+        updated["runtime_stop_recorded_at"] = utc_now()
+        updated["revision"] = int(current["revision"]) + 1
+        updated["updated_at"] = utc_now()
+        return transaction.write(updated)
+
+
+def _require_machine_stop_binding(
+    runtime_store: RuntimeStateStore,
+    *,
+    handoff_dir: str | Path,
+    session_id_sha256: str,
+    expected_statuses: set[str],
+) -> dict[str, Any]:
+    try:
+        current = runtime_store.read()
+    except RuntimeStateError as exc:
+        raise runtime_failure(exc) from exc
+    if (
+        current is None
+        or current.get("session_id_sha256") != session_id_sha256
+        or current.get("handoff_dir") != _runtime_handoff_identity(handoff_dir)
+        or current.get("status") not in expected_statuses
+    ):
+        raise HandoffError("Exact-child stop does not match machine-global authorization")
+    return current
+
+
+@_with_package_lock_or_global_stop(_first_handoff_arg)
+def record_mcp_runtime_stopped_fail_closed(
+    handoff_dir: str | Path,
+    runtime_store: RuntimeStateStore,
+    *,
+    session_id_sha256: str,
+    reason: str,
+    child_returncode: int,
+    forced_exact_child: bool,
+    _package_evidence_allowed: bool,
+) -> dict[str, Any]:
+    """Record normal package stop evidence, or only the exact global stop fact."""
+
+    session_hash = require_sha256(session_id_sha256, label="MCP session ID hash")
+    if not isinstance(reason, str) or re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", reason) is None:
+        raise HandoffError("MCP runtime-stop reason is invalid")
+    if isinstance(child_returncode, bool) or not isinstance(child_returncode, int):
+        raise HandoffError("MCP runtime-stop return code is invalid")
+    if not isinstance(forced_exact_child, bool):
+        raise HandoffError("MCP runtime-stop forced flag is invalid")
+    _require_machine_stop_binding(
+        runtime_store,
+        handoff_dir=handoff_dir,
+        session_id_sha256=session_hash,
+        expected_statuses={"revoked", "expired", "faulted"},
+    )
+
+    package_evidence_available = False
+    receipt_recorded = False
+    receipt_event_sha256: str | None = None
+    trace_artifact_sha256: str | None = None
+    package_verified_before_write = False
+    package_write_attempted = False
+    try:
+        if not _package_evidence_allowed:
+            raise HandoffError("Package lifecycle directory is unavailable")
+        checked_dir, verified = checked_schema3_handoff(str(handoff_dir))
+        package_verified_before_write = True
+        session = verified["state"].get("mcp_session")
+        if not isinstance(session, dict) or session.get("session_id_sha256") != session_hash:
+            raise HandoffError("Package session does not match the exact stopped child")
+        package_write_attempted = True
+        stop_event = record_mcp_stopped(
+            checked_dir,
+            session_id_sha256=session_hash,
+            reason=reason,
+        )
+        stop_data = stop_event.get("data")
+        if (
+            not isinstance(stop_data, dict)
+            or stop_data.get("session_id_sha256") != session_hash
+            or stop_data.get("reason") != reason
+            or stop_data.get("tunnel_runtime_stopped") is not True
+        ):
+            raise HandoffError("Exact-child stop receipt was not committed")
+        receipt_event_sha256 = require_sha256(
+            stop_event.get("event_hash"), label="MCP runtime-stop receipt event hash"
+        )
+        raw_trace_hash = stop_data.get("protocol_trace_artifact_sha256")
+        trace_artifact_sha256 = (
+            require_sha256(raw_trace_hash, label="MCP runtime-stop trace artifact hash")
+            if raw_trace_hash is not None
+            else None
+        )
+        package_evidence_available = True
+        receipt_recorded = True
+    except (HandoffError, ProtocolTraceError, RuntimeStateError, ToolError) as exc:
+        if package_verified_before_write and package_write_attempted:
+            try:
+                latest = verify_package(Path(handoff_dir))
+            except (HandoffError, ProtocolTraceError, RuntimeStateError, ToolError) as reconcile_exc:
+                raise HandoffError(
+                    "PACKAGE_STOP_EVIDENCE_INDETERMINATE: unable to reconcile the package "
+                    "after a runtime-stop receipt commit attempt"
+                ) from reconcile_exc
+            events = receipt_events(latest["receipt"], "mcp_stopped")
+            if events:
+                if len(events) != 1:
+                    raise HandoffError("Existing MCP runtime-stop receipts conflict") from exc
+                stop_event = events[0]
+                stop_data = stop_event.get("data")
+                if (
+                    not isinstance(stop_data, dict)
+                    or stop_data.get("session_id_sha256") != session_hash
+                    or stop_data.get("reason") != reason
+                    or stop_data.get("tunnel_runtime_stopped") is not True
+                ):
+                    raise HandoffError(
+                        "Existing MCP runtime-stop receipt conflicts with exact-child evidence"
+                    ) from exc
+                receipt_event_sha256 = require_sha256(
+                    stop_event.get("event_hash"),
+                    label="MCP runtime-stop receipt event hash",
+                )
+                raw_trace_hash = stop_data.get("protocol_trace_artifact_sha256")
+                trace_artifact_sha256 = (
+                    require_sha256(
+                        raw_trace_hash,
+                        label="MCP runtime-stop trace artifact hash",
+                    )
+                    if raw_trace_hash is not None
+                    else None
+                )
+                receipt_recorded = True
+            package_evidence_available = True
+        elif not package_verified_before_write:
+            package_evidence_available = False
+            receipt_recorded = False
+            receipt_event_sha256 = None
+            trace_artifact_sha256 = None
+        else:
+            raise
+
+    try:
+        authorization = _record_machine_runtime_stop(
+            runtime_store,
+            handoff_dir=handoff_dir,
+            session_id_sha256=session_hash,
+            reason=reason,
+            child_returncode=child_returncode,
+            forced_exact_child=forced_exact_child,
+            receipt_event_sha256=receipt_event_sha256,
+            trace_artifact_sha256=trace_artifact_sha256,
+        )
+    except RuntimeStateError as exc:
+        raise runtime_failure(exc) from exc
+    return {
+        "authorization": authorization,
+        "exact_child_stop_recorded": True,
+        "runtime_stop_receipt_recorded": receipt_recorded,
+        "package_evidence_available": package_evidence_available,
+        "package_evidence_status": "verified" if package_evidence_available else "unavailable",
+    }
+
+
 # Backward-compatible internal name for an early controller prototype.
 record_mcp_tunnel_stopped = record_mcp_stopped
+
+
+def _failed_activation_trace_final(verified: dict[str, Any]) -> dict[str, Any]:
+    """Return deterministic final trace evidence without inventing a runtime footer."""
+
+    trace = protocol_trace_for(verified)
+    identity = trace.fingerprint()
+    try:
+        summary = trace.verify()
+        diagnostic = verified["state"].get("mcp_protocol_trace")
+        if not isinstance(diagnostic, dict) or summary.header_sha256 != diagnostic.get(
+            "protocol_trace_header_sha256"
+        ):
+            raise ProtocolTraceError(
+                "PROTOCOL_TRACE_BINDING_MISMATCH",
+                "The final failed-activation trace header differs from activation evidence.",
+            )
+    except ProtocolTraceError as exc:
+        return {
+            "protocol_trace_valid": False,
+            "protocol_trace_closed": False,
+            "protocol_trace_error_code": (
+                exc.code if exc.code in SAFE_TRACE_FAILURE_CODES else "PROTOCOL_TRACE_UNAVAILABLE"
+            ),
+            "protocol_trace_artifact_identity_bound": True,
+            "protocol_trace_artifact_sha256": identity.sha256,
+            "protocol_trace_artifact_bytes": identity.byte_count,
+        }
+    return {
+        "protocol_trace_valid": True,
+        "protocol_trace_head_sha256": summary.head_sha256,
+        "protocol_trace_event_count": summary.event_count,
+        "protocol_trace_truncated": summary.truncated,
+        "protocol_trace_closed": summary.closed,
+        "protocol_trace_close_reason": summary.close_reason,
+        "protocol_trace_artifact_identity_bound": True,
+        "protocol_trace_artifact_sha256": identity.sha256,
+        "protocol_trace_artifact_bytes": identity.byte_count,
+    }
+
+
+def _record_machine_activation_stop(
+    runtime_store: RuntimeStateStore,
+    *,
+    handoff_dir: str | Path,
+    session_id_sha256: str,
+    reason: str,
+    child_returncode: int,
+    forced_exact_child: bool,
+    receipt_event_sha256: str | None,
+    trace_artifact_sha256: str | None,
+) -> dict[str, Any]:
+    expected_handoff = _runtime_handoff_identity(handoff_dir)
+    with runtime_store.locked() as transaction:
+        current = transaction.read()
+        if (
+            current is None
+            or current.get("session_id_sha256") != session_id_sha256
+            or current.get("handoff_dir") != expected_handoff
+            or current.get("status") not in {"faulted", "revoked"}
+        ):
+            raise HandoffError(
+                "Failed-activation exact-child stop does not match terminal runtime authorization"
+            )
+        expected = {
+            "activation_child_stopped": True,
+            "activation_child_returncode": child_returncode,
+            "activation_forced_exact_child": forced_exact_child,
+            "activation_stop_reason": reason,
+            "activation_stop_receipt_recorded": receipt_event_sha256 is not None,
+        }
+        if receipt_event_sha256 is not None:
+            expected["activation_stop_receipt_event_sha256"] = receipt_event_sha256
+        if trace_artifact_sha256 is not None:
+            expected["activation_protocol_trace_artifact_sha256"] = trace_artifact_sha256
+        if current.get("activation_child_stopped") is True:
+            stable_keys = {
+                "activation_child_stopped",
+                "activation_child_returncode",
+                "activation_forced_exact_child",
+                "activation_stop_reason",
+            }
+            if any(current.get(key) != expected[key] for key in stable_keys):
+                raise HandoffError("Existing machine-global activation-stop evidence conflicts")
+            existing_receipt = current.get("activation_stop_receipt_recorded")
+            if existing_receipt is True:
+                if any(current.get(key) != value for key, value in expected.items()):
+                    raise HandoffError("Existing machine-global activation-stop evidence conflicts")
+                return current
+            if existing_receipt is not False:
+                raise HandoffError("Existing machine-global activation-stop evidence is invalid")
+            if receipt_event_sha256 is None:
+                if trace_artifact_sha256 is not None:
+                    raise HandoffError("Activation-stop trace evidence lacks a receipt binding")
+                return current
+            updated = dict(current)
+            updated.update(expected)
+            updated["activation_stop_recorded_at"] = utc_now()
+            updated["revision"] = int(current["revision"]) + 1
+            updated["updated_at"] = utc_now()
+            return transaction.write(updated)
+        updated = dict(current)
+        updated.update(expected)
+        updated["activation_stop_recorded_at"] = utc_now()
+        updated["revision"] = int(current["revision"]) + 1
+        updated["updated_at"] = utc_now()
+        return transaction.write(updated)
+
+
+@_with_package_lock_or_global_stop(_first_handoff_arg)
+def record_mcp_activation_stopped_fail_closed(
+    handoff_dir: str | Path,
+    runtime_store: RuntimeStateStore,
+    *,
+    session_id_sha256: str,
+    reason: str,
+    child_returncode: int,
+    forced_exact_child: bool,
+    _package_evidence_allowed: bool,
+) -> dict[str, Any]:
+    """Bind a failed activation's exact-child stop, or retain it globally only."""
+
+    session_hash = require_sha256(session_id_sha256, label="MCP session ID hash")
+    if not isinstance(reason, str) or re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", reason) is None:
+        raise HandoffError("MCP activation-stop reason is invalid")
+    if isinstance(child_returncode, bool) or not isinstance(child_returncode, int):
+        raise HandoffError("MCP activation-stop return code is invalid")
+    if not isinstance(forced_exact_child, bool):
+        raise HandoffError("MCP activation-stop forced flag is invalid")
+    _require_machine_stop_binding(
+        runtime_store,
+        handoff_dir=handoff_dir,
+        session_id_sha256=session_hash,
+        expected_statuses={"faulted", "revoked"},
+    )
+
+    package_evidence_available = False
+    receipt_recorded = False
+    receipt_event_sha256: str | None = None
+    trace_artifact_sha256: str | None = None
+    package_verified_before_write = False
+    package_write_attempted = False
+    event_data: dict[str, Any] | None = None
+    try:
+        if not _package_evidence_allowed:
+            raise HandoffError("Package lifecycle directory is unavailable")
+        checked_dir, verified = checked_schema3_handoff(str(handoff_dir))
+        package_verified_before_write = True
+        package_session = verified["state"].get("mcp_session")
+        diagnostic = verified["state"].get("mcp_protocol_trace")
+        failures = [
+            event
+            for event in receipt_events(verified["receipt"], "mcp_activation_failed")
+            if isinstance(event.get("data"), dict)
+            and event["data"].get("session_id_sha256") == session_hash
+        ]
+        if (
+            isinstance(package_session, dict)
+            and package_session.get("session_id_sha256") == session_hash
+            and package_session.get("status") == "faulted"
+        ):
+            # Package activation was published before the machine-global active
+            # transition failed. This is not a failed-trace receipt shape; retain
+            # the exact-child fact only in terminal machine-global state.
+            package_evidence_available = True
+        elif len(failures) == 0:
+            # Global denial is authoritative.  A package write may have failed
+            # before its failure receipt was committed, so do not let an
+            # otherwise valid package block exact-child stop evidence.
+            package_evidence_available = False
+        elif len(failures) != 1:
+            raise HandoffError("Failed-activation evidence does not match the exact child")
+        elif diagnostic is None:
+            # An attended stop can revoke activation before a protocol trace exists.
+            # Preserve the positive exact-child fact globally without inventing a
+            # package-local trace binding.
+            package_evidence_available = True
+        else:
+            if (
+                not isinstance(diagnostic, dict)
+                or diagnostic.get("session_id_sha256") != session_hash
+            ):
+                raise HandoffError("Failed-activation evidence does not match the exact child")
+            try:
+                trace_final = _failed_activation_trace_final(verified)
+            except (HandoffError, ProtocolTraceError):
+                # The authorization and exact child are still conclusively bound,
+                # but an unavailable/unsafe trace cannot support a package receipt.
+                package_evidence_available = False
+            else:
+                event_data = {
+                    "phase_before": verified["state"]["phase"],
+                    "phase_after": verified["state"]["phase"],
+                    "session_id_sha256": session_hash,
+                    "reason": reason,
+                    "exact_child_stop_observed": True,
+                    "child_returncode": child_returncode,
+                    "forced_exact_child": forced_exact_child,
+                    **trace_final,
+                }
+                existing = receipt_events(verified["receipt"], "mcp_activation_stopped")
+                if existing:
+                    if len(existing) != 1 or existing[0].get("data") != event_data:
+                        raise HandoffError("Existing failed-activation stop receipt conflicts")
+                    receipt_event_sha256 = str(existing[0].get("event_hash"))
+                else:
+                    package_write_attempted = True
+                    recorded = append_receipt_event(
+                        checked_dir, "mcp_activation_stopped", event_data
+                    )
+                    if recorded.get("data") != event_data:
+                        raise HandoffError("Failed-activation stop receipt was not committed")
+                    receipt_event_sha256 = str(recorded.get("event_hash"))
+                require_sha256(
+                    receipt_event_sha256,
+                    label="Failed-activation stop receipt event hash",
+                )
+                trace_artifact_sha256 = str(trace_final["protocol_trace_artifact_sha256"])
+                package_evidence_available = True
+                receipt_recorded = True
+    except (HandoffError, ProtocolTraceError, RuntimeStateError, ToolError) as exc:
+        if package_verified_before_write and package_write_attempted and event_data is not None:
+            try:
+                latest = verify_package(Path(handoff_dir))
+            except (HandoffError, ProtocolTraceError, RuntimeStateError, ToolError) as reconcile_exc:
+                raise HandoffError(
+                    "PACKAGE_STOP_EVIDENCE_INDETERMINATE: unable to reconcile the package "
+                    "after a failed-activation stop receipt commit attempt"
+                ) from reconcile_exc
+            events = receipt_events(latest["receipt"], "mcp_activation_stopped")
+            if events:
+                if len(events) != 1 or events[0].get("data") != event_data:
+                    raise HandoffError(
+                        "Existing failed-activation stop receipt conflicts with exact-child evidence"
+                    ) from exc
+                receipt_event_sha256 = require_sha256(
+                    events[0].get("event_hash"),
+                    label="Failed-activation stop receipt event hash",
+                )
+                trace_artifact_sha256 = require_sha256(
+                    event_data.get("protocol_trace_artifact_sha256"),
+                    label="Failed-activation stop trace artifact hash",
+                )
+                receipt_recorded = True
+            package_evidence_available = True
+        elif not package_verified_before_write:
+            package_evidence_available = False
+            receipt_recorded = False
+            receipt_event_sha256 = None
+            trace_artifact_sha256 = None
+        else:
+            raise
+
+    try:
+        authorization = _record_machine_activation_stop(
+            runtime_store,
+            handoff_dir=handoff_dir,
+            session_id_sha256=session_hash,
+            reason=reason,
+            child_returncode=child_returncode,
+            forced_exact_child=forced_exact_child,
+            receipt_event_sha256=receipt_event_sha256,
+            trace_artifact_sha256=trace_artifact_sha256,
+        )
+    except RuntimeStateError as exc:
+        raise runtime_failure(exc) from exc
+    return {
+        "authorization": authorization,
+        "authorization_denied": True,
+        "authorization_status": str(authorization.get("status", "unknown")),
+        "exact_child_stop_recorded": True,
+        "activation_stop_receipt_recorded": receipt_recorded,
+        "package_evidence_available": package_evidence_available,
+        "package_evidence_status": "verified" if package_evidence_available else "unavailable",
+    }
 
 
 def next_action(phase: str, transport: str = "paste") -> str:
@@ -4958,6 +5798,25 @@ def public_runtime_authorization(state: dict[str, Any] | None) -> dict[str, Any]
         "expired_reason",
         "orphaned_reason",
         "audit_recovery_status",
+        "activation_failure_code",
+        "runtime_child_stopped",
+        "runtime_child_returncode",
+        "runtime_forced_exact_child",
+        "runtime_stop_reason",
+        "runtime_stop_receipt_recorded",
+        "runtime_stop_receipt_event_sha256",
+        "runtime_protocol_trace_artifact_sha256",
+        "runtime_stop_recorded_at",
+        "activation_child_stopped",
+        "activation_child_returncode",
+        "activation_forced_exact_child",
+        "activation_stop_reason",
+        "activation_stop_receipt_recorded",
+        "activation_stop_receipt_event_sha256",
+        "activation_protocol_trace_artifact_sha256",
+        "activation_stop_recorded_at",
+        "orphan_tunnel_termination_manually_confirmed",
+        "orphan_tunnel_termination_confirmation_recorded_at",
     )
     return {key: state[key] for key in allowed if key in state}
 
@@ -5288,6 +6147,9 @@ def command_mcp_probe(args: argparse.Namespace) -> int:
                 "request_correlation_contract_supported": (
                     capabilities.request_correlation_contract_supported
                 ),
+                "parent_shutdown_contract_supported": (
+                    getattr(capabilities, "parent_shutdown_contract_supported", False)
+                ),
                 "supported": capabilities.supported,
             }
             payload["ok"] = payload["ok"] and bool(payload["tunnel_client"]["supported"])
@@ -5407,16 +6269,22 @@ def _command_mcp_activate_with_profile_lease(
         current = store.read()
     except RuntimeStateError as exc:
         raise runtime_failure(exc) from exc
-    if current is not None and current.get("status") in {"activating", "active", "revoking"}:
+    if current is not None:
         current_session = require_sha256(
             current.get("session_id_sha256"), label="Active MCP session ID hash"
         )
-        if not controller_lease_is_live(store, current_session):
+        controller_live = controller_lease_is_live(store, current_session)
+        if current.get("status") in {"activating", "active", "revoking"} and not controller_live:
             raise HandoffError(
                 "CONTROLLER_ORPHANED: the previous foreground controller lease is not live; "
                 "run mcp-recover for its exact handoff before activating a new package"
             )
-        raise HandoffError("SESSION_CONFLICT: Another package authorization is already live")
+        if controller_live:
+            raise HandoffError(
+                "SESSION_CONFLICT: The previous controller is still finalizing exact-child evidence"
+            )
+        if current.get("status") in {"activating", "active", "revoking"}:
+            raise HandoffError("SESSION_CONFLICT: Another package authorization is already live")
 
     controller_session_id_sha256: str | None = None
 
@@ -5432,13 +6300,18 @@ def _command_mcp_activate_with_profile_lease(
             preflight=preflight,
         )
 
-    def complete(session_id_sha256: str, audit_header_sha256: str) -> dict[str, Any]:
+    def complete(
+        session_id_sha256: str,
+        audit_header_sha256: str,
+        on_published: Callable[[], None],
+    ) -> dict[str, Any]:
         return complete_mcp_activation(
             handoff_dir,
             store,
             session_id_sha256=session_id_sha256,
             audit_header_sha256=audit_header_sha256,
             successful_control_plane_poll_observed=True,
+            on_published=on_published,
         )
 
     def fail(session_id_sha256: str, error_code: str) -> None:
@@ -5457,11 +6330,34 @@ def _command_mcp_activate_with_profile_lease(
             reason=reason,
         )
 
-    def record_stopped(session_id_sha256: str, reason: str) -> None:
-        record_mcp_stopped(
+    def record_stopped(
+        session_id_sha256: str,
+        reason: str,
+        child_returncode: int,
+        forced_exact_child: bool,
+    ) -> dict[str, Any]:
+        return record_mcp_runtime_stopped_fail_closed(
             handoff_dir,
+            store,
             session_id_sha256=session_id_sha256,
             reason=reason,
+            child_returncode=child_returncode,
+            forced_exact_child=forced_exact_child,
+        )
+
+    def record_activation_stopped(
+        session_id_sha256: str,
+        reason: str,
+        child_returncode: int,
+        forced_exact_child: bool,
+    ) -> dict[str, Any]:
+        return record_mcp_activation_stopped_fail_closed(
+            handoff_dir,
+            store,
+            session_id_sha256=session_id_sha256,
+            reason=reason,
+            child_returncode=child_returncode,
+            forced_exact_child=forced_exact_child,
         )
 
     def announce_active(session: ActiveSession) -> None:
@@ -5478,7 +6374,10 @@ def _command_mcp_activate_with_profile_lease(
                 diagnose_request_correlation
             ),
         }
-        print(json.dumps(payload, sort_keys=True, ensure_ascii=False), flush=True)
+        _write_atomic_json_line_nonblocking(
+            payload,
+            error_code="ACTIVE_ANNOUNCEMENT_UNAVAILABLE",
+        )
 
     hooks = ControllerHooks(
         begin_activation=begin,
@@ -5486,6 +6385,7 @@ def _command_mcp_activate_with_profile_lease(
         fail_activation=fail,
         revoke_authorization=revoke,
         record_stopped=record_stopped,
+        record_activation_stopped=record_activation_stopped,
         on_active=announce_active,
     )
     try:
@@ -5503,18 +6403,26 @@ def _command_mcp_activate_with_profile_lease(
             profile_dir=tunnel_profile_dir_for(args),
             ready_timeout=float(args.ready_timeout),
             request_correlation_diagnostic=diagnose_request_correlation,
+            parent_shutdown_contract_supported=getattr(
+                capabilities, "parent_shutdown_contract_supported", False
+            ),
         )
     except (ControllerError, TunnelClientError, RuntimeStateError) as exc:
         raise HandoffError(f"{exc.code}: {exc.message}") from exc
     terminal_payload: dict[str, Any] = {
-        "event": "mcp_stopped",
+        "event": "mcp_stopped" if result.stopped_recorded else "mcp_exact_child_stopped",
         "status": result.status,
         "package_id": manifest["package_id"],
         "session_id_sha256": result.session_id_sha256,
         "stop_reason": result.stop_reason,
         "control_plane_poll_confirmed": result.control_plane_poll_confirmed,
+        "authorization_denied": result.authorization_denied,
+        "authorization_status": result.authorization_status,
+        "revocation_receipt_recorded": result.revocation_receipt_recorded,
         "authorization_revoked": result.authorization_revoked,
         "tunnel_runtime_stopped": result.stopped_recorded,
+        "exact_child_stop_recorded": result.exact_child_stop_recorded,
+        "mcp_activation_stopped": result.activation_stop_receipt_recorded,
         "forced_exact_child": result.forced_exact_child,
     }
     if diagnose_request_correlation:
@@ -5638,6 +6546,24 @@ def protocol_trace_for(verified: dict[str, Any]) -> ProtocolTrace:
     )
 
 
+def failed_activation_stop_evidence(verified: dict[str, Any]) -> dict[str, Any] | None:
+    diagnostic = verified["state"].get("mcp_protocol_trace")
+    if not isinstance(diagnostic, dict):
+        return None
+    session_hash = diagnostic.get("session_id_sha256")
+    events = [
+        event
+        for event in receipt_events(verified["receipt"], "mcp_activation_stopped")
+        if isinstance(event.get("data"), dict)
+        and event["data"].get("session_id_sha256") == session_hash
+    ]
+    if not events:
+        return None
+    if len(events) != 1:
+        raise HandoffError("Failed activation has duplicate exact-child stop evidence")
+    return events[0]["data"]
+
+
 def verify_bound_protocol_trace(
     verified: dict[str, Any],
 ) -> tuple[ProtocolTrace, ProtocolTraceSummary | None, str | None, bool]:
@@ -5650,18 +6576,21 @@ def verify_bound_protocol_trace(
     if not isinstance(session, dict):
         raise HandoffError("This package has no bound MCP protocol trace to verify")
     trace = protocol_trace_for(verified)
-    stopped = session.get("tunnel_runtime_stopped") is True
+    activation_stop = failed_activation_stop_evidence(verified)
+    runtime_stopped = session.get("tunnel_runtime_stopped") is True
+    stopped = runtime_stopped or activation_stop is not None
+    final_evidence = activation_stop if activation_stop is not None else session
     try:
         summary = trace.verify()
     except ProtocolTraceError as exc:
         if (
             stopped
-            and session.get("protocol_trace_valid") is False
-            and session.get("protocol_trace_closed") is False
-            and session.get("protocol_trace_error_code") == exc.code
+            and final_evidence.get("protocol_trace_valid") is False
+            and final_evidence.get("protocol_trace_closed") is False
+            and final_evidence.get("protocol_trace_error_code") == exc.code
             and exc.code in SAFE_TRACE_FAILURE_CODES
         ):
-            identity_bound = session.get(
+            identity_bound = final_evidence.get(
                 "protocol_trace_artifact_identity_bound"
             ) is True
             if identity_bound:
@@ -5673,9 +6602,9 @@ def verify_bound_protocol_trace(
                     ) from fingerprint_error
                 if (
                     identity.sha256
-                    != session.get("protocol_trace_artifact_sha256")
+                    != final_evidence.get("protocol_trace_artifact_sha256")
                     or identity.byte_count
-                    != session.get("protocol_trace_artifact_bytes")
+                    != final_evidence.get("protocol_trace_artifact_bytes")
                 ):
                     raise HandoffError(
                         "Invalid MCP protocol trace bytes differ from tunnel-stop evidence"
@@ -5695,10 +6624,25 @@ def verify_bound_protocol_trace(
             "protocol_trace_closed": summary.closed,
             "protocol_trace_close_reason": summary.close_reason,
         }
-        if any(session.get(key) != value for key, value in expected.items()) or (
-            "protocol_trace_error_code" in session
+        if any(final_evidence.get(key) != value for key, value in expected.items()) or (
+            "protocol_trace_error_code" in final_evidence
         ):
             raise HandoffError("MCP protocol trace differs from final tunnel-stop evidence")
+        if activation_stop is not None:
+            try:
+                identity = trace.fingerprint()
+            except ProtocolTraceError as exc:
+                raise HandoffError(
+                    f"{exc.code}: final failed-activation trace identity is unavailable"
+                ) from exc
+            if (
+                activation_stop.get("protocol_trace_artifact_identity_bound") is not True
+                or activation_stop.get("protocol_trace_artifact_sha256") != identity.sha256
+                or activation_stop.get("protocol_trace_artifact_bytes") != identity.byte_count
+            ):
+                raise HandoffError(
+                    "Failed-activation trace bytes differ from exact-child stop evidence"
+                )
     # Activation evidence binds only the trace header. The current artifact
     # remains appendable until exact-child stop records and cross-verifies its
     # final head/count/closure evidence. This also keeps failed activation and
@@ -5746,11 +6690,30 @@ def protocol_trace_terminal_evidence_payload(
 
     session = protocol_trace_session(verified)
     runtime_stop_observed = session.get("tunnel_runtime_stopped") is True
+    activation_stop_observed = failed_activation_stop_evidence(verified) is not None
     protocol_stream_closed = summary.closed if summary is not None else None
+    close_reason = summary.close_reason if summary is not None else None
     protocol_eof_observed = (
-        summary.close_reason == "stdio_eof" if summary is not None else None
+        close_reason in {"stdio_eof", "parent_shutdown"}
+        if summary is not None
+        else None
     )
-    if not runtime_stop_observed:
+    parent_shutdown_observed = (
+        close_reason == "parent_shutdown" if summary is not None else None
+    )
+    if activation_stop_observed and not lifecycle_bound:
+        status = "activation_failed_child_stopped_trace_artifact_unbound"
+    elif activation_stop_observed and not artifact_valid:
+        status = "activation_failed_child_stopped_invalid_trace_artifact_bound"
+    elif activation_stop_observed and summary is not None and summary.close_reason == "stdio_eof":
+        status = "activation_failed_child_stopped_stdio_eof_observed"
+    elif activation_stop_observed and summary is not None and summary.close_reason == "parent_shutdown":
+        status = "activation_failed_child_stopped_parent_shutdown_eof_observed"
+    elif activation_stop_observed and summary is not None and summary.close_reason == "protocol_broken":
+        status = "activation_failed_child_stopped_protocol_break_observed"
+    elif activation_stop_observed:
+        status = "activation_failed_child_stopped_protocol_eof_unobserved"
+    elif not runtime_stop_observed:
         status = "runtime_stop_unobserved"
     elif not lifecycle_bound:
         status = "runtime_stopped_trace_artifact_unbound"
@@ -5758,6 +6721,8 @@ def protocol_trace_terminal_evidence_payload(
         status = "runtime_stopped_invalid_trace_artifact_bound"
     elif summary is not None and summary.close_reason == "stdio_eof":
         status = "runtime_stopped_stdio_eof_observed"
+    elif summary is not None and summary.close_reason == "parent_shutdown":
+        status = "runtime_stopped_parent_shutdown_eof_observed"
     elif summary is not None and summary.close_reason == "protocol_broken":
         status = "runtime_stopped_protocol_break_observed"
     else:
@@ -5765,8 +6730,10 @@ def protocol_trace_terminal_evidence_payload(
     return {
         "status": status,
         "runtime_stop_observed": runtime_stop_observed,
+        "activation_failure_stop_observed": activation_stop_observed,
         "protocol_stream_closed": protocol_stream_closed,
         "protocol_eof_observed": protocol_eof_observed,
+        "parent_shutdown_observed": parent_shutdown_observed,
         "final_artifact_bound_to_stop_receipt": lifecycle_bound,
     }
 
@@ -5958,6 +6925,12 @@ def mcp_request_correlation_payload(
         return base
     if trace_summary.closed is not True:
         base["code"] = "REQUEST_CORRELATION_TRACE_OPEN"
+        return base
+    if trace_summary.close_reason == "protocol_broken":
+        base["code"] = "REQUEST_CORRELATION_PROTOCOL_BROKEN"
+        return base
+    if trace_summary.close_reason not in {"stdio_eof", "parent_shutdown"}:
+        base["code"] = "REQUEST_CORRELATION_TRACE_INCOMPLETE"
         return base
     response_events = [
         event
@@ -6301,6 +7274,9 @@ def command_mcp_status(args: argparse.Namespace) -> int:
 def command_mcp_stop(args: argparse.Namespace) -> int:
     store = runtime_store_for()
     result = revoke_mcp_authorization_fail_closed(args.handoff_dir, store)
+    trusted_handoff = result["authorization"].get("handoff_dir")
+    if not isinstance(trusted_handoff, str) or not Path(trusted_handoff).is_absolute():
+        raise HandoffError("Machine-global authorization has an invalid handoff binding")
     session_hash = require_sha256(
         result["authorization"].get("session_id_sha256"), label="MCP session ID hash"
     )
@@ -6314,31 +7290,84 @@ def command_mcp_stop(args: argparse.Namespace) -> int:
     stopped = False
     stop_evidence: str | None = None
     controller_lease_released = False
-    if stop_requested:
-        deadline = time.monotonic() + 7.0
-        while time.monotonic() < deadline:
-            if result["package_evidence_available"]:
-                try:
-                    latest = verify_package(Path(args.handoff_dir))["state"].get("mcp_session")
-                except HandoffError:
-                    latest = None
-                if isinstance(latest, dict) and latest.get("tunnel_runtime_stopped") is True:
-                    stopped = True
-                    stop_evidence = "package_receipt"
-                    break
-            elif not controller_lease_is_live(store, session_hash):
-                controller_lease_released = True
+    # The Unix-socket acknowledgement is transport evidence, not the durable
+    # stop fact.  The server may accept the exact request and terminate before
+    # the acknowledgement reaches this client, so always poll the trusted
+    # package/global binding and controller lease for a bounded interval.
+    deadline = time.monotonic() + 7.0
+    while time.monotonic() < deadline:
+        if result["package_evidence_available"]:
+            try:
+                latest = verify_package(Path(args.handoff_dir))["state"].get("mcp_session")
+            except HandoffError:
+                latest = None
+            if isinstance(latest, dict) and latest.get("tunnel_runtime_stopped") is True:
+                stopped = True
+                stop_evidence = "package_receipt"
                 break
-            time.sleep(0.05)
+        try:
+            latest_global = store.read()
+        except RuntimeStateError:
+            latest_global = None
+        global_binding_matches = (
+            isinstance(latest_global, dict)
+            and latest_global.get("session_id_sha256") == session_hash
+            and latest_global.get("handoff_dir") == trusted_handoff
+        )
+        if global_binding_matches and latest_global.get("runtime_child_stopped") is True:
+            stopped = True
+            stop_evidence = "machine_global"
+            break
+        if global_binding_matches and latest_global.get("activation_child_stopped") is True:
+            stopped = True
+            stop_evidence = "machine_global_activation"
+            break
+        if not global_binding_matches:
+            # A concurrent activation may archive this exact terminal session
+            # after its controller releases the lease but before this observer
+            # sees the final active pointer.  Read only the validated archive
+            # derived from the already trusted session hash; never treat a
+            # different active package as evidence for this stop.
+            try:
+                archived_global = store.read_archived_session(session_hash)
+            except RuntimeStateError:
+                archived_global = None
+            archived_binding_matches = (
+                isinstance(archived_global, dict)
+                and archived_global.get("session_id_sha256") == session_hash
+                and archived_global.get("handoff_dir") == trusted_handoff
+            )
+            if (
+                archived_binding_matches
+                and archived_global.get("runtime_child_stopped") is True
+            ):
+                stopped = True
+                stop_evidence = "machine_global_archive"
+                break
+            if (
+                archived_binding_matches
+                and archived_global.get("activation_child_stopped") is True
+            ):
+                stopped = True
+                stop_evidence = "machine_global_activation_archive"
+                break
+        if not controller_lease_is_live(store, session_hash):
+            controller_lease_released = True
+            break
+        time.sleep(0.05)
     print(
         json.dumps(
             {
                 "status": (
                     "authorization_revoked"
-                    if result["authorization"].get("status") == "revoked"
+                    if result["authorization_revoked"]
                     else "authorization_denied"
                 ),
                 "authorization": public_runtime_authorization(result["authorization"]),
+                "authorization_denied": result["authorization_denied"],
+                "authorization_status": result["authorization_status"],
+                "revocation_receipt_recorded": result["revocation_receipt_recorded"],
+                "authorization_revoked": result["authorization_revoked"],
                 "audit": result["audit"],
                 "package_evidence_available": result["package_evidence_available"],
                 "package_evidence_status": result["package_evidence_status"],
@@ -6366,7 +7395,7 @@ def command_mcp_stop(args: argparse.Namespace) -> int:
 
 
 def _retire_stale_control_socket(runtime_store: RuntimeStateStore) -> dict[str, Any]:
-    """Remove only an owner-only socket proven to have no listening endpoint."""
+    """Remove only a safe stale socket proven to have no listening endpoint."""
 
     try:
         path = control_socket_path(runtime_store.root)
@@ -6378,10 +7407,20 @@ def _retire_stale_control_socket(runtime_store: RuntimeStateStore) -> dict[str, 
         return {"status": "absent", "retired": False, "listener_present": False}
     except OSError:
         return {"status": "ambiguous", "retired": False, "listener_present": None}
+    try:
+        parent = path.parent.lstat()
+    except OSError:
+        return {"status": "ambiguous", "retired": False, "listener_present": None}
     if (
-        not stat.S_ISSOCK(before.st_mode)
+        not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != os.getuid()
+        or stat.S_IMODE(parent.st_mode) != 0o700
+        or not stat.S_ISSOCK(before.st_mode)
         or before.st_uid != os.getuid()
-        or stat.S_IMODE(before.st_mode) != 0o600
+        # Normal listeners are 0600.  A bind whose metadata probe failed can
+        # retain the platform default 0755, which is still non-writable by
+        # group/other and protected by this exact private 0700 parent.
+        or stat.S_IMODE(before.st_mode) & 0o022
     ):
         return {"status": "unsafe", "retired": False, "listener_present": None}
 
@@ -6409,11 +7448,15 @@ def _retire_stale_control_socket(runtime_store: RuntimeStateStore) -> dict[str, 
         (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
         or not stat.S_ISSOCK(after.st_mode)
         or after.st_uid != os.getuid()
-        or stat.S_IMODE(after.st_mode) != 0o600
+        or stat.S_IMODE(after.st_mode) & 0o022
     ):
         return {"status": "changed", "retired": False, "listener_present": None}
     try:
-        path.unlink()
+        retired = _claim_and_unlink_control_socket_if_matches(
+            path, (after.st_dev, after.st_ino)
+        )
+        if not retired:
+            return {"status": "changed", "retired": False, "listener_present": None}
         fsync_directory(runtime_store.root)
     except (OSError, RuntimeStateError):
         return {"status": "retire_failed", "retired": False, "listener_present": False}
@@ -6425,7 +7468,19 @@ def command_mcp_recover(args: argparse.Namespace) -> int:
 
     if not args.confirm_controller_lost:
         raise HandoffError("Orphan recovery requires --confirm-controller-lost")
-    handoff_dir = validate_handoff_dir(args.handoff_dir)
+    # Recovery is deliberately able to deny/clear the exact machine-global
+    # binding even when package evidence has been deleted or moved.  Resolve
+    # and trust package bytes only when the supplied path still names a
+    # directory; otherwise compare its lexical absolute spelling to the
+    # immutable canonical path persisted at activation.
+    lexical_handoff_identity = _runtime_handoff_identity(args.handoff_dir)
+    try:
+        package_handoff_dir: Path | None = validate_handoff_dir(args.handoff_dir)
+    except HandoffError:
+        package_handoff_dir = None
+        expected_handoff_identity = lexical_handoff_identity
+    else:
+        expected_handoff_identity = str(package_handoff_dir.resolve())
     store = runtime_store_for()
     try:
         current = store.read()
@@ -6436,7 +7491,7 @@ def command_mcp_recover(args: argparse.Namespace) -> int:
     session_hash = require_sha256(
         current.get("session_id_sha256"), label="MCP session ID hash"
     )
-    if current.get("handoff_dir") != str(handoff_dir.resolve()):
+    if current.get("handoff_dir") != expected_handoff_identity:
         raise HandoffError("Machine-global authorization belongs to a different handoff")
     try:
         recovery_lease = ControllerLease(store, session_hash).acquire()
@@ -6451,19 +7506,26 @@ def command_mcp_recover(args: argparse.Namespace) -> int:
     recovery_mode = "global_only_faulted"
     audit: dict[str, Any] | None = None
     control_socket: dict[str, Any]
+    manual_orphan_confirmation_requested = bool(
+        getattr(args, "confirm_orphan_tunnel_stopped", False)
+    )
     try:
         latest = store.read()
         if (
             latest is None
             or latest.get("session_id_sha256") != session_hash
-            or latest.get("handoff_dir") != str(handoff_dir.resolve())
+            or latest.get("handoff_dir") != expected_handoff_identity
         ):
             raise HandoffError("Machine-global authorization changed during orphan recovery")
         current = latest
         control_socket = _retire_stale_control_socket(store)
 
         try:
-            verified = verify_package(handoff_dir)
+            verified = (
+                None
+                if package_handoff_dir is None
+                else verify_package(package_handoff_dir)
+            )
         except HandoffError:
             verified = None
         if verified is not None and current.get("status") in {
@@ -6475,7 +7537,7 @@ def command_mcp_recover(args: argparse.Namespace) -> int:
             audit_condition, _, audit_error = _inspect_orphan_audit(verified, session_hash)
             if audit_condition == "valid":
                 recovered = recover_interrupted_mcp_activation(
-                    handoff_dir,
+                    package_handoff_dir,
                     store,
                     reason="controller_lost",
                 )
@@ -6511,13 +7573,35 @@ def command_mcp_recover(args: argparse.Namespace) -> int:
                 raise runtime_failure(exc) from exc
         elif current.get("status") not in {"faulted", "revoked", "expired"}:
             raise HandoffError("Machine-global authorization is not recoverable")
+        exact_child_stop_observed = bool(
+            current.get("runtime_child_stopped") is True
+            or current.get("activation_child_stopped") is True
+        )
+        if manual_orphan_confirmation_requested and not exact_child_stop_observed:
+            if control_socket["status"] not in {"absent", "retired"}:
+                raise HandoffError(
+                    "Manual Tunnel-termination confirmation requires an absent or safely retired control socket"
+                )
+            try:
+                current = store.confirm_orphan_tunnel_termination(session_hash)
+            except RuntimeStateError as exc:
+                raise runtime_failure(exc) from exc
     finally:
         recovery_lease.close()
 
+    exact_child_stop_observed = bool(
+        current.get("runtime_child_stopped") is True
+        or current.get("activation_child_stopped") is True
+    )
+    manual_orphan_confirmed = bool(
+        current.get("orphan_tunnel_termination_manually_confirmed") is True
+    )
     if control_socket["status"] in {"listener_present", "ambiguous", "unsafe", "changed", "retire_failed"}:
         next_action = "inspect_the_orphan_controller_or_socket_then_confirm_tunnel_termination"
+    elif exact_child_stop_observed or manual_orphan_confirmed:
+        next_action = "prepare_a_new_package"
     else:
-        next_action = "confirm_orphan_tunnel_process_termination_then_prepare_a_new_package"
+        next_action = "inspect_then_rerun_mcp_recover_with_confirm_orphan_tunnel_stopped"
 
     print(
         json.dumps(
@@ -6528,8 +7612,11 @@ def command_mcp_recover(args: argparse.Namespace) -> int:
                 "recovery_mode": recovery_mode,
                 "audit": audit,
                 "control_socket": control_socket,
-                "tunnel_runtime_stopped": False,
-                "orphan_child_may_remain": True,
+                "tunnel_runtime_stopped": exact_child_stop_observed,
+                "orphan_tunnel_termination_manually_confirmed": manual_orphan_confirmed,
+                "orphan_child_may_remain": not (
+                    exact_child_stop_observed or manual_orphan_confirmed
+                ),
                 "process_discovery_attempted": False,
                 "process_signal_attempted": False,
                 "next_action": next_action,
@@ -7092,6 +8179,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mcp_recover.add_argument("--handoff-dir", required=True)
     mcp_recover.add_argument("--confirm-controller-lost", action="store_true")
+    mcp_recover.add_argument(
+        "--confirm-orphan-tunnel-stopped",
+        action="store_true",
+        help=(
+            "After attended external process review, record that no orphan Tunnel child remains; "
+            "this is a human assertion, not exact-child receipt evidence"
+        ),
+    )
     mcp_recover.add_argument(
         "--json", action="store_true", help="Compatibility flag; output is always JSON"
     )

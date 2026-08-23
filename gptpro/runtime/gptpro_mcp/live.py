@@ -29,6 +29,7 @@ from .runtime_state import RuntimeStateError, RuntimeStateStore, open_private_re
 
 SESSION_CAPABILITY_ENV = "GPTPRO_MCP_SESSION_CAPABILITY"
 RUNTIME_DIRECTORY_ENV = "GPTPRO_MCP_RUNTIME_DIR"
+PARENT_SHUTDOWN_CONTRACT_ENV = "GPTPRO_MCP_PARENT_SHUTDOWN_CONTRACT"
 _CAPABILITY_BYTES = 32
 PackageLoader = Callable[[Path], dict[str, Any]]
 BindingValidator = Callable[[dict[str, Any], dict[str, Any], str], None]
