@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextvars
 import copy
 import errno
 import fnmatch
@@ -129,6 +130,11 @@ SCHEMA3_CENTRAL_DIRECTORY_MAX_BYTES = 2 * 1024 * 1024
 MAX_JSON_NESTING_DEPTH = 64
 MAX_JSON_NODES = 100_000
 IGNORE_COMMENT = "# gptpro local handoff artifacts"
+
+_GIT_SECRET_ENV_NAMES: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
+    "gptpro_git_secret_env_names",
+    default=frozenset(),
+)
 
 EXCLUDED_DIR_NAMES = {
     ".git",
@@ -576,6 +582,8 @@ def run_git(
     timeout_seconds: int | None = None,
 ) -> str | bytes:
     git_env = os.environ.copy()
+    for name in _GIT_SECRET_ENV_NAMES.get():
+        git_env.pop(name, None)
     git_env["GIT_TERMINAL_PROMPT"] = "0"
     try:
         result = subprocess.run(
@@ -7151,11 +7159,21 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    secret_env_names = frozenset(
+        reference.removeprefix("env:")
+        for attribute in ("tunnel_id_ref", "tunnel_api_key_ref")
+        if isinstance((reference := getattr(args, attribute, None)), str)
+        and reference.startswith("env:")
+        and reference != "env:"
+    )
+    token = _GIT_SECRET_ENV_NAMES.set(secret_env_names)
     try:
         return int(args.func(args))
     except HandoffError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
+    finally:
+        _GIT_SECRET_ENV_NAMES.reset(token)
 
 
 if __name__ == "__main__":

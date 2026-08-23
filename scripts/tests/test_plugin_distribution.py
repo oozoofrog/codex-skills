@@ -46,7 +46,20 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertTrue((PLUGIN_SKILL / "SKILL.md").is_file())
         ui_metadata = (STANDALONE_SKILL / "agents" / "openai.yaml").read_text(encoding="utf-8")
         self.assertIn(manifest["interface"]["shortDescription"], ui_metadata)
-        self.assertIn(manifest["interface"]["defaultPrompt"], ui_metadata)
+        default_prompts = manifest["interface"]["defaultPrompt"]
+        self.assertIsInstance(default_prompts, list)
+        self.assertGreaterEqual(len(default_prompts), 1)
+        self.assertLessEqual(len(default_prompts), 3)
+        for prompt in default_prompts:
+            self.assertIsInstance(prompt, str)
+            self.assertTrue(prompt)
+            self.assertLessEqual(len(prompt), 128)
+            self.assertIn("$gptpro", prompt)
+        combined_prompts = " ".join(default_prompts)
+        self.assertIn("approved", combined_prompts.lower())
+        self.assertIn("Web MCP", combined_prompts)
+        self.assertIn("validate", combined_prompts.lower())
+        self.assertIn("$gptpro", ui_metadata)
 
     def test_plugin_skill_mirrors_standalone_package(self) -> None:
         self.assertEqual(tree_files(STANDALONE_SKILL), tree_files(PLUGIN_SKILL))
