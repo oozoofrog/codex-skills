@@ -4,6 +4,8 @@
 
 It initializes local handoff storage, scans and hashes selected repository files, records the exact Git state, excludes likely secrets and build noise, requires transport-specific user approval, guides the visible Chrome or human handoff, imports only the package-marked response, and records Codex's later evaluation. GitHub-first handoffs pin a remotely verified immutable commit and send only a prompt; text handoffs retain structured Markdown alternatives. A ZIP is retained locally for audit and integrity checks but is not uploaded by default.
 
+This build also contains an **experimental governance foundation** for an explicit `mcp-read` schema-3 package. It can prepare, verify, and approve a future maximum read-only disclosure contract, but it does not yet contain the MCP server, active authorization, `tunnel-client` lifecycle, or verified ChatGPT Web connection. Consequently, an `mcp-read` prompt must not be sent from this foundation-only build. See [Web MCP repository consultation](references/web-mcp.md).
+
 ## Install
 
 From Codex, request a network installation without running Python directly:
@@ -64,7 +66,7 @@ The default `--transport auto` is GitHub-first:
 
 Auto records the exact GitHub fallback reason. Supplying `--github-pr-url` makes a verification mismatch fatal instead of falling back. The 128 KiB cutoff is a conservative Skill policy, not a published ChatGPT limit. Override it with `--max-paste-bytes`, require GitHub with `--transport github`, or avoid app access with `--transport paste|text-file`. A transport never changes after approval because approval binds the exact outbound bytes and repository disclosure.
 
-This release uses manifest schema 2. A schema-1 ZIP-first handoff is not upgraded in place; prepare a new handoff so the new transport and approval hashes are explicit.
+Normal `auto|github|paste|text-file` handoffs continue to use manifest schema 2. Only an explicit `--transport mcp-read` uses schema 3, whose approval binds a maximum dynamic disclosure set and is never inferred from `auto`. A schema-1 ZIP-first handoff is not upgraded in place; prepare a new handoff so the new transport and approval hashes are explicit.
 
 ## Local CLI
 
@@ -75,6 +77,23 @@ python3 scripts/gptpro.py verify --handoff-dir /path/to/repo/.gptpro/handoffs/<i
 python3 scripts/gptpro.py status --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
 python3 scripts/gptpro.py human-handoff --handoff-dir /path/to/repo/.gptpro/handoffs/<id> --reason manual-transport
 ```
+
+Foundation-only schema-3 preparation requires transient Tunnel identity input plus visible app/workspace labels. The raw Tunnel ID or its reference is not written to package artifacts:
+
+```bash
+export GPTPRO_TUNNEL_ID="tunnel_<value>"
+python3 scripts/gptpro.py prepare \
+  --repo /path/to/repo \
+  --mode architecture \
+  --transport mcp-read \
+  --tunnel-id-ref env:GPTPRO_TUNNEL_ID \
+  --chatgpt-app-name "GPT Pro Repository Reader" \
+  --chatgpt-workspace-label "Personal" \
+  --include "src/**" \
+  --task "Review this approved immutable snapshot."
+```
+
+Review `manifest.json`, `status`, and the exact maximum file/hash set before using both approval flags. Approval does not activate a Tunnel in this build.
 
 `human-handoff` is read-only: it verifies the package and prints the approved paths, hashes, model, user steps, expected return evidence, and retry rule. It does not change state, authorize transmission, or mark a message as sent. The five modes are `plan`, `ask`, `review`, `debug`, and `architecture`. Run `python3 scripts/gptpro.py --help` for the full lifecycle.
 
@@ -95,7 +114,7 @@ python3 gptpro/scripts/validate_structure.py \
   --json
 ```
 
-It checks required files, exact `name`/`description` frontmatter, local Markdown links, prompt placeholder contract, Python syntax/executable modes, and optional mirror hashes.
+It checks required files, exact `name`/`description` frontmatter, local Markdown links, prompt placeholder contract, Python syntax/executable modes, the exact dependency-free read-only MCP schema fixture, and optional mirror hashes.
 
 ## Security posture
 

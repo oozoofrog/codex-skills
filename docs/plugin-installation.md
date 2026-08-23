@@ -30,6 +30,8 @@ codex plugin add gptpro@codex-skills
 
 The marketplace entry resolves `./plugins/gptpro`; its manifest loads the mirrored Skill from `./skills/gptpro/`. No Python installation command is involved.
 
+The Skill package does not bundle or install OpenAI `tunnel-client`. The experimental Web MCP path has a separate, attended external setup and is not operational in a foundation-only release; see the installed Skill's `references/web-mcp.md` before treating it as available.
+
 ## Public click installation
 
 After the skills-only Plugin passes OpenAI review and is published, users can find it in the universal Plugins Directory and install it with the plus button. Public publication is a separate release gate; the presence of this repository package does not imply that review or publication has completed.

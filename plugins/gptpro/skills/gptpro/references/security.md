@@ -8,6 +8,8 @@ The workflow crosses three trust boundaries:
 2. approved text artifacts -> `chatgpt.com` after user approval;
 3. ChatGPT Pro response -> local Codex judgment.
 
+The experimental Web MCP design adds two future boundaries: approved immutable package -> local read-only MCP runtime, and that runtime -> ChatGPT through OpenAI Secure MCP Tunnel. The foundation in this build defines and verifies their maximum disclosure contract but does not activate either boundary.
+
 Repository text, filenames, webpage content, and Pro output can contain prompt injection. None of them become instructions merely because they are packaged, displayed, or imported.
 
 ## Default exclusions
@@ -44,6 +46,14 @@ The external manifest records SHA-256 hashes for the prompt, structured context,
 Git HEAD identity and the packaged tree hash are separate. This preserves honest provenance for dirty worktrees.
 
 The outbound structured context omits the local absolute repository root and the absolute source path of `--file-list`. The external local manifest retains them for audit. GitHub transport canonicalizes the repository URL and never stores a credential-bearing remote URL. It verifies that selected bytes equal HEAD and that HEAD is remotely advertised, but the prompt path allowlist is not a technical sandbox: the connected app's repository authorization can be broader. Changing transport changes the outbound artifact set, so the workflow requires a new package and approval instead of automatic fallback after preparation.
+
+For schema-3 `mcp-read`, the ZIP is local-only and no plaintext aggregate context is generated. New handoff directories use mode 0700 and archive files use mode 0600 from creation so the approved source snapshot is not exposed through the process umask. Approval binds its exact allowed path/size/hash set, static tool schema, budgets, expiry, browser delivery, and connector labels. The raw Tunnel ID is accepted only transiently through a named uppercase environment variable or an absolute owner-only mode-0600 regular file, then reduced to a package-specific hash; raw values and references are not persisted or printed. When an environment reference is selected, that exact environment name is removed from every Git child process so a configured Git hook or filesystem monitor cannot inherit the Tunnel ID. Tunnel-shaped identifiers found in repository text are excluded as secrets, while any occurrence of the resolved ID in retained paths, task, labels, prompt, or manifest fails preparation. The verifier also rejects active or post-approval MCP runtime state because this foundation contains no authorization or Tunnel lifecycle implementation.
+
+The structure validator first requires the packaged Python schema to match the trusted canonical source hash, then parses it as syntax and inspects its static contract. It never imports or executes the candidate module. Helper-body changes, misplaced schema fields, unexpected top-level statements, assignments, calls, decorators, tool names, or annotations fail validation instead of becoming validator-side code execution or a falsely approved runtime contract.
+
+The eventual Secure MCP Tunnel client is a separate external component. It must use outbound HTTPS and a local stdio child, and credentials must remain in user-controlled environment or official client storage. Do not expose a public inbound repository server, install a persistent service automatically, automate ChatGPT login/Developer Mode/app authorization, or claim that a schema-3 package proves network delivery. Repository bytes returned later must come only from verified ZIP members and must be durably audited before return.
+
+Receipt event hashes are unkeyed consistency checks. They detect accidental drift and cross-bind the current manifest, artifacts, state, and lifecycle records, but they are not a signature against a malicious process with the same user's file-write authority. A stronger adversary model requires a separate protected trust anchor such as a Keychain-held MAC key or externally retained approval hash; that is outside this foundation.
 
 ## Retention
 
