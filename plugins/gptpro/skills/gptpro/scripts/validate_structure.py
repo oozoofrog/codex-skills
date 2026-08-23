@@ -31,13 +31,23 @@ REQUIRED_FILES = (
     "runtime/__init__.py",
     "runtime/gptpro_mcp/__init__.py",
     "runtime/gptpro_mcp/archive.py",
+    "runtime/gptpro_mcp/audit.py",
     "runtime/gptpro_mcp/authorization.py",
+    "runtime/gptpro_mcp/clock.py",
+    "runtime/gptpro_mcp/controller.py",
     "runtime/gptpro_mcp/cursor.py",
     "runtime/gptpro_mcp/errors.py",
+    "runtime/gptpro_mcp/live.py",
+    "runtime/gptpro_mcp/package_lock.py",
+    "runtime/gptpro_mcp/package_tx.py",
     "runtime/gptpro_mcp/protocol.py",
+    "runtime/gptpro_mcp/protocol_trace.py",
+    "runtime/gptpro_mcp/runtime_state.py",
     "runtime/gptpro_mcp/schema.py",
     "runtime/gptpro_mcp/server.py",
+    "runtime/gptpro_mcp/supervisor.py",
     "runtime/gptpro_mcp/tools.py",
+    "runtime/gptpro_mcp/tunnel_client.py",
     "templates/base-prompt.md.tpl",
     "templates/mode-architecture.md.tpl",
     "templates/mode-ask.md.tpl",
@@ -45,8 +55,15 @@ REQUIRED_FILES = (
     "templates/mode-plan.md.tpl",
     "templates/mode-review.md.tpl",
     "tests/test_gptpro.py",
+    "tests/test_mcp_lifecycle.py",
+    "tests/test_mcp_live.py",
+    "tests/test_mcp_package_lock.py",
+    "tests/test_mcp_package_tx.py",
+    "tests/test_mcp_controller.py",
     "tests/test_mcp_server.py",
+    "tests/test_protocol_trace.py",
     "tests/test_web_mcp_foundation.py",
+    "tests/test_web_mcp_runtime.py",
 )
 
 EXPECTED_FRONTMATTER_KEYS = {"name", "description"}
@@ -180,26 +197,15 @@ def validate_templates(skill_root: Path, errors: list[str]) -> None:
 
 
 def validate_python(skill_root: Path, errors: list[str]) -> None:
-    python_files = (
-        "scripts/gptpro.py",
-        "scripts/gptpro_mcp.py",
-        "scripts/validate_structure.py",
-        "runtime/__init__.py",
-        "runtime/gptpro_mcp/__init__.py",
-        "runtime/gptpro_mcp/archive.py",
-        "runtime/gptpro_mcp/authorization.py",
-        "runtime/gptpro_mcp/cursor.py",
-        "runtime/gptpro_mcp/errors.py",
-        "runtime/gptpro_mcp/protocol.py",
-        "runtime/gptpro_mcp/schema.py",
-        "runtime/gptpro_mcp/server.py",
-        "runtime/gptpro_mcp/tools.py",
-        "tests/test_gptpro.py",
-        "tests/test_mcp_server.py",
-        "tests/test_web_mcp_foundation.py",
-    )
-    for relative in python_files:
-        path = skill_root / relative
+    python_files = {
+        skill_root / "scripts/gptpro.py",
+        skill_root / "scripts/gptpro_mcp.py",
+        skill_root / "scripts/validate_structure.py",
+        *sorted((skill_root / "runtime").rglob("*.py")),
+        *sorted((skill_root / "tests").rglob("*.py")),
+    }
+    for path in sorted(python_files):
+        relative = path.relative_to(skill_root).as_posix()
         try:
             source = path.read_text(encoding="utf-8")
             compile(source, str(path), "exec")
@@ -288,11 +294,32 @@ def validate_mcp_runtime_dependencies(skill_root: Path, errors: list[str]) -> No
                 imported.update(alias.name.split(".", 1)[0] for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                 imported.add(node.module.split(".", 1)[0])
-        unexpected = sorted(imported - stdlib - allowed_local - {"__future__"})
+        local_modules = set(allowed_local)
+        if relative == "scripts/gptpro_mcp.py":
+            # The stdio entrypoint loads its sibling governance module only after
+            # an activation capability is present. It is packaged local code,
+            # not a third-party runtime dependency.
+            local_modules.add("gptpro")
+        unexpected = sorted(imported - stdlib - local_modules - {"__future__"})
         if unexpected:
             errors.append(
                 f"Portable MCP runtime imports third-party modules in {relative}: {unexpected}"
             )
+
+
+def validate_canonical_runtime_slot(skill_root: Path, errors: list[str]) -> None:
+    """Prevent a second public authorization namespace from reappearing."""
+
+    path = skill_root / "scripts/gptpro.py"
+    try:
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        errors.append(f"Unable to inspect the lifecycle CLI runtime slot: {exc}")
+        return
+    if "--runtime-dir" in source:
+        errors.append(
+            "The lifecycle CLI must not expose --runtime-dir; all commands share one per-user slot"
+        )
 
 
 def package_files(skill_root: Path) -> dict[str, str]:
@@ -344,6 +371,7 @@ def validate(skill_root: Path, mirror: Path | None) -> dict[str, object]:
             validate_python(root, errors)
             validate_mcp_foundation(root, errors)
             validate_mcp_runtime_dependencies(root, errors)
+            validate_canonical_runtime_slot(root, errors)
     if mirror is not None and root.is_dir():
         validate_mirror(root, mirror.expanduser().resolve(), errors)
     return {
@@ -358,6 +386,7 @@ def validate(skill_root: Path, mirror: Path | None) -> dict[str, object]:
             "python-syntax-and-mode",
             "web-mcp-read-only-schema",
             "web-mcp-stdlib-runtime",
+            "web-mcp-canonical-runtime-slot",
             *(("standalone-plugin-mirror",) if mirror else ()),
         ],
         "errors": errors,

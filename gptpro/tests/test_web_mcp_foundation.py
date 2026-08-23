@@ -132,6 +132,26 @@ class WebMcpFoundationTests(unittest.TestCase):
         )
         return Path(json.loads(result.stdout)["handoff_dir"]), result
 
+    def test_schema3_manifest_basis_rejects_deep_extra_without_traceback(self) -> None:
+        handoff, _ = self.prepare_mcp()
+        manifest_path = handoff / "manifest.json"
+        manifest = self.load(manifest_path)
+        module = self.load_cli_module()
+        original_hashes = copy.deepcopy(manifest["hashes"])
+        nested: object = 0
+        for _ in range(module.MAX_JSON_NESTING_DEPTH + 1):
+            nested = {"child": nested}
+        manifest["unexpected_nested_value"] = nested
+
+        with self.assertRaises(module.HandoffError):
+            module.mcp_manifest_basis(manifest)
+        self.assertEqual(original_hashes, manifest["hashes"])
+
+        self.write_json(manifest_path, manifest)
+        rejected = self.run_cli("verify", "--handoff-dir", str(handoff), expected=2)
+        self.assertIn("maximum JSON nesting depth", rejected.stderr)
+        self.assertNotIn("Traceback", rejected.stderr)
+
     def approve_mcp(self, handoff: Path) -> None:
         self.run_cli(
             "approve",
@@ -183,6 +203,7 @@ class WebMcpFoundationTests(unittest.TestCase):
         self.assertEqual("openai-tunnel-legacy-tools-v1", connector["protocol_profile"])
 
         disclosure = manifest["mcp_disclosure"]
+        prompt = (handoff / "prompt.md").read_text(encoding="utf-8")
         expected_files = [
             {key: item[key] for key in ("path", "size", "sha256")}
             for item in manifest["files"]
@@ -203,6 +224,12 @@ class WebMcpFoundationTests(unittest.TestCase):
         self.assertEqual(7, disclosure["limits"]["max_tool_calls"])
         self.assertEqual(600, disclosure["limits"]["session_ttl_seconds"])
         self.assertEqual(300, disclosure["limits"]["idle_ttl_seconds"])
+        compact_limits = json.dumps(
+            disclosure["limits"], sort_keys=True, separators=(",", ":")
+        )
+        self.assertIn(f"Approved hard limits (compact JSON): `{compact_limits}`.", prompt)
+        self.assertIn("`include_paths=true` and `path_page_size=1`", prompt)
+        self.assertIn("Invalid and rejected tool attempts consume", prompt)
         expiry = datetime.fromisoformat(
             disclosure["approval_valid_until"].removesuffix("Z") + "+00:00"
         )
@@ -811,7 +838,7 @@ class WebMcpFoundationTests(unittest.TestCase):
         )
         self.assertEqual("approved", verified["phase"])
 
-    def test_foundation_human_handoff_never_instructs_mcp_submission(self) -> None:
+    def test_mcp_manual_handoff_requires_exact_active_package_before_submission(self) -> None:
         handoff, _ = self.prepare_mcp()
         self.approve_mcp(handoff)
         state_before = (handoff / "state.json").read_bytes()
@@ -826,10 +853,41 @@ class WebMcpFoundationTests(unittest.TestCase):
         )
         payload = json.loads(result.stdout)
         instructions = "\n".join(payload["human_steps"])
-        self.assertIn("Do not connect or authorize a Tunnel", instructions)
-        self.assertIn("do not paste its prompt", instructions)
-        self.assertNotIn("Paste the complete contents", instructions)
-        self.assertEqual(["declined", "blocked"], payload["resume"]["allowed_outcomes"])
+        self.assertIn("this exact package as active", instructions)
+        self.assertIn("foreground controller is still live", instructions)
+        self.assertIn("Do not upload the ZIP", instructions)
+        self.assertEqual(
+            ["sent", "not-sent", "unknown"], payload["resume"]["allowed_outcomes"]
+        )
+        self.assertEqual(state_before, (handoff / "state.json").read_bytes())
+        self.assertEqual(receipt_before, (handoff / "receipt.json").read_bytes())
+
+    def test_mcp_account_and_app_handoffs_are_attended_and_preserve_approval(self) -> None:
+        handoff, _ = self.prepare_mcp()
+        self.approve_mcp(handoff)
+        state_before = (handoff / "state.json").read_bytes()
+        receipt_before = (handoff / "receipt.json").read_bytes()
+
+        for reason in ("account-or-workspace", "app-authorization"):
+            with self.subTest(reason=reason):
+                payload = json.loads(
+                    self.run_cli(
+                        "human-handoff",
+                        "--handoff-dir",
+                        str(handoff),
+                        "--reason",
+                        reason,
+                    ).stdout
+                )
+                instructions = "\n".join(payload["human_steps"])
+                self.assertIn(APP_NAME, instructions)
+                self.assertIn(WORKSPACE_LABEL, instructions)
+                self.assertIn("MCP activation", instructions)
+                self.assertIn("approval", instructions)
+                self.assertNotIn("has no MCP runtime", payload["why_human_is_required"])
+                self.assertEqual("mcp-read", payload["transport"])
+                self.assertEqual("browser", payload["delivery_channel"])
+
         self.assertEqual(state_before, (handoff / "state.json").read_bytes())
         self.assertEqual(receipt_before, (handoff / "receipt.json").read_bytes())
 

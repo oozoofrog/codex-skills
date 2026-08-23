@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+import builtins
 import hashlib
 import io
+import importlib.util
 import json
 import os
 import struct
@@ -15,6 +17,7 @@ import warnings
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 if str(SKILL_ROOT) not in sys.path:
@@ -49,7 +52,7 @@ def digest(value: bytes) -> str:
 class PackageFixture:
     def __init__(self, files: dict[str, bytes] | None = None) -> None:
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.archive_path = self.root / "snapshot.zip"
         self.files = files or {
             "README.md": b"Alpha first\r\nsecond line\r\nSTRASSE marker\r\n",
@@ -583,6 +586,73 @@ class ToolSemanticsTests(unittest.TestCase):
         self.assertEqual(64, len(committer.record["request_id_sha256"]))
         self.assertEqual(64, len(committer.record["arguments_sha256"]))
 
+    def test_rejected_attempt_is_audited_without_arguments_or_content(self) -> None:
+        class RecordingCommitter:
+            def __init__(self) -> None:
+                self.rejection = None
+
+            def commit_before_return(self, **kwargs):
+                del kwargs
+
+            def record_rejection(self, **kwargs):
+                self.rejection = kwargs
+
+        committer = RecordingCommitter()
+        runtime = ToolRuntime(
+            StaticAuthorizationProvider(self.fixture.grant()), committer=committer
+        )
+        with self.assertRaises(ToolError) as raised:
+            runtime.call(
+                "gptpro_repo_search",
+                {"package_id": PACKAGE_ID, "query": ""},
+                request_id="rejected-request",
+            )
+        self.assertEqual("SEARCH_QUERY_INVALID", raised.exception.code)
+        self.assertIsNotNone(committer.rejection)
+        self.assertEqual("SEARCH_QUERY_INVALID", committer.rejection["error_code"])
+        self.assertEqual(1, committer.rejection["calls_used"])
+        serialized = json.dumps(
+            {key: value for key, value in committer.rejection.items() if key != "grant"},
+            sort_keys=True,
+        )
+        self.assertNotIn("rejected-request", serialized)
+        self.assertEqual(64, len(committer.rejection["request_id_sha256"]))
+        self.assertEqual(64, len(committer.rejection["arguments_sha256"]))
+
+    def test_non_utf8_json_argument_does_not_desync_call_counter(self) -> None:
+        class SequencingCommitter:
+            def __init__(self) -> None:
+                self.commits: list[dict] = []
+                self.rejections: list[dict] = []
+
+            def commit_before_return(self, **kwargs):
+                self.commits.append(kwargs)
+
+            def record_rejection(self, **kwargs):
+                self.rejections.append(kwargs)
+
+        committer = SequencingCommitter()
+        runtime = ToolRuntime(
+            StaticAuthorizationProvider(self.fixture.grant()), committer=committer
+        )
+        with self.assertRaises(ToolError) as raised:
+            runtime.call(
+                "gptpro_repo_search",
+                {"package_id": PACKAGE_ID, "query": "\ud800"},
+                request_id="invalid-unicode",
+            )
+        self.assertEqual("MCP_INVALID_ARGUMENT", raised.exception.code)
+        self.assertEqual([], committer.commits)
+        self.assertEqual([], committer.rejections)
+
+        result = runtime.call(
+            "gptpro_package_info",
+            {"package_id": PACKAGE_ID},
+            request_id="next-valid-request",
+        )
+        self.assertEqual(1, result["structuredContent"]["result"]["session"]["calls_used"])
+        self.assertEqual(1, committer.commits[0]["calls_used"])
+
     def test_committer_failure_prevents_content_result(self) -> None:
         class FailingCommitter:
             def commit_before_return(self, **kwargs):
@@ -688,20 +758,230 @@ class ProtocolTests(unittest.TestCase):
             self.assertIsInstance(json.loads(line), dict)
 
     def test_protocol_negotiates_legacy_revisions_and_latest_fallback(self) -> None:
-        for version in ("2025-11-25", "2025-06-18", "2025-03-26"):
+        for version in (
+            "2025-11-25",
+            "2025-06-18",
+            "2025-03-26",
+            "2024-11-05",
+        ):
             with self.subTest(version=version):
                 responses, _, _ = self.transcript([self.initialize(version)])
                 self.assertEqual(version, responses[0]["result"]["protocolVersion"])
         responses, _, _ = self.transcript([self.initialize("2026-07-28")])
         self.assertEqual("2025-11-25", responses[0]["result"]["protocolVersion"])
 
-    def test_duplicate_initialize_and_preinitialized_tools_fail(self) -> None:
-        responses, _, _ = self.transcript([self.initialize(), self.initialize(request_id=2)])
+    def test_different_version_initialize_after_ready_is_rejected_without_closing_tools(self) -> None:
+        responses, _, _ = self.transcript([
+            self.initialize(),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+            self.initialize("2025-06-18", request_id=3),
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/list"},
+        ])
+        self.assertEqual(-32600, responses[2]["error"]["code"])
+        self.assertEqual(list(TOOL_CATALOG), responses[3]["result"]["tools"])
+
+    def test_same_version_initialize_after_ready_is_idempotent_without_discovery(self) -> None:
+        responses, _, _ = self.transcript([
+            self.initialize(request_id="first"),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            self.initialize(request_id="ready-replay-1"),
+            self.initialize(request_id="ready-replay-2"),
+            {"jsonrpc": "2.0", "id": "list", "method": "tools/list"},
+        ])
+        by_id = {response["id"]: response for response in responses}
+        self.assertEqual(by_id["first"]["result"], by_id["ready-replay-1"]["result"])
+        self.assertEqual(by_id["first"]["result"], by_id["ready-replay-2"]["result"])
+        self.assertEqual(list(TOOL_CATALOG), by_id["list"]["result"]["tools"])
+
+    def test_same_version_initialize_after_discovery_ready_remains_rejected(self) -> None:
+        responses, _, _ = self.transcript([
+            {
+                "jsonrpc": "2.0",
+                "id": "discover",
+                "method": "server/discover",
+                "params": {},
+            },
+            self.initialize(request_id="probe"),
+            self.initialize(request_id="connector"),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            self.initialize(request_id="ready-replay"),
+            {"jsonrpc": "2.0", "id": "list", "method": "tools/list"},
+        ])
+        by_id = {response["id"]: response for response in responses}
+        self.assertEqual(-32601, by_id["discover"]["error"]["code"])
+        self.assertEqual(by_id["probe"]["result"], by_id["connector"]["result"])
+        self.assertEqual(-32600, by_id["ready-replay"]["error"]["code"])
+        self.assertEqual(list(TOOL_CATALOG), by_id["list"]["result"]["tools"])
+
+    def test_tunnel_reinitializes_after_modern_discovery_fallback(self) -> None:
+        responses, _, _ = self.transcript([
+            self.initialize(request_id="compatibility-initialize"),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": "warm-list", "method": "tools/list"},
+            {
+                "jsonrpc": "2.0",
+                "id": "discover",
+                "method": "server/discover",
+                "params": {
+                    "_meta": {
+                        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                        "io.modelcontextprotocol/clientInfo": {
+                            "name": "connector",
+                            "version": "1",
+                        },
+                        "io.modelcontextprotocol/clientCapabilities": {},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": "closed-list", "method": "tools/list"},
+            self.initialize("2024-11-05", request_id="connector-initialize"),
+            {"jsonrpc": "2.0", "id": "pre-notification-list", "method": "tools/list"},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": "list", "method": "tools/list"},
+        ])
+        self.assertEqual(list(TOOL_CATALOG), responses[1]["result"]["tools"])
+        self.assertEqual(-32601, responses[2]["error"]["code"])
+        self.assertEqual(-32600, responses[3]["error"]["code"])
+        self.assertEqual("2024-11-05", responses[4]["result"]["protocolVersion"])
+        self.assertEqual(-32600, responses[5]["error"]["code"])
+        self.assertEqual(list(TOOL_CATALOG), responses[6]["result"]["tools"])
+
+    def test_tunnel_connector_probe_replays_same_version_initialize_before_ready(self) -> None:
+        responses, _, _ = self.transcript([
+            {
+                "jsonrpc": "2.0",
+                "id": "discover",
+                "method": "server/discover",
+                "params": {
+                    "_meta": {
+                        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    }
+                },
+            },
+            self.initialize("2025-11-25", request_id="probe-initialize"),
+            self.initialize("2025-11-25", request_id="connector-initialize"),
+            self.initialize("2025-11-25", request_id="unexpected-third-initialize"),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": "list", "method": "tools/list"},
+        ])
+        self.assertEqual(-32601, responses[0]["error"]["code"])
+        self.assertEqual("2025-11-25", responses[1]["result"]["protocolVersion"])
+        self.assertEqual(responses[1]["result"], responses[2]["result"])
+        self.assertEqual(-32600, responses[3]["error"]["code"])
+        self.assertEqual(list(TOOL_CATALOG), responses[4]["result"]["tools"])
+
+    def test_tunnel_request_scoped_tool_calls_accept_identical_reinitialize(self) -> None:
+        package_call = {
+            "jsonrpc": "2.0",
+            "id": "package-info-1",
+            "method": "tools/call",
+            "params": {
+                "name": "gptpro_package_info",
+                "arguments": {"package_id": PACKAGE_ID},
+            },
+        }
+        responses, _, _ = self.transcript([
+            self.initialize("2025-11-25", request_id="probe-initialize"),
+            self.initialize("2025-11-25", request_id="request-initialize"),
+            package_call,
+            self.initialize("2025-11-25", request_id="next-request-initialize"),
+            self.initialize("2024-11-05", request_id="different-version"),
+        ])
+        by_id = {response["id"]: response for response in responses}
+        self.assertEqual(
+            by_id["probe-initialize"]["result"],
+            by_id["request-initialize"]["result"],
+        )
+        self.assertTrue(by_id["package-info-1"]["result"]["structuredContent"]["ok"])
+        self.assertEqual(
+            by_id["probe-initialize"]["result"],
+            by_id["next-request-initialize"]["result"],
+        )
+        self.assertEqual(-32600, by_id["different-version"]["error"]["code"])
+
+    def test_request_scoped_compatibility_keeps_nonmatching_paths_locked(self) -> None:
+        valid_call = {
+            "jsonrpc": "2.0",
+            "id": "package-info",
+            "method": "tools/call",
+            "params": {
+                "name": "gptpro_package_info",
+                "arguments": {"package_id": PACKAGE_ID},
+            },
+        }
+        without_replay, _, _ = self.transcript([
+            self.initialize(),
+            valid_call,
+        ])
+        self.assertEqual(-32600, without_replay[1]["error"]["code"])
+
+        after_discover, _, _ = self.transcript([
+            {
+                "jsonrpc": "2.0",
+                "id": "discover",
+                "method": "server/discover",
+                "params": {},
+            },
+            self.initialize(request_id="probe"),
+            self.initialize(request_id="connector"),
+            valid_call,
+        ])
+        self.assertEqual(-32600, after_discover[3]["error"]["code"])
+
+        malformed, _, _ = self.transcript([
+            self.initialize(request_id="probe"),
+            self.initialize(request_id="request"),
+            {
+                "jsonrpc": "2.0",
+                "id": "bad-call",
+                "method": "tools/call",
+                "params": {
+                    "name": "gptpro_package_info",
+                    "arguments": "not-an-object",
+                },
+            },
+            {"jsonrpc": "2.0", "id": "list", "method": "tools/list"},
+        ])
+        self.assertEqual(-32600, malformed[2]["error"]["code"])
+        self.assertEqual(-32600, malformed[3]["error"]["code"])
+
+        unsupported, _, _ = self.transcript([
+            self.initialize("2026-07-28", request_id="unsupported-probe"),
+            self.initialize("2025-11-25", request_id="supported-replay"),
+            valid_call,
+        ])
+        self.assertEqual(-32600, unsupported[2]["error"]["code"])
+
+    def test_pre_ready_different_version_duplicate_initialize_is_rejected(self) -> None:
+        responses, _, _ = self.transcript([
+            self.initialize("2025-11-25", request_id="probe-initialize"),
+            self.initialize("2024-11-05", request_id="different-initialize"),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": "list", "method": "tools/list"},
+        ])
+        self.assertEqual("2025-11-25", responses[0]["result"]["protocolVersion"])
         self.assertEqual(-32600, responses[1]["error"]["code"])
+        self.assertEqual(list(TOOL_CATALOG), responses[2]["result"]["tools"])
+
+    def test_preinitialized_tools_fail(self) -> None:
         responses, _, _ = self.transcript([
             {"jsonrpc": "2.0", "id": 7, "method": "tools/list"}
         ])
         self.assertEqual(-32600, responses[0]["error"]["code"])
+
+    def test_unknown_method_does_not_open_reinitialize_fallback(self) -> None:
+        responses, _, _ = self.transcript([
+            self.initialize(),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "unknown"},
+            self.initialize("2025-06-18", request_id=3),
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/list"},
+        ])
+        self.assertEqual(-32601, responses[1]["error"]["code"])
+        self.assertEqual(-32600, responses[2]["error"]["code"])
+        self.assertEqual(list(TOOL_CATALOG), responses[3]["result"]["tools"])
 
     def test_malformed_batch_invalid_ids_and_unknown_methods(self) -> None:
         source = io.StringIO(
@@ -716,6 +996,24 @@ class ProtocolTests(unittest.TestCase):
         responses = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual([-32700, -32600, -32600, -32600, -32601], [r["error"]["code"] for r in responses])
         self.assertEqual([None, None, 1, None, 8], [r["id"] for r in responses])
+
+    def test_json_decoder_resource_errors_are_parse_errors_and_next_frame_survives(self) -> None:
+        source = io.StringIO("{}\n{}\n{}\n")
+        output, stderr = io.StringIO(), io.StringIO()
+        ping = {"jsonrpc": "2.0", "id": 9, "method": "ping"}
+        with mock.patch(
+            "runtime.gptpro_mcp.protocol.json.loads",
+            side_effect=[ValueError("integer digit limit"), RecursionError("nested input"), ping],
+        ):
+            self.assertEqual(0, LegacyMcpServer(self.fixture.runtime()).serve(source, output, stderr))
+        responses = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([-32700, -32700], [item["error"]["code"] for item in responses[:2]])
+        self.assertEqual(
+            ["MCP_PROTOCOL_ERROR", "MCP_PROTOCOL_ERROR"],
+            [item["error"]["data"]["code"] for item in responses[:2]],
+        )
+        self.assertEqual({}, responses[2]["result"])
+        self.assertEqual("", stderr.getvalue())
 
     def test_oversized_frame_is_drained_and_next_request_survives(self) -> None:
         source = io.StringIO("x" * (MAX_INPUT_FRAME_CHARS + 1) + "\n" + json.dumps(
@@ -749,6 +1047,94 @@ class ProtocolTests(unittest.TestCase):
         )
         self.assertEqual([1, 2], [item["id"] for item in responses])
         self.assertEqual(-32602, responses[1]["error"]["code"])
+
+    def test_tool_call_accepts_optional_meta_without_forwarding_it(self) -> None:
+        class RecordingRuntime:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict[str, object]]] = []
+
+            def call(self, name, arguments, **kwargs):
+                del kwargs
+                self.calls.append((name, arguments))
+                return {"content": [], "structuredContent": {"ok": True}}
+
+        runtime = RecordingRuntime()
+        arguments = {"package_id": PACKAGE_ID}
+        responses, _, _ = self.transcript(
+            [
+                self.initialize(),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "gptpro_package_info",
+                        "arguments": arguments,
+                        "_meta": {"progressToken": "must-not-be-forwarded"},
+                    },
+                },
+            ],
+            runtime=runtime,
+        )
+        self.assertTrue(responses[1]["result"]["structuredContent"]["ok"])
+        self.assertEqual([("gptpro_package_info", arguments)], runtime.calls)
+
+    def test_tool_call_accepts_omitted_arguments_as_empty_object(self) -> None:
+        class RecordingRuntime:
+            def __init__(self) -> None:
+                self.arguments: list[dict[str, object]] = []
+
+            def call(self, name, arguments, **kwargs):
+                del name, kwargs
+                self.arguments.append(arguments)
+                return {"content": [], "structuredContent": {"ok": True}}
+
+        runtime = RecordingRuntime()
+        responses, _, _ = self.transcript(
+            [
+                self.initialize(),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {"name": "gptpro_package_info"},
+                },
+            ],
+            runtime=runtime,
+        )
+        self.assertTrue(responses[1]["result"]["structuredContent"]["ok"])
+        self.assertEqual([{}], runtime.arguments)
+
+    def test_tool_call_rejects_non_object_meta_and_task_augmentation(self) -> None:
+        responses, _, _ = self.transcript(
+            [
+                self.initialize(),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "gptpro_package_info",
+                        "arguments": {},
+                        "_meta": "not-an-object",
+                    },
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "gptpro_package_info",
+                        "arguments": {},
+                        "task": {"ttl": 1},
+                    },
+                },
+            ]
+        )
+        self.assertEqual([-32602, -32602], [item["error"]["code"] for item in responses[1:]])
 
     def test_valid_tool_domain_error_is_a_tool_result(self) -> None:
         responses, _, _ = self.transcript(
@@ -861,6 +1247,64 @@ class ProtocolTests(unittest.TestCase):
 
 
 class EntrypointTests(unittest.TestCase):
+    def test_isolated_bootstrap_can_import_exact_governance_module(self) -> None:
+        script = SKILL_ROOT / "scripts/gptpro_mcp.py"
+        governance = SKILL_ROOT / "scripts/gptpro.py"
+        code = (
+            "import runpy\n"
+            "from pathlib import Path\n"
+            f"runpy.run_path({str(script)!r}, run_name='gptpro_mcp_bootstrap_test')\n"
+            "import gptpro\n"
+            f"assert Path(gptpro.__file__).resolve() == Path({str(governance)!r}).resolve()\n"
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                "-B",
+                f"-Xpycache_prefix={os.devnull}",
+                "-c",
+                code,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_tunnel_credentials_are_scrubbed_before_runtime_imports(self) -> None:
+        script = SKILL_ROOT / "scripts/gptpro_mcp.py"
+        spec = importlib.util.spec_from_file_location("gptpro_mcp_entrypoint_test", script)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        secret_names = tuple(module._INHERITED_SECRET_ENV)
+        environment = {name: f"secret-{index}" for index, name in enumerate(secret_names)}
+        observations: list[dict[str, str | None]] = []
+        original_import = builtins.__import__
+
+        def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name.startswith("runtime.gptpro_mcp"):
+                observations.append({key: os.environ.get(key) for key in secret_names})
+            return original_import(name, globals, locals, fromlist, level)
+
+        with (
+            mock.patch.dict(os.environ, environment, clear=True),
+            mock.patch("builtins.__import__", side_effect=guarded_import),
+        ):
+            runtime, lease, server_class = module._runtime_from_environment()
+        self.assertIsNone(lease)
+        self.assertIsNotNone(runtime)
+        self.assertIsNotNone(server_class)
+        self.assertTrue(observations)
+        self.assertTrue(
+            all(value is None for snapshot in observations for value in snapshot.values())
+        )
+
     def test_help_has_no_runtime_side_effect(self) -> None:
         script = SKILL_ROOT / "scripts/gptpro_mcp.py"
         result = subprocess.run(

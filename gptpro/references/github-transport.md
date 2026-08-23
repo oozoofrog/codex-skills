@@ -1,6 +1,6 @@
 # GitHub transport
 
-Use `github` when the selected repository context already exists at one immutable commit on `github.com` and the intended ChatGPT account can connect a GitHub app/plugin. ChatGPT plugins can expose connectors to services such as GitHub, and may require the user to connect the external service before tools become available; see OpenAI's [Plugins documentation](https://learn.chatgpt.com/docs/plugins).
+Use `github` when the selected repository context already exists at one immutable commit on `github.com` and the intended ChatGPT account can connect a GitHub app/plugin. The user owns the external-service connection and repository-scope decision before those tools become available.
 
 ## Prepare
 

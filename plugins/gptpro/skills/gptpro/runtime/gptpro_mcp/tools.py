@@ -67,11 +67,25 @@ class DisclosureCommitter(Protocol):
         disclosed_bytes: int,
     ) -> None: ...
 
+    def record_rejection(
+        self,
+        *,
+        grant: AuthorizationGrant,
+        tool: str,
+        request_id_sha256: str,
+        arguments_sha256: str,
+        error_code: str,
+        calls_used: int,
+    ) -> None: ...
+
 
 class FixtureDisclosureCommitter:
     """No-op used only with injected static grants in local unit fixtures."""
 
     def commit_before_return(self, **kwargs: Any) -> None:
+        del kwargs
+
+    def record_rejection(self, **kwargs: Any) -> None:
         del kwargs
 
 
@@ -85,6 +99,9 @@ class DenyDisclosureCommitter:
             "Repository evidence cannot be returned without a durable disclosure audit.",
             recovery="Activate the approved package through the complete gptpro runtime.",
         )
+
+    def record_rejection(self, **kwargs: Any) -> None:
+        self.commit_before_return(**kwargs)
 
 
 class ToolRuntime:
@@ -146,61 +163,94 @@ class ToolRuntime:
                     "The approved session tool-call limit has been reached.",
                     recovery="Stop this session and obtain approval for a new session.",
                 )
+            try:
+                request_hash = _sha256(canonical_json_bytes(request_id))
+                argument_hash = _sha256(canonical_json_bytes(arguments))
+            except (TypeError, ValueError, UnicodeEncodeError, RecursionError) as exc:
+                raise invalid_argument(
+                    "The request id and arguments must be bounded canonical UTF-8 JSON values."
+                ) from exc
             self._calls_used += 1
-            snapshot = VerifiedArchive.open(grant, checkpoint=checkpoint)
-            checkpoint()
             projected_calls = self._calls_used
-            if name == "gptpro_package_info":
-                result, disclosure = self._package_info(
-                    snapshot, arguments, projected_calls=projected_calls, checkpoint=checkpoint
+            try:
+                snapshot = VerifiedArchive.open(grant, checkpoint=checkpoint)
+                checkpoint()
+                if name == "gptpro_package_info":
+                    result, disclosure = self._package_info(
+                        snapshot, arguments, projected_calls=projected_calls, checkpoint=checkpoint
+                    )
+                elif name == "gptpro_repo_read":
+                    result, disclosure = self._read(snapshot, arguments, checkpoint=checkpoint)
+                else:
+                    result, disclosure = self._search(snapshot, arguments, checkpoint=checkpoint)
+                projected_disclosure = self._disclosed_bytes + disclosure
+                if projected_disclosure > limits["max_session_disclosure_bytes"]:
+                    raise ToolError(
+                        "DISCLOSURE_BUDGET_EXCEEDED",
+                        "The approved session disclosure budget would be exceeded.",
+                        recovery="Stop this session and obtain approval for a new bounded session.",
+                    )
+                result.setdefault("disclosure", {})["session_disclosed_bytes"] = projected_disclosure
+                if name == "gptpro_package_info":
+                    result["session"]["calls_used"] = projected_calls
+                    result["session"]["disclosed_bytes"] = projected_disclosure
+                response = success_result(name, package_id, result)
+                if len(canonical_json_bytes(response)) > limits["max_result_bytes"]:
+                    raise ToolError(
+                        "RESULT_LIMIT_EXCEEDED",
+                        "The model-visible tool result exceeds the approved per-call byte limit.",
+                        retryable=True,
+                        recovery="Request fewer paths, fewer matches, or a smaller line range.",
+                    )
+                checkpoint()
+                current = self._authorization.resolve(package_id)
+                current.validate(package_id)
+                if (
+                    current.package_id,
+                    current.session_id_sha256,
+                    current.manifest_sha256,
+                    current.archive_sha256,
+                ) != (
+                    grant.package_id,
+                    grant.session_id_sha256,
+                    grant.manifest_sha256,
+                    grant.archive_sha256,
+                ):
+                    raise ToolError(
+                        "CONTENT_DRIFT",
+                        "The active authorization changed while repository evidence was prepared.",
+                        recovery="Discard this result and start a new approved session.",
+                    )
+            except (ToolError, CancelledError) as exc:
+                error_code = exc.code if isinstance(exc, ToolError) else "CANCELLED"
+                self._committer.record_rejection(
+                    grant=grant,
+                    tool=name,
+                    request_id_sha256=request_hash,
+                    arguments_sha256=argument_hash,
+                    error_code=error_code,
+                    calls_used=projected_calls,
                 )
-            elif name == "gptpro_repo_read":
-                result, disclosure = self._read(snapshot, arguments, checkpoint=checkpoint)
-            else:
-                result, disclosure = self._search(snapshot, arguments, checkpoint=checkpoint)
-            projected_disclosure = self._disclosed_bytes + disclosure
-            if projected_disclosure > limits["max_session_disclosure_bytes"]:
+                raise
+            except Exception as exc:
+                self._committer.record_rejection(
+                    grant=grant,
+                    tool=name,
+                    request_id_sha256=request_hash,
+                    arguments_sha256=argument_hash,
+                    error_code="TOOL_EXECUTION_FAILED",
+                    calls_used=projected_calls,
+                )
                 raise ToolError(
-                    "DISCLOSURE_BUDGET_EXCEEDED",
-                    "The approved session disclosure budget would be exceeded.",
-                    recovery="Stop this session and obtain approval for a new bounded session.",
-                )
-            result.setdefault("disclosure", {})["session_disclosed_bytes"] = projected_disclosure
-            if name == "gptpro_package_info":
-                result["session"]["calls_used"] = projected_calls
-                result["session"]["disclosed_bytes"] = projected_disclosure
-            response = success_result(name, package_id, result)
-            if len(canonical_json_bytes(response)) > limits["max_result_bytes"]:
-                raise ToolError(
-                    "RESULT_LIMIT_EXCEEDED",
-                    "The model-visible tool result exceeds the approved per-call byte limit.",
-                    retryable=True,
-                    recovery="Request fewer paths, fewer matches, or a smaller line range.",
-                )
-            checkpoint()
-            current = self._authorization.resolve(package_id)
-            current.validate(package_id)
-            if (
-                current.package_id,
-                current.session_id_sha256,
-                current.manifest_sha256,
-                current.archive_sha256,
-            ) != (
-                grant.package_id,
-                grant.session_id_sha256,
-                grant.manifest_sha256,
-                grant.archive_sha256,
-            ):
-                raise ToolError(
-                    "CONTENT_DRIFT",
-                    "The active authorization changed while repository evidence was prepared.",
-                    recovery="Discard this result and start a new approved session.",
-                )
+                    "TOOL_EXECUTION_FAILED",
+                    "The bounded read-only operation failed before returning content.",
+                    recovery="Stop this session if the failure repeats.",
+                ) from exc
             self._committer.commit_before_return(
                 grant=current,
                 tool=name,
-                request_id_sha256=_sha256(canonical_json_bytes(request_id)),
-                arguments_sha256=_sha256(canonical_json_bytes(arguments)),
+                request_id_sha256=request_hash,
+                arguments_sha256=argument_hash,
                 audit_metadata=_audit_metadata(name, result),
                 calls_used=projected_calls,
                 disclosed_bytes=projected_disclosure,

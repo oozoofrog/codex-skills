@@ -1,4 +1,4 @@
 interface:
   display_name: "GPT Pro Collaborator"
-  short_description: "ChatGPT Pro handoffs and experimental Web MCP"
-  default_prompt: "Use $gptpro in review mode, initialize local handoff storage if needed, prepare a GitHub-first approved repository handoff with text fallback, consult ChatGPT Pro with human takeover at trust or browser boundaries when needed, and validate the advisory response."
+  short_description: "Approved ChatGPT Pro handoffs and read-only Web MCP"
+  default_prompt: "Use $gptpro in review mode to prepare and verify an approved repository consultation, preserve the explicitly approved context transport and delivery channel, use the experimental read-only Web MCP runtime only when requested and ready, pause for human trust/account steps, and independently validate the ChatGPT Pro advice."
