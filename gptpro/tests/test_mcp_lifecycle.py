@@ -977,6 +977,9 @@ else:
             cwd=self.root,
         )
         try:
+            self.assertEqual(process.pid, os.getpgid(process.pid))
+            self.assertEqual(process.pid, os.getsid(process.pid))
+            self.assertNotEqual(os.getpgrp(), os.getpgid(process.pid))
             deadline = time.monotonic() + 5
             while files.url_file.stat().st_size == 0 and time.monotonic() < deadline:
                 time.sleep(0.02)
@@ -2545,6 +2548,58 @@ class SupervisorTests(unittest.TestCase):
         self.assertFalse(result.forced_exact_child)
         self.assertEqual(-int(signal.SIGTERM), result.child_returncode)
 
+    def test_process_group_stop_cannot_terminate_child_before_revoke(self) -> None:
+        socket_path = self.root / "group-isolation.sock"
+        script = "\n".join(
+            [
+                "import json, os, signal, subprocess, sys",
+                f"sys.path.insert(0, {str(SKILL_ROOT)!r})",
+                "from runtime.gptpro_mcp.supervisor import ForegroundSupervisor",
+                "from runtime.gptpro_mcp.tunnel_client import popen_with_signal_mask",
+                "observed = {}",
+                "supervisor = None",
+                "def factory(child_signal_mask):",
+                "    process = popen_with_signal_mask(",
+                "        [sys.executable, '-c', 'import time; time.sleep(60)'],",
+                "        child_signal_mask=child_signal_mask,",
+                "        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,",
+                "        stderr=subprocess.DEVNULL, start_new_session=True)",
+                "    observed['process'] = process",
+                "    return process",
+                "def after_start(process):",
+                "    observed['controller_pgid'] = os.getpgrp()",
+                "    observed['child_pgid'] = os.getpgid(process.pid)",
+                "    os.killpg(os.getpgrp(), signal.SIGTERM)",
+                "def revoke(reason):",
+                "    process = observed['process']",
+                "    observed['reason'] = reason",
+                "    observed['alive_at_revoke'] = process.poll() is None",
+                "supervisor = ForegroundSupervisor(",
+                "    process_factory=factory, after_start=after_start,",
+                f"    control_socket={str(socket_path)!r},",
+                f"    session_id_sha256={self.session!r},",
+                "    revoke_before_terminate=revoke, stop_timeout=1.0)",
+                "result = supervisor.run()",
+                "observed['returncode'] = result.child_returncode",
+                "print(json.dumps(observed, default=str), flush=True)",
+            ]
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=10,
+            start_new_session=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        observed = json.loads(result.stdout.splitlines()[-1])
+        self.assertTrue(observed["alive_at_revoke"])
+        self.assertEqual("signal_term", observed["reason"])
+        self.assertNotEqual(observed["controller_pgid"], observed["child_pgid"])
+        self.assertEqual(-int(signal.SIGTERM), observed["returncode"])
+
     def test_child_exit_reason_is_sealed_before_pending_stop_signal(self) -> None:
         class ExitedProcess:
             pid = 4242
@@ -2768,6 +2823,65 @@ class SupervisorTests(unittest.TestCase):
             owner.close()
             socket_path.unlink(missing_ok=True)
 
+    def test_replacement_before_first_post_bind_identity_is_never_adopted_or_unlinked(self) -> None:
+        socket_path = self.root / "publish-race.sock"
+        replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        real_metadata = supervisor_module._control_socket_metadata
+        replacement_inode: int | None = None
+        replacement_path: Path | None = None
+        replaced = False
+        factory_calls = 0
+
+        def replace_on_first_post_bind_read(path: Path):
+            nonlocal replacement_inode, replacement_path, replaced
+            candidate = Path(path)
+            if not replaced and candidate != socket_path:
+                replaced = True
+                replacement_path = candidate
+                candidate.unlink(missing_ok=True)
+                replacement.bind(str(candidate))
+                os.chmod(candidate, 0o600)
+                replacement.listen(1)
+                replacement_inode = candidate.stat().st_ino
+            return real_metadata(candidate)
+
+        def process_factory(
+            child_signal_mask: set[signal.Signals] | None,
+        ) -> subprocess.Popen[bytes]:
+            nonlocal factory_calls
+            del child_signal_mask
+            factory_calls += 1
+            return self.sleeping_child()
+
+        supervisor = ForegroundSupervisor(
+            process_factory=process_factory,
+            control_socket=socket_path,
+            session_id_sha256=self.session,
+            revoke_before_terminate=lambda reason: None,
+        )
+        try:
+            with (
+                mock.patch.object(
+                    supervisor_module,
+                    "_control_socket_metadata",
+                    side_effect=replace_on_first_post_bind_read,
+                ),
+                self.assertRaises(RuntimeStateError) as raised,
+            ):
+                supervisor.run()
+            self.assertEqual("CONTROL_LISTENER_FAILED", raised.exception.code)
+            self.assertEqual(0, factory_calls)
+            self.assertFalse(socket_path.exists())
+            self.assertIsNotNone(replacement_path)
+            self.assertTrue(replacement_path.exists())
+            self.assertEqual(replacement_inode, replacement_path.stat().st_ino)
+            self.assertIsNone(supervisor._control_socket_identity)
+        finally:
+            replacement.close()
+            socket_path.unlink(missing_ok=True)
+            if replacement_path is not None:
+                replacement_path.unlink(missing_ok=True)
+
     def test_cleanup_preserves_same_uid_replacement_control_socket(self) -> None:
         socket_path = self.root / "replace.sock"
         replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -2799,22 +2913,25 @@ class SupervisorTests(unittest.TestCase):
             replacement.close()
             socket_path.unlink(missing_ok=True)
 
-    def test_post_bind_failure_preserves_same_uid_replacement_control_socket(self) -> None:
+    def test_post_bind_failure_preserves_same_uid_replacement_staging_socket(self) -> None:
         socket_path = self.root / "bind-replace.sock"
         replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         original_chmod = os.chmod
         replacement_inode: int | None = None
+        replacement_path: Path | None = None
 
         def replace_then_fail(path, mode, *args, **kwargs) -> None:
-            nonlocal replacement_inode
-            if Path(path) != socket_path:
+            nonlocal replacement_inode, replacement_path
+            candidate = Path(path)
+            if candidate.parent != socket_path.parent or candidate == socket_path:
                 original_chmod(path, mode, *args, **kwargs)
                 return
-            socket_path.unlink()
-            replacement.bind(str(socket_path))
-            original_chmod(socket_path, 0o600)
+            replacement_path = candidate
+            candidate.unlink()
+            replacement.bind(str(candidate))
+            original_chmod(candidate, 0o600)
             replacement.listen(1)
-            replacement_inode = socket_path.stat().st_ino
+            replacement_inode = candidate.stat().st_ino
             raise OSError("simulated post-bind setup failure")
 
         supervisor = ForegroundSupervisor(
@@ -2832,11 +2949,14 @@ class SupervisorTests(unittest.TestCase):
                 self.assertRaisesRegex(OSError, "post-bind setup failure"),
             ):
                 supervisor.run()
-            self.assertTrue(socket_path.exists())
-            self.assertEqual(replacement_inode, socket_path.stat().st_ino)
+            self.assertFalse(socket_path.exists())
+            self.assertIsNotNone(replacement_path)
+            self.assertTrue(replacement_path.exists())
+            self.assertEqual(replacement_inode, replacement_path.stat().st_ino)
         finally:
             replacement.close()
-            socket_path.unlink(missing_ok=True)
+            if replacement_path is not None:
+                replacement_path.unlink(missing_ok=True)
 
     def test_chmod_failure_removes_the_exact_socket_just_bound(self) -> None:
         socket_path = self.root / "chmod-fail.sock"
@@ -2896,7 +3016,7 @@ class SupervisorTests(unittest.TestCase):
             replacement.close()
             socket_path.unlink(missing_ok=True)
 
-    def test_persistent_post_bind_metadata_failure_leaves_recoverable_stale_socket(self) -> None:
+    def test_persistent_post_bind_metadata_failure_never_publishes_stale_socket(self) -> None:
         socket_path = self.root / "meta-fail.sock"
         real_metadata = supervisor_module._control_socket_metadata
         calls = 0
@@ -2926,10 +3046,11 @@ class SupervisorTests(unittest.TestCase):
 
         self.assertEqual("CONTROL_LISTENER_FAILED", raised.exception.code)
         self.assertEqual("CONTROL_LISTENER_FAILED", supervisor.failure_code)
-        self.assertTrue(socket_path.exists())
-        self.assertEqual(0, stat.S_IMODE(socket_path.stat().st_mode) & 0o022)
+        self.assertFalse(socket_path.exists())
         self.assertFalse(request_cooperative_stop(socket_path, self.session))
-        socket_path.unlink()
+        staged = [path for path in self.root.iterdir() if stat.S_ISSOCK(path.lstat().st_mode)]
+        self.assertEqual(1, len(staged))
+        staged[0].unlink()
 
     def test_slow_control_frame_is_closed_before_supervisor_returns(self) -> None:
         socket_path = self.root / "slow-frame.sock"

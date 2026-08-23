@@ -2396,7 +2396,10 @@ class TunnelClient:
                 stderr=subprocess.DEVNULL,
                 cwd=None if cwd is None else str(cwd),
                 env=child_env,
-                start_new_session=False,
+                # Keep terminal/process-group stop signals on the controller.
+                # The supervisor must revoke authorization before it signals
+                # this exact Popen-owned Tunnel PID.
+                start_new_session=True,
                 umask=0o077,
             )
         except OSError as exc:

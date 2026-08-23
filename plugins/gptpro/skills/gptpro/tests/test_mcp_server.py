@@ -1247,6 +1247,91 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual([1, "second"], [item["id"] for item in responses])
         self.assertEqual("MCP_SERVER_BUSY", responses[1]["error"]["data"]["code"])
 
+    def test_duplicate_id_remains_reserved_until_success_response_flush(self) -> None:
+        class CountingRuntime:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def call(self, name, arguments, *, cancelled, request_id=None):
+                del name, arguments, cancelled, request_id
+                self.calls += 1
+                return {"content": [], "structuredContent": {"ok": True}}
+
+        class BlockingOutput(io.StringIO):
+            def __init__(self) -> None:
+                super().__init__()
+                self.write_entered = threading.Event()
+                self.release_write = threading.Event()
+                self._blocked_once = False
+
+            def write(self, value: str) -> int:
+                if not self._blocked_once:
+                    self._blocked_once = True
+                    self.write_entered.set()
+                    if not self.release_write.wait(5):
+                        raise BrokenPipeError("timed out waiting for duplicate-id assertion")
+                return super().write(value)
+
+        class DecisionTrace:
+            def __init__(self, output: BlockingOutput) -> None:
+                self.output = output
+                self.duplicate_decision = threading.Event()
+                self.duplicate_outcome: str | None = None
+
+            def record(self, **event) -> None:
+                if (
+                    self.output.write_entered.is_set()
+                    and event.get("method") == "tools_call"
+                    and event.get("stage") == "decision"
+                ):
+                    self.duplicate_outcome = event.get("outcome")
+                    self.duplicate_decision.set()
+
+        runtime = CountingRuntime()
+        output = BlockingOutput()
+        trace = DecisionTrace(output)
+        server = LegacyMcpServer(runtime, max_workers=2, trace=trace)  # type: ignore[arg-type]
+        server._output = output
+        server._stderr = io.StringIO()
+        server._initialized = True
+        params = {
+            "name": "gptpro_package_info",
+            "arguments": {"package_id": PACKAGE_ID},
+        }
+        duplicate_errors: list[BaseException] = []
+
+        def duplicate_request() -> None:
+            try:
+                server._request("same", "tools/call", params)
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                duplicate_errors.append(exc)
+
+        duplicate = threading.Thread(target=duplicate_request)
+        try:
+            server._request("same", "tools/call", params)
+            self.assertTrue(output.write_entered.wait(2))
+            with server._state_lock:
+                self.assertEqual(1, len(server._inflight))
+            duplicate.start()
+            self.assertTrue(trace.duplicate_decision.wait(2))
+            self.assertEqual("invalid_request", trace.duplicate_outcome)
+            self.assertEqual(1, runtime.calls)
+        finally:
+            output.release_write.set()
+            if duplicate.ident is not None:
+                duplicate.join(2)
+            server._executor.shutdown(wait=True, cancel_futures=False)
+
+        self.assertFalse(duplicate.is_alive())
+        self.assertEqual([], duplicate_errors)
+        responses = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(
+            ["result", "error"],
+            ["result" if "result" in item else "error" for item in responses],
+        )
+        self.assertEqual(-32600, responses[1]["error"]["code"])
+        self.assertEqual(1, runtime.calls)
+
 
 class EntrypointTests(unittest.TestCase):
     def test_isolated_bootstrap_can_import_exact_governance_module(self) -> None:

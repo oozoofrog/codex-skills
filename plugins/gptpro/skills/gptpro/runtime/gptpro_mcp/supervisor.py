@@ -10,7 +10,9 @@ import secrets
 import signal
 import socket
 import stat
+import struct
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -21,6 +23,8 @@ from .runtime_state import RuntimeStateError, ensure_private_directory
 
 _MAX_CONTROL_FRAME_BYTES = 4096
 _STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+_CONTROL_SOCKET_PROOF_BYTES = 32
+_CONTROL_SOCKET_PROOF_TIMEOUT_SECONDS = 0.5
 
 
 def _control_socket_metadata(path: Path) -> os.stat_result:
@@ -34,6 +38,110 @@ def _control_socket_metadata(path: Path) -> os.stat_result:
         return os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
     finally:
         os.close(parent_descriptor)
+
+
+def _control_socket_peer_pid(connection: socket.socket) -> int:
+    """Return the peer PID for a connected local Unix-domain socket."""
+
+    try:
+        if sys.platform == "darwin":
+            raw = connection.getsockopt(
+                getattr(socket, "SOL_LOCAL", 0),
+                getattr(socket, "LOCAL_PEERPID", 2),
+                struct.calcsize("i"),
+            )
+            peer_pid = struct.unpack("i", raw)[0]
+        elif sys.platform.startswith("linux") and hasattr(socket, "SO_PEERCRED"):
+            raw = connection.getsockopt(
+                socket.SOL_SOCKET,
+                socket.SO_PEERCRED,
+                struct.calcsize("3i"),
+            )
+            peer_pid, _, _ = struct.unpack("3i", raw)
+        else:
+            raise OSError("Unix peer PID verification is unavailable")
+    except (OSError, TypeError, ValueError, struct.error) as exc:
+        raise RuntimeStateError(
+            "CONTROL_LISTENER_FAILED",
+            "The staged supervisor socket peer could not be verified.",
+        ) from exc
+    if peer_pid <= 0:
+        raise RuntimeStateError(
+            "CONTROL_LISTENER_FAILED",
+            "The staged supervisor socket peer could not be verified.",
+        )
+    return peer_pid
+
+
+def _recv_exact(connection: socket.socket, size: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining:
+        chunk = connection.recv(remaining)
+        if not chunk:
+            raise OSError("control socket proof ended early")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _prove_control_socket_listener_path(
+    listener: socket.socket,
+    path: Path,
+) -> None:
+    """Prove that ``path`` currently routes to ``listener`` in this process.
+
+    A pathname lstat cannot prove which listening file descriptor owns that
+    directory entry.  A same-UID process could replace the staged name between
+    bind and the first metadata read.  A bidirectional nonce exchange plus
+    peer-PID checks binds the pathname to this exact process/listener before
+    its filesystem identity is trusted for publication or cleanup.
+    """
+
+    challenge = secrets.token_bytes(_CONTROL_SOCKET_PROOF_BYTES)
+    response = secrets.token_bytes(_CONTROL_SOCKET_PROOF_BYTES)
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    accepted: socket.socket | None = None
+    previous_timeout = listener.gettimeout()
+    try:
+        listener.settimeout(_CONTROL_SOCKET_PROOF_TIMEOUT_SECONDS)
+        probe.settimeout(_CONTROL_SOCKET_PROOF_TIMEOUT_SECONDS)
+        probe.connect(str(path))
+        accepted, _ = listener.accept()
+        accepted.settimeout(_CONTROL_SOCKET_PROOF_TIMEOUT_SECONDS)
+        expected_pid = os.getpid()
+        if (
+            _control_socket_peer_pid(probe) != expected_pid
+            or _control_socket_peer_pid(accepted) != expected_pid
+        ):
+            raise RuntimeStateError(
+                "CONTROL_LISTENER_FAILED",
+                "The staged supervisor socket was connected by an unexpected process.",
+            )
+        probe.sendall(challenge)
+        if not secrets.compare_digest(_recv_exact(accepted, len(challenge)), challenge):
+            raise RuntimeStateError(
+                "CONTROL_LISTENER_FAILED",
+                "The staged supervisor socket proof did not reach the owned listener.",
+            )
+        accepted.sendall(response)
+        if not secrets.compare_digest(_recv_exact(probe, len(response)), response):
+            raise RuntimeStateError(
+                "CONTROL_LISTENER_FAILED",
+                "The staged supervisor socket proof did not return to the owned client.",
+            )
+    except RuntimeStateError:
+        raise
+    except (OSError, TimeoutError) as exc:
+        raise RuntimeStateError(
+            "CONTROL_LISTENER_FAILED",
+            "The staged supervisor socket could not be proven to belong to this listener.",
+        ) from exc
+    finally:
+        if accepted is not None:
+            accepted.close()
+        probe.close()
+        listener.settimeout(previous_timeout)
 
 
 def _claim_and_unlink_control_socket_if_matches(
@@ -541,30 +649,46 @@ class ForegroundSupervisor:
         else:
             raise RuntimeStateError("SESSION_CONFLICT", "The supervisor control socket already exists.")
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        staging_socket = self.control_socket.with_name(f".{secrets.token_urlsafe(8)}")
         bound_identity: tuple[int, int] | None = None
+        published = False
         try:
-            listener.bind(str(self.control_socket))
+            listener.bind(str(staging_socket))
+            listener.listen(4)
             try:
-                metadata = _control_socket_metadata(self.control_socket)
+                metadata = _control_socket_metadata(staging_socket)
             except OSError:
-                # Retry once through the parent directory descriptor before
-                # giving up.  Without a trusted dev/inode identity, leave the
-                # now-closed stale path for explicit mcp-recover rather than
-                # risk unlinking a same-UID replacement.
+                # Retry once through the parent directory descriptor.  An
+                # unverified random staging name is never published as the
+                # well-known control socket.
                 try:
-                    metadata = _control_socket_metadata(self.control_socket)
+                    metadata = _control_socket_metadata(staging_socket)
                 except OSError as exc:
                     raise RuntimeStateError(
                         "CONTROL_LISTENER_FAILED",
-                        "The bound control socket identity could not be verified; run mcp-recover before retrying.",
+                        "The staged control socket identity could not be verified.",
                     ) from exc
             if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.getuid():
                 raise RuntimeStateError(
-                    "RUNTIME_STATE_UNSAFE", "The bound supervisor socket is unsafe."
+                    "RUNTIME_STATE_UNSAFE", "The staged supervisor socket is unsafe."
                 )
-            bound_identity = (metadata.st_dev, metadata.st_ino)
-            os.chmod(self.control_socket, 0o600, follow_symlinks=False)
-            secured = _control_socket_metadata(self.control_socket)
+            candidate_identity = (metadata.st_dev, metadata.st_ino)
+            _prove_control_socket_listener_path(listener, staging_socket)
+            proven_metadata = _control_socket_metadata(staging_socket)
+            if (
+                not stat.S_ISSOCK(proven_metadata.st_mode)
+                or proven_metadata.st_uid != os.getuid()
+                or (proven_metadata.st_dev, proven_metadata.st_ino) != candidate_identity
+            ):
+                raise RuntimeStateError(
+                    "CONTROL_SOCKET_CHANGED",
+                    "The staged supervisor socket identity changed during listener proof.",
+                )
+            # Only a pathname that completed the listener proof may become an
+            # owned identity and therefore an eligible cleanup target.
+            bound_identity = candidate_identity
+            os.chmod(staging_socket, 0o600, follow_symlinks=False)
+            secured = _control_socket_metadata(staging_socket)
             if (
                 not stat.S_ISSOCK(secured.st_mode)
                 or secured.st_uid != os.getuid()
@@ -573,9 +697,72 @@ class ForegroundSupervisor:
             ):
                 raise RuntimeStateError(
                     "RUNTIME_STATE_UNSAFE",
-                    "The supervisor socket identity changed during setup.",
+                    "The staged supervisor socket identity changed during setup.",
                 )
-            listener.listen(4)
+            directory_flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            if hasattr(os, "O_NOFOLLOW"):
+                directory_flags |= os.O_NOFOLLOW
+            parent_descriptor = os.open(self.control_socket.parent, directory_flags)
+            try:
+                try:
+                    # A same-directory hard link is an atomic no-clobber
+                    # publication of the already pinned socket inode.  Never
+                    # rename over a control socket that appeared after the
+                    # preflight check.
+                    os.link(
+                        staging_socket.name,
+                        self.control_socket.name,
+                        src_dir_fd=parent_descriptor,
+                        dst_dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError as exc:
+                    raise RuntimeStateError(
+                        "SESSION_CONFLICT",
+                        "The supervisor control socket appeared during secure publication.",
+                    ) from exc
+            finally:
+                os.close(parent_descriptor)
+            published = True
+            published_metadata = _control_socket_metadata(self.control_socket)
+            staged_metadata = _control_socket_metadata(staging_socket)
+            for candidate in (published_metadata, staged_metadata):
+                if (
+                    not stat.S_ISSOCK(candidate.st_mode)
+                    or candidate.st_uid != os.getuid()
+                    or stat.S_IMODE(candidate.st_mode) != 0o600
+                    or (candidate.st_dev, candidate.st_ino) != bound_identity
+                ):
+                    raise RuntimeStateError(
+                        "CONTROL_SOCKET_CHANGED",
+                        "The supervisor socket identity changed during secure publication.",
+                    )
+            try:
+                staging_removed = _claim_and_unlink_control_socket_if_matches(
+                    staging_socket, bound_identity
+                )
+            except FileNotFoundError:
+                staging_removed = False
+            if not staging_removed:
+                raise RuntimeStateError(
+                    "CONTROL_SOCKET_CHANGED",
+                    "The staged supervisor socket changed before publication completed.",
+                )
+            final_metadata = _control_socket_metadata(self.control_socket)
+            if (
+                not stat.S_ISSOCK(final_metadata.st_mode)
+                or final_metadata.st_uid != os.getuid()
+                or stat.S_IMODE(final_metadata.st_mode) != 0o600
+                or (final_metadata.st_dev, final_metadata.st_ino) != bound_identity
+            ):
+                raise RuntimeStateError(
+                    "CONTROL_SOCKET_CHANGED",
+                    "The published supervisor socket identity changed during setup.",
+                )
             listener.setblocking(False)
             self._listener = listener
             self._owns_control_socket = True
@@ -583,12 +770,16 @@ class ForegroundSupervisor:
         except Exception:
             listener.close()
             if bound_identity is not None:
-                try:
-                    _claim_and_unlink_control_socket_if_matches(
-                        self.control_socket, bound_identity
-                    )
-                except FileNotFoundError:
-                    pass
+                for path in (
+                    self.control_socket if published else None,
+                    staging_socket,
+                ):
+                    if path is None:
+                        continue
+                    try:
+                        _claim_and_unlink_control_socket_if_matches(path, bound_identity)
+                    except FileNotFoundError:
+                        pass
             raise
 
     def _serve_control(self) -> None:

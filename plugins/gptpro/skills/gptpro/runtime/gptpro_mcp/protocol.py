@@ -681,31 +681,38 @@ class LegacyMcpServer:
         cancel: threading.Event,
     ) -> None:
         try:
-            result = self._tools.call(name, arguments, cancelled=cancel, request_id=request_id)
-        except CancelledError:
-            return
-        except ToolError as exc:
-            if cancel.is_set():
+            try:
+                result = self._tools.call(
+                    name,
+                    arguments,
+                    cancelled=cancel,
+                    request_id=request_id,
+                )
+            except CancelledError:
                 return
-            result = error_result(exc)
-        except Exception:
-            self._log("MCP_INTERNAL_ERROR")
-            if cancel.is_set():
+            except ToolError as exc:
+                if cancel.is_set():
+                    return
+                result = error_result(exc)
+            except Exception:
+                self._log("MCP_INTERNAL_ERROR")
+                if cancel.is_set():
+                    return
+                self._write_traced(
+                    _rpc_error(
+                        request_id,
+                        -32603,
+                        "Internal error",
+                        stable_code="MCP_PROTOCOL_ERROR",
+                    ),
+                    "tools_call",
+                )
                 return
-            self._write_traced(
-                _rpc_error(
-                    request_id,
-                    -32603,
-                    "Internal error",
-                    stable_code="MCP_PROTOCOL_ERROR",
-                ),
-                "tools_call",
-            )
-            return
+            self._write_traced(_rpc_result(request_id, result), "tools_call")
         finally:
             with self._state_lock:
-                self._inflight.pop(key, None)
-        self._write_traced(_rpc_result(request_id, result), "tools_call")
+                if self._inflight.get(key) is cancel:
+                    self._inflight.pop(key, None)
 
     def _write_traced(self, message: dict[str, Any], method: str) -> None:
         if self._broken.is_set() or self._output is None:
