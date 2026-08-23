@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
-import importlib.util
 import json
 import re
 import sys
@@ -244,35 +243,155 @@ def validate_mcp_foundation(skill_root: Path, errors: list[str]) -> None:
     if unexpected:
         errors.append(f"Web MCP schema fixture imports non-stdlib modules: {unexpected}")
         return
+
+    allowed_assignments = {
+        "PROTOCOL_PROFILE",
+        "SERVER_NAME",
+        "SERVER_VERSION",
+        "SERVER_INSTRUCTIONS",
+        "DEFAULT_LIMITS",
+        "HARD_LIMITS",
+        "COMMON_ANNOTATIONS",
+        "TOOL_CATALOG",
+        "TOOL_NAMES",
+    }
+    allowed_functions = {
+        "_string_property",
+        "_output_schema",
+        "canonical_json_bytes",
+        "tool_schema_payload",
+        "tool_schema_sha256",
+        "validate_limits",
+    }
+    assignments: dict[str, ast.expr] = {}
+    top_level_errors: list[str] = []
+    for index, statement in enumerate(tree.body):
+        if isinstance(statement, ast.Expr):
+            if index == 0 and isinstance(statement.value, ast.Constant) and isinstance(
+                statement.value.value, str
+            ):
+                continue
+            top_level_errors.append(type(statement).__name__)
+        elif isinstance(statement, (ast.Import, ast.ImportFrom)):
+            continue
+        elif isinstance(statement, ast.Assign):
+            if len(statement.targets) != 1 or not isinstance(statement.targets[0], ast.Name):
+                top_level_errors.append("complex assignment")
+                continue
+            name = statement.targets[0].id
+            if name in assignments:
+                top_level_errors.append(f"duplicate assignment {name!r}")
+                continue
+            assignments[name] = statement.value
+        elif isinstance(statement, ast.AnnAssign):
+            if not isinstance(statement.target, ast.Name) or statement.value is None:
+                top_level_errors.append("complex annotated assignment")
+                continue
+            name = statement.target.id
+            if name in assignments:
+                top_level_errors.append(f"duplicate assignment {name!r}")
+                continue
+            assignments[name] = statement.value
+        elif isinstance(statement, ast.FunctionDef):
+            if statement.name not in allowed_functions or statement.decorator_list:
+                top_level_errors.append(f"function {statement.name!r}")
+            defaults = [*statement.args.defaults, *statement.args.kw_defaults]
+            if any(
+                default is not None and any(isinstance(node, ast.Call) for node in ast.walk(default))
+                for default in defaults
+            ):
+                top_level_errors.append(f"function default {statement.name!r}")
+        else:
+            top_level_errors.append(type(statement).__name__)
+    unexpected_assignments = sorted(set(assignments) - allowed_assignments)
+    missing_assignments = sorted(allowed_assignments - set(assignments))
+    if top_level_errors or unexpected_assignments or missing_assignments:
+        errors.append(
+            "Web MCP schema fixture has unsafe or unexpected top-level structure; "
+            f"statements={top_level_errors}, assignments={unexpected_assignments}, "
+            f"missing={missing_assignments}"
+        )
+        return
+
+    for name, value in assignments.items():
+        if name in {"TOOL_CATALOG", "TOOL_NAMES"}:
+            continue
+        if any(isinstance(node, ast.Call) for node in ast.walk(value)):
+            errors.append(f"Web MCP schema fixture assignment {name!r} contains a call")
+            return
+
     try:
-        spec = importlib.util.spec_from_file_location("gptpro_structure_mcp_schema", path)
-        if spec is None or spec.loader is None:
-            raise ValidationError("unable to create module specification")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
         expected_names = (
             "gptpro_package_info",
             "gptpro_repo_read",
             "gptpro_repo_search",
         )
-        if module.TOOL_NAMES != expected_names:
+        expected_annotations = {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "openWorldHint": False,
+            "idempotentHint": True,
+        }
+        annotations = ast.literal_eval(assignments["COMMON_ANNOTATIONS"])
+        if annotations != expected_annotations:
+            errors.append("Web MCP common tool annotations are unsafe")
+
+        catalog = assignments["TOOL_CATALOG"]
+        if not isinstance(catalog, (ast.Tuple, ast.List)):
+            raise ValidationError("TOOL_CATALOG must be a static tuple or list")
+        found_names: list[str] = []
+        for entry in catalog.elts:
+            if not isinstance(entry, ast.Dict):
+                raise ValidationError("TOOL_CATALOG entries must be static dictionaries")
+            fields: dict[str, ast.expr] = {}
+            for key, value in zip(entry.keys, entry.values, strict=True):
+                if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                    raise ValidationError("TOOL_CATALOG keys must be string literals")
+                fields[key.value] = value
+            name_node = fields.get("name")
+            if not isinstance(name_node, ast.Constant) or not isinstance(name_node.value, str):
+                raise ValidationError("Each Web MCP tool must have one static name")
+            found_names.append(name_node.value)
+            annotation_node = fields.get("annotations")
+            if not isinstance(annotation_node, ast.Name) or annotation_node.id != "COMMON_ANNOTATIONS":
+                raise ValidationError(f"Web MCP tool {name_node.value!r} has unsafe annotations")
+            for call in (node for node in ast.walk(entry) if isinstance(node, ast.Call)):
+                function_name = call.func.id if isinstance(call.func, ast.Name) else None
+                safe_string_property = (
+                    function_name == "_string_property"
+                    and not call.args
+                    and len(call.keywords) == 1
+                    and call.keywords[0].arg == "maximum"
+                    and isinstance(call.keywords[0].value, ast.Constant)
+                    and not isinstance(call.keywords[0].value.value, bool)
+                    and isinstance(call.keywords[0].value.value, int)
+                )
+                safe_output_schema = (
+                    function_name == "_output_schema"
+                    and len(call.args) == 2
+                    and not call.keywords
+                    and isinstance(call.args[0], ast.Constant)
+                    and call.args[0].value == name_node.value
+                    and isinstance(call.args[1], ast.Dict)
+                    and not any(isinstance(node, ast.Call) for node in ast.walk(call.args[1]))
+                )
+                if not safe_string_property and not safe_output_schema:
+                    raise ValidationError("TOOL_CATALOG contains an unsafe call expression")
+        found_names_tuple = tuple(sorted(found_names))
+        if found_names_tuple != expected_names:
             errors.append(
                 "Web MCP phase-1 tool names must be the exact read-only catalog; "
-                f"found={module.TOOL_NAMES!r}"
+                f"found={found_names_tuple!r}"
             )
-        for tool in module.TOOL_CATALOG:
-            annotations = tool.get("annotations", {})
-            if annotations != {
-                "readOnlyHint": True,
-                "destructiveHint": False,
-                "openWorldHint": False,
-                "idempotentHint": True,
-            }:
-                errors.append(f"Web MCP tool {tool.get('name')!r} has unsafe annotations")
-        if re.fullmatch(r"[0-9a-f]{64}", module.tool_schema_sha256()) is None:
-            errors.append("Web MCP canonical tool-schema hash is invalid")
-        module.validate_limits(dict(module.DEFAULT_LIMITS))
-    except (AttributeError, TypeError, ValueError, ValidationError) as exc:
+        expected_tool_names_expression = ast.parse(
+            'tuple(sorted(tool["name"] for tool in TOOL_CATALOG))', mode="eval"
+        ).body
+        if ast.dump(assignments["TOOL_NAMES"], include_attributes=False) != ast.dump(
+            expected_tool_names_expression,
+            include_attributes=False,
+        ):
+            errors.append("Web MCP TOOL_NAMES must derive only from the static catalog")
+    except (TypeError, ValueError, ValidationError) as exc:
         errors.append(f"Web MCP schema fixture validation failed: {exc}")
 
 
