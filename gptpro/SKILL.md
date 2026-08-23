@@ -84,55 +84,9 @@ python3 <skill-dir>/scripts/gptpro.py status \
 python3 <skill-dir>/scripts/gptpro.py human-handoff \
   --handoff-dir .gptpro/handoffs/<package-id> \
   --reason manual-transport
-
-# Experimental mcp-read only: probe before activation; activate only after
-# schema-3 approval and attended workspace confirmation. Activation stays foreground.
-python3 <skill-dir>/scripts/gptpro.py mcp-probe \
-  --tunnel-client /absolute/path/to/tunnel-client \
-  --json
-# On first use, run mcp-profile-init as an attended user-owned setup step with
-# this same absolute path and binary_sha256 before activation.
-python3 <skill-dir>/scripts/gptpro.py mcp-profile-init \
-  --tunnel-profile gptpro-web \
-  --tunnel-id-ref env:GPTPRO_TUNNEL_ID \
-  --runtime-api-key-ref env:CONTROL_PLANE_API_KEY \
-  --tunnel-client /absolute/path/to/tunnel-client \
-  --confirm-tunnel-client-sha256 <binary_sha256-from-probe> \
-  --json
-python3 <skill-dir>/scripts/gptpro.py mcp-profile-check \
-  --tunnel-profile gptpro-web \
-  --json
-# Only after the check reports interpreter-path-only drift and the user approves
-# replacement of its exact tunnel_profile_sha256:
-python3 <skill-dir>/scripts/gptpro.py mcp-profile-refresh \
-  --tunnel-profile gptpro-web \
-  --tunnel-id-ref env:GPTPRO_TUNNEL_ID \
-  --runtime-api-key-ref env:CONTROL_PLANE_API_KEY \
-  --tunnel-client /absolute/path/to/tunnel-client \
-  --confirm-tunnel-client-sha256 <binary_sha256-from-probe> \
-  --confirm-current-profile-sha256 <tunnel_profile_sha256-from-check> \
-  --confirm-profile-replacement \
-  --json
-python3 <skill-dir>/scripts/gptpro.py mcp-activate \
-  --handoff-dir .gptpro/handoffs/<package-id> \
-  --tunnel-profile gptpro-web \
-  --runtime-api-key-ref env:CONTROL_PLANE_API_KEY \
-  --tunnel-client /absolute/path/to/tunnel-client \
-  --confirm-tunnel-client-sha256 <binary_sha256-from-probe> \
-  --confirm-workspace-binding \
-  --json
-# Dedicated diagnostic only, and only when mcp-probe reports the pinned private
-# request-correlation contract: add --diagnose-request-correlation before --json.
-# It does not deduplicate calls, enlarge disclosure, or authorize write tools.
-# From another terminal/controller while activation remains foreground:
-python3 <skill-dir>/scripts/gptpro.py mcp-status --handoff-dir .gptpro/handoffs/<package-id> --json
-python3 <skill-dir>/scripts/gptpro.py mcp-stop --handoff-dir .gptpro/handoffs/<package-id> --json
-# After stopping a failed or ambiguous connector attempt, verify the package-local
-# sanitized sequence and its stop-receipt binding; never retry the consumed package.
-python3 <skill-dir>/scripts/gptpro.py mcp-protocol-trace --handoff-dir .gptpro/handoffs/<package-id> --json
 ```
 
-Read `protocol_trace.terminal_evidence` as a conjunction: protocol footer observation, controller-observed runtime stop, and final artifact binding are separate facts. `runtime_stopped_protocol_eof_unobserved` is terminal stop evidence with an honestly open protocol prefix; it is not an active authorization and must not be rewritten as `closed: true`.
+For the experimental `mcp-read` probe, profile, activation, status, stop, recovery, and trace commands, use the single authoritative command sequence in [references/workflow.md](references/workflow.md). Do not reconstruct or shorten its attended approval boundaries.
 
 `init` defaults to repository-local Git metadata (`.git/info/exclude`) so it does not change tracked files. Use `--ignore-scope repository` only when the user explicitly wants `.gitignore` updated, or `--ignore-scope none` to create storage without Git exclusion. The prepare command prints the created handoff directory. Keep `.gptpro/` out of commits unless the user explicitly requests preserving a receipt artifact.
 

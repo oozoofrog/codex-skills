@@ -277,6 +277,25 @@ class WebMcpFoundationTests(unittest.TestCase):
 
     def test_tunnel_id_environment_is_not_forwarded_to_git_hooks(self) -> None:
         capture = self.root / "git-hook-environment.txt"
+        wrapper_log = self.root / "git-wrapper-environment.jsonl"
+        wrapper_dir = self.root / "git-wrapper-bin"
+        wrapper_dir.mkdir()
+        real_git = shutil.which("git")
+        self.assertIsNotNone(real_git)
+        wrapper = wrapper_dir / "git"
+        wrapper.write_text(
+            f"#!{sys.executable}\n"
+            "import json\n"
+            "import os\n"
+            "import sys\n"
+            "from pathlib import Path\n"
+            f"with Path({str(wrapper_log)!r}).open('a', encoding='utf-8') as handle:\n"
+            f"    handle.write(json.dumps({{'argv': sys.argv[1:], 'secret_env': '<absent>' if {TUNNEL_ENV_NAME!r} not in os.environ else '<present>'}}, sort_keys=True) + '\\n')\n"
+            f"os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n",
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o700)
+        self.env["PATH"] = str(wrapper_dir) + os.pathsep + self.env.get("PATH", "")
         hook = self.root / "fsmonitor-hook.py"
         hook.write_text(
             "#!/usr/bin/env python3\n"
@@ -289,19 +308,44 @@ class WebMcpFoundationTests(unittest.TestCase):
         hook.chmod(0o700)
         self.git("config", "core.fsmonitor", str(hook))
 
+        self.output_root = self.repo / ".gptpro" / "handoffs"
         self.prepare_mcp()
 
         self.assertTrue(capture.is_file(), "Git fsmonitor hook was not exercised")
         self.assertEqual("<absent>", capture.read_text(encoding="utf-8"))
+        wrapper_events = [
+            json.loads(line) for line in wrapper_log.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertTrue(
+            any("check-ignore" in event["argv"] for event in wrapper_events),
+            "git check-ignore was not exercised through the sanitized child environment",
+        )
+        self.assertTrue(wrapper_events)
+        self.assertEqual(
+            {"<absent>"},
+            {event["secret_env"] for event in wrapper_events},
+        )
 
-    def test_structure_validator_never_executes_candidate_schema(self) -> None:
+    def test_structure_validator_never_executes_or_approves_changed_candidate_schema(self) -> None:
         candidate = self.root / "candidate-skill"
         marker = self.root / "validator-side-effect.txt"
         shutil.copytree(SKILL_ROOT, candidate)
         schema = candidate / "runtime" / "gptpro_mcp" / "schema.py"
+        original = schema.read_text(encoding="utf-8")
+        output_helper = "def _output_schema(tool: str, result_schema: dict[str, Any]) -> dict[str, Any]:\n"
+        helper_line = (
+            output_helper
+            if output_helper in original
+            else "def _string_property(*, maximum: int) -> dict[str, Any]:\n"
+        )
+        self.assertIn(helper_line, original)
         schema.write_text(
-            schema.read_text(encoding="utf-8")
-            + f"\nopen({str(marker)!r}, 'w', encoding='utf-8').write('executed')\n",
+            original.replace(
+                helper_line,
+                helper_line
+                + f"    open({str(marker)!r}, 'w', encoding='utf-8').write('executed')\n",
+                1,
+            ),
             encoding="utf-8",
         )
 
@@ -314,7 +358,35 @@ class WebMcpFoundationTests(unittest.TestCase):
 
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertFalse(marker.exists())
-        self.assertIn("unsafe or unexpected top-level structure", result.stdout)
+        self.assertIn("does not match the trusted canonical source", result.stdout)
+
+    def test_structure_validator_rejects_misplaced_output_schema(self) -> None:
+        candidate = self.root / "candidate-skill"
+        shutil.copytree(SKILL_ROOT, candidate)
+        schema = candidate / "runtime" / "gptpro_mcp" / "schema.py"
+        source = schema.read_text(encoding="utf-8")
+        self.assertIn('"outputSchema":', source)
+        schema.write_text(
+            source.replace('"outputSchema":', '"misplacedOutputSchema":', 1),
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SKILL_ROOT / "scripts" / "validate_structure.py"),
+                "--skill-dir",
+                str(candidate),
+                "--json",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("does not match the trusted canonical source", result.stdout)
 
     def test_auto_remains_schema2_and_never_resolves_mcp_read(self) -> None:
         result = self.run_cli(
