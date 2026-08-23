@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import multiprocessing
 import os
 import signal
 import subprocess
@@ -28,6 +29,7 @@ from runtime.gptpro_mcp.live import (
     PARENT_SHUTDOWN_CONTRACT_ENV,
     RUNTIME_DIRECTORY_ENV,
     SESSION_CAPABILITY_ENV,
+    controller_lease_is_live,
     decode_session_capability,
     new_session_capability,
 )
@@ -133,6 +135,109 @@ class FakeTunnel:
             "status": "captured",
             "events": [],
         }
+
+
+def _pre_supervisor_signal_worker(
+    root_text: str,
+    handoff_text: str,
+    signum: int,
+    result_queue,
+) -> None:
+    """Exercise a real process signal immediately after durable begin."""
+
+    root = Path(root_text)
+    handoff = Path(handoff_text)
+    store = RuntimeStateStore(root)
+    events: list[str] = []
+    capability = new_session_capability()
+    session_hash = capability[2]
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    monotonic_now = time.monotonic()
+    candidate = {
+        "package_id": "pre-supervisor-signal",
+        "session_id_sha256": session_hash,
+        "handoff_dir": str(handoff.resolve()),
+        "manifest_sha256": digest(b"manifest"),
+        "approval_event_sha256": digest(b"approval"),
+        "archive_sha256": digest(b"archive"),
+        "file_set_sha256": digest(b"files"),
+        "tool_schema_sha256": digest(b"tools"),
+        "tunnel_profile_sha256": digest(b"tunnel-profile"),
+        "tunnel_client_binary_sha256": digest(b"tunnel-client-binary"),
+        "mcp_target_sha256": digest(b"mcp-target"),
+        "mcp_runtime_tree_sha256": digest(b"mcp-runtime-tree"),
+        "activated_at": now.isoformat().replace("+00:00", "Z"),
+        "expires_at": (now + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+        "idle_ttl_seconds": 900,
+        "activated_monotonic": monotonic_now,
+        "expires_monotonic": monotonic_now + 3600,
+        "last_activity_monotonic": monotonic_now,
+    }
+
+    if signum == signal.SIGINT:
+        signal.signal(signum, signal.default_int_handler)
+    else:
+        signal.signal(signum, signal.SIG_DFL)
+
+    def begin(recorded_session: str):
+        events.append("begin")
+        store.begin_activation(candidate)
+        os.kill(os.getpid(), signum)
+        events.append("begin_after_signal")
+        return {"audit_header_sha256": digest(b"header")}
+
+    def fail(recorded_session: str, error_code: str) -> None:
+        events.append(f"fail:{error_code}")
+        current = store.read()
+        if current is not None and current.get("status") in {"activating", "active"}:
+            store.transition(recorded_session, current["status"], "faulted")
+
+    hooks = ControllerHooks(
+        begin_activation=begin,
+        complete_activation=lambda *args: None,
+        fail_activation=fail,
+        revoke_authorization=lambda reason: None,
+        record_stopped=lambda *args: None,
+        record_activation_stopped=lambda *args: None,
+    )
+    tunnel = FakeTunnel(
+        events,
+        [
+            TunnelCheck(
+                ok=True,
+                code=None,
+                retryable=False,
+                profile_sha256=digest(b"profile"),
+                control_plane_poll_confirmed=True,
+            )
+        ],
+    )
+    error_type = "none"
+    error_code = "none"
+    try:
+        run_foreground(
+            tunnel_client=tunnel,
+            runtime_store=store,
+            tunnel_profile="gptpro-web",
+            child_environment={},
+            hooks=hooks,
+            capability_factory=lambda: capability,
+            runtime_files_factory=lambda *args, **kwargs: object(),
+        )
+    except BaseException as exc:
+        error_type = type(exc).__name__
+        error_code = str(getattr(exc, "code", "none"))
+    current = store.read()
+    result_queue.put(
+        {
+            "error_type": error_type,
+            "error_code": error_code,
+            "events": events,
+            "status": None if current is None else current.get("status"),
+            "lease_live": controller_lease_is_live(store, session_hash),
+            "socket_exists": control_socket_path(store.root).exists(),
+        }
+    )
 
 
 class ControllerTests(unittest.TestCase):
@@ -365,6 +470,260 @@ class ControllerTests(unittest.TestCase):
         self.assertNotIn("sk-", repr(result))
         self.assertEqual(self.store.root / "control.sock", control_socket_path(self.store.root))
         self.assertEqual([tunnel.process.pid, tunnel.process.pid], tunnel.health_pids)
+
+    def test_transient_active_revoke_failure_is_retried_before_exact_stop(self) -> None:
+        capability = new_session_capability()
+        session_hash = capability[2]
+        tunnel = FakeTunnel(self.events, [self.check(ok=True, poll=True)])
+        base_hooks = self.hooks()
+        attempts = 0
+
+        def revoke_once_then_succeed(reason: str):
+            nonlocal attempts
+            attempts += 1
+            self.events.append(f"revoke_attempt:{attempts}")
+            if attempts == 1:
+                raise ControllerError(
+                    "RUNTIME_STATE_WRITE_FAILED",
+                    "simulated transient active-denial failure",
+                )
+            return base_hooks.revoke_authorization(reason)
+
+        hooks = ControllerHooks(
+            begin_activation=base_hooks.begin_activation,
+            complete_activation=base_hooks.complete_activation,
+            fail_activation=base_hooks.fail_activation,
+            revoke_authorization=revoke_once_then_succeed,
+            record_stopped=base_hooks.record_stopped,
+            record_activation_stopped=base_hooks.record_activation_stopped,
+            on_active=lambda session: self.schedule_remote_stop(
+                session.control_socket, session.session_id_sha256
+            ),
+        )
+        result = run_foreground(
+            tunnel_client=tunnel,
+            runtime_store=self.store,
+            tunnel_profile="gptpro-web",
+            child_environment={},
+            hooks=hooks,
+            capability_factory=lambda: capability,
+        )
+        self.assert_remote_stops_accepted()
+
+        self.assertEqual(2, attempts)
+        self.assertTrue(result.authorization_denied)
+        self.assertTrue(result.exact_child_stop_recorded)
+        self.assertEqual("revoked", self.store.read()["status"])
+        self.assertLess(self.events.index("revoke_attempt:2"), self.events.index("terminate"))
+        self.assertLess(self.events.index("terminate"), self.events.index("record"))
+
+    def test_pre_supervisor_signals_cannot_orphan_durable_activating_state(self) -> None:
+        context = multiprocessing.get_context("fork")
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=signal.Signals(signum).name):
+                root = self.base / f"runtime-{signum}"
+                handoff = self.base / f"handoff-{signum}"
+                handoff.mkdir(mode=0o700)
+                result_queue = context.Queue()
+                process = context.Process(
+                    target=_pre_supervisor_signal_worker,
+                    args=(str(root), str(handoff), signum, result_queue),
+                )
+                process.start()
+                process.join(timeout=10.0)
+                self.assertFalse(process.is_alive())
+                self.assertEqual(0, process.exitcode)
+                observed = result_queue.get(timeout=2.0)
+                self.assertEqual("faulted", observed["status"])
+                self.assertFalse(observed["lease_live"])
+                self.assertFalse(observed["socket_exists"])
+                self.assertNotIn("spawn", observed["events"])
+                self.assertIn("begin_after_signal", observed["events"])
+                self.assertTrue(
+                    any(event.startswith("fail:") for event in observed["events"])
+                )
+                if signum == signal.SIGINT:
+                    self.assertEqual("KeyboardInterrupt", observed["error_type"])
+                else:
+                    self.assertEqual("ACTIVATION_CANCELLED", observed["error_code"])
+
+    def test_external_terminal_denial_before_factory_prevents_child_spawn(self) -> None:
+        capability = new_session_capability()
+        session_hash = capability[2]
+        tunnel = FakeTunnel(self.events, [self.check(ok=True, poll=True)])
+
+        def deny_during_pre_supervisor_setup(*args, **kwargs):
+            del args, kwargs
+            self.events.append("external_global_deny")
+            self.store.transition(session_hash, "activating", "faulted")
+            return object()
+
+        with self.assertRaises(ControllerError) as raised:
+            run_foreground(
+                tunnel_client=tunnel,
+                runtime_store=self.store,
+                tunnel_profile="gptpro-web",
+                child_environment={},
+                hooks=self.hooks(),
+                capability_factory=lambda: capability,
+                runtime_files_factory=deny_during_pre_supervisor_setup,
+            )
+
+        self.assertEqual("ACTIVATION_CANCELLED", raised.exception.code)
+        self.assertEqual("faulted", self.store.read()["status"])
+        self.assertFalse(controller_lease_is_live(self.store, session_hash))
+        self.assertIn("external_global_deny", self.events)
+        self.assertNotIn("spawn", self.events)
+        self.assertNotIn("health", self.events)
+        self.assertEqual([], self.activation_stops)
+        self.assertIsNone(tunnel.process.returncode)
+
+    def test_persistent_active_denial_failure_stops_child_but_retains_orphan_recovery(self) -> None:
+        capability = new_session_capability()
+        session_hash = capability[2]
+        tunnel = FakeTunnel(self.events, [self.check(ok=True, poll=True)])
+        base_hooks = self.hooks()
+        attempts = 0
+
+        def revoke_always_fails(reason: str):
+            nonlocal attempts
+            del reason
+            attempts += 1
+            self.events.append(f"revoke_attempt:{attempts}")
+            raise ControllerError(
+                "RUNTIME_STATE_WRITE_FAILED",
+                "simulated persistent active-denial failure",
+            )
+
+        hooks = ControllerHooks(
+            begin_activation=base_hooks.begin_activation,
+            complete_activation=base_hooks.complete_activation,
+            fail_activation=base_hooks.fail_activation,
+            revoke_authorization=revoke_always_fails,
+            record_stopped=base_hooks.record_stopped,
+            record_activation_stopped=base_hooks.record_activation_stopped,
+            on_active=lambda session: self.schedule_remote_stop(
+                session.control_socket, session.session_id_sha256
+            ),
+        )
+        with self.assertRaises(ControllerError) as raised:
+            run_foreground(
+                tunnel_client=tunnel,
+                runtime_store=self.store,
+                tunnel_profile="gptpro-web",
+                child_environment={},
+                hooks=hooks,
+                capability_factory=lambda: capability,
+            )
+        self.assert_remote_stops_accepted()
+
+        self.assertEqual("MCP_AUTHORIZATION_DENIAL_FAILED", raised.exception.code)
+        self.assertEqual(2, attempts)
+        self.assertEqual("active", self.store.read()["status"])
+        self.assertEqual(0, tunnel.process.returncode)
+        self.assertFalse(controller_lease_is_live(self.store, session_hash))
+        self.assertNotIn("record", self.events)
+        self.assertIn("terminate", self.events)
+
+    def test_sigint_during_revoke_is_deferred_through_denial_stop_and_record(self) -> None:
+        capability = new_session_capability()
+        session_hash = capability[2]
+        tunnel = FakeTunnel(self.events, [self.check(ok=True, poll=True)])
+        base_hooks = self.hooks()
+
+        def revoke_after_sigint(reason: str):
+            self.events.append("sigint_sent")
+            os.kill(os.getpid(), signal.SIGINT)
+            self.events.append("revoke_after_sigint")
+            return base_hooks.revoke_authorization(reason)
+
+        hooks = ControllerHooks(
+            begin_activation=base_hooks.begin_activation,
+            complete_activation=base_hooks.complete_activation,
+            fail_activation=base_hooks.fail_activation,
+            revoke_authorization=revoke_after_sigint,
+            record_stopped=base_hooks.record_stopped,
+            record_activation_stopped=base_hooks.record_activation_stopped,
+            on_active=lambda session: self.schedule_remote_stop(
+                session.control_socket, session.session_id_sha256
+            ),
+        )
+        with self.assertRaises(KeyboardInterrupt):
+            run_foreground(
+                tunnel_client=tunnel,
+                runtime_store=self.store,
+                tunnel_profile="gptpro-web",
+                child_environment={},
+                hooks=hooks,
+                capability_factory=lambda: capability,
+            )
+        self.assert_remote_stops_accepted()
+
+        self.assertEqual("revoked", self.store.read()["status"])
+        self.assertEqual([(session_hash, "remote_stop")], self.recorded)
+        self.assertEqual(0, tunnel.process.returncode)
+        self.assertFalse(controller_lease_is_live(self.store, session_hash))
+        self.assertLess(self.events.index("revoke_after_sigint"), self.events.index("terminate"))
+        self.assertLess(self.events.index("terminate"), self.events.index("record"))
+
+    def test_sigterm_at_record_entry_is_deferred_until_record_and_lease_release(self) -> None:
+        capability = new_session_capability()
+        session_hash = capability[2]
+        tunnel = FakeTunnel(self.events, [self.check(ok=True, poll=True)])
+        base_hooks = self.hooks()
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+        def prior_sigterm_handler(signum, frame) -> None:
+            del signum, frame
+            self.events.append("prior_sigterm_delivered")
+
+        def record_after_sigterm(
+            recorded_session: str,
+            reason: str,
+            child_returncode: int,
+            forced_exact_child: bool,
+        ):
+            self.events.append("record_enter")
+            os.kill(os.getpid(), signal.SIGTERM)
+            self.events.append("record_after_sigterm")
+            return base_hooks.record_stopped(
+                recorded_session,
+                reason,
+                child_returncode,
+                forced_exact_child,
+            )
+
+        signal.signal(signal.SIGTERM, prior_sigterm_handler)
+        try:
+            hooks = ControllerHooks(
+                begin_activation=base_hooks.begin_activation,
+                complete_activation=base_hooks.complete_activation,
+                fail_activation=base_hooks.fail_activation,
+                revoke_authorization=base_hooks.revoke_authorization,
+                record_stopped=record_after_sigterm,
+                record_activation_stopped=base_hooks.record_activation_stopped,
+                on_active=lambda session: self.schedule_remote_stop(
+                    session.control_socket, session.session_id_sha256
+                ),
+            )
+            result = run_foreground(
+                tunnel_client=tunnel,
+                runtime_store=self.store,
+                tunnel_profile="gptpro-web",
+                child_environment={},
+                hooks=hooks,
+                capability_factory=lambda: capability,
+            )
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm)
+        self.assert_remote_stops_accepted()
+
+        self.assertTrue(result.exact_child_stop_recorded)
+        self.assertFalse(controller_lease_is_live(self.store, session_hash))
+        self.assertLess(
+            self.events.index("record_after_sigterm"),
+            self.events.index("prior_sigterm_delivered"),
+        )
 
     def test_remote_stop_during_readiness_cancels_before_activation(self) -> None:
         capability = new_session_capability()

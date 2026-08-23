@@ -15,6 +15,7 @@ import re
 import signal
 import subprocess
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -32,7 +33,12 @@ from .request_correlation import (
     unavailable_request_correlation,
 )
 from .runtime_state import RuntimeStateError, RuntimeStateStore, ensure_private_directory
-from .supervisor import ForegroundSupervisor, SupervisorResult
+from .supervisor import (
+    ForegroundSupervisor,
+    SupervisorResult,
+    block_stop_signals,
+    restore_stop_signal_mask,
+)
 from .tunnel_client import (
     TunnelCheck,
     TunnelClientError,
@@ -277,7 +283,16 @@ def run_foreground(
             )
 
     controller_lease = ControllerLease(runtime_store, session_id_sha256).acquire()
+    initial_signal_mask: set[signal.Signals] | None = None
+    initial_signal_mask_acquired = False
+    initial_signal_mask_transferred = False
     try:
+        # Block lifecycle signals before the first durable activation write.
+        # ForegroundSupervisor takes ownership and restores this mask only after
+        # its handlers are installed.  If setup fails before that handoff, this
+        # frame restores the exact prior mask itself.
+        initial_signal_mask = block_stop_signals()
+        initial_signal_mask_acquired = True
         try:
             begin_result = hooks.begin_activation(session_id_sha256)
             begun = True
@@ -287,9 +302,10 @@ def run_foreground(
                     "AUDIT_CHAIN_INVALID", "Activation did not create a valid audit header."
                 )
             _require_runtime_status(runtime_store, session_id_sha256, {"activating"})
-        except Exception:
+        except BaseException:
             # A governance callback may have durably begun and then reported a
-            # package-side failure.  Detect that exact session so it is denied.
+            # package-side failure or delivered a pending interrupt.  Detect
+            # that exact session so it is denied before the mask is released.
             if not begun:
                 begun = _runtime_matches(
                     runtime_store, session_id_sha256, {"activating", "active"}
@@ -472,10 +488,47 @@ def run_foreground(
             nonlocal failure_code
             stop_reason = reason
             if activation_completed:
-                revoke_result = hooks.revoke_authorization(reason)
-                authorization = _require_runtime_status(
-                    runtime_store, session_id_sha256, {"revoked", "expired", "faulted"}
-                )
+                revoke_result: Any = None
+                deferred_interrupt: BaseException | None = None
+                last_denial_error: BaseException | None = None
+                authorization: Mapping[str, Any] | None = None
+                # The hook is package/global fail-closed and idempotent.  A
+                # transient callback failure must not let exact-child cleanup
+                # race ahead of authorization denial.  After each attempt,
+                # inspect the durable state because the callback may have
+                # committed denial before reporting an error.
+                for attempt in range(2):
+                    try:
+                        revoke_result = hooks.revoke_authorization(reason)
+                        last_denial_error = None
+                    except BaseException as exc:
+                        last_denial_error = exc
+                        if not isinstance(exc, Exception) and deferred_interrupt is None:
+                            deferred_interrupt = exc
+                    try:
+                        authorization = _require_runtime_status(
+                            runtime_store,
+                            session_id_sha256,
+                            {"revoked", "expired", "faulted"},
+                        )
+                    except Exception as exc:
+                        if last_denial_error is None:
+                            last_denial_error = exc
+                        if attempt == 0:
+                            continue
+                        failure_code = "MCP_AUTHORIZATION_DENIAL_FAILED"
+                        if deferred_interrupt is not None:
+                            raise deferred_interrupt
+                        raise ControllerError(
+                            failure_code,
+                            "The active authorization could not be durably denied before exact-child termination.",
+                        ) from last_denial_error
+                    break
+                if authorization is None:
+                    raise ControllerError(
+                        "MCP_AUTHORIZATION_DENIAL_FAILED",
+                        "The active authorization could not be durably denied before exact-child termination.",
+                    )
                 authorization_status = str(authorization["status"])
                 authorization_denied = authorization_status in {"revoked", "expired", "faulted"}
                 if isinstance(revoke_result, Mapping):
@@ -513,6 +566,8 @@ def run_foreground(
                         )
                     finally:
                         request_correlation_key = None
+                if deferred_interrupt is not None:
+                    raise deferred_interrupt
             else:
                 if (
                     failure_code == "MCP_ACTIVATION_FAILED"
@@ -530,14 +585,67 @@ def run_foreground(
                     failure_code = "ACTIVATION_CANCELLED"
                 mark_failed(failure_code)
 
+        def after_terminate(result: SupervisorResult) -> None:
+            """Commit exact-child evidence before signals and lease are released."""
+
+            nonlocal supervisor_result, exact_child_stop_recorded, stopped_recorded
+            supervisor_result = result
+            try:
+                if result.child_returncode is None:
+                    return
+                if activation_completed and authorization_denied:
+                    try:
+                        runtime_stop = hooks.record_stopped(
+                            session_id_sha256,
+                            stop_reason,
+                            result.child_returncode,
+                            result.forced_exact_child,
+                        )
+                        exact_child_stop_recorded = bool(
+                            isinstance(runtime_stop, Mapping)
+                            and runtime_stop.get("exact_child_stop_recorded") is True
+                        )
+                        stopped_recorded = bool(
+                            isinstance(runtime_stop, Mapping)
+                            and runtime_stop.get("runtime_stop_receipt_recorded") is True
+                        )
+                    except Exception as exc:
+                        raise _as_controller_error(
+                            exc, "MCP_STOP_RECORD_FAILED"
+                        ) from None
+                elif process_started and not activation_completed:
+                    record_failed_activation_stop()
+            finally:
+                # The lease stays live until the terminal evidence attempt is
+                # complete.  ForegroundSupervisor invokes this callback while
+                # stop signals remain blocked and before restoring handlers.
+                controller_lease.close()
+
+        @contextmanager
+        def process_start_guard():
+            """Linearize terminal global denial against exact child creation."""
+
+            with runtime_store.locked() as transaction:
+                current = transaction.read()
+                yield bool(
+                    isinstance(current, Mapping)
+                    and current.get("session_id_sha256") == session_id_sha256
+                    and current.get("status") == "activating"
+                )
+
         supervisor = supervisor_factory(
             process_factory=process_factory,
             control_socket=socket_path,
             session_id_sha256=session_id_sha256,
             revoke_before_terminate=revoke_before_terminate,
             after_start=after_start,
+            after_terminate=after_terminate,
+            process_start_guard=process_start_guard,
+            initial_signal_mask=initial_signal_mask,
+            owns_initial_signal_mask=True,
             stop_timeout=stop_timeout,
         )
+        initial_signal_mask_transferred = True
         supervisor_error: BaseException | None = None
         try:
             supervisor_result = supervisor.run()
@@ -553,28 +661,6 @@ def run_foreground(
                 "The exact Tunnel child termination could not be confirmed.",
             )
 
-        # The supervisor has now completed revoke-first cleanup and observed
-        # the exact child's terminal return code before package evidence is written.
-        if activation_completed and authorization_denied:
-            try:
-                runtime_stop = hooks.record_stopped(
-                    session_id_sha256,
-                    stop_reason,
-                    supervisor_result.child_returncode,
-                    supervisor_result.forced_exact_child,
-                )
-                exact_child_stop_recorded = bool(
-                    isinstance(runtime_stop, Mapping)
-                    and runtime_stop.get("exact_child_stop_recorded") is True
-                )
-                stopped_recorded = bool(
-                    isinstance(runtime_stop, Mapping)
-                    and runtime_stop.get("runtime_stop_receipt_recorded") is True
-                )
-            except Exception as exc:
-                raise _as_controller_error(exc, "MCP_STOP_RECORD_FAILED") from None
-        elif process_started and not activation_completed:
-            record_failed_activation_stop()
         if supervisor_error is not None:
             raise supervisor_error
     except BaseException as exc:
@@ -588,7 +674,11 @@ def run_foreground(
         raise _as_controller_error(exc, failure_code) from None
     finally:
         request_correlation_key = None
-        controller_lease.close()
+        try:
+            if initial_signal_mask_acquired and not initial_signal_mask_transferred:
+                restore_stop_signal_mask(initial_signal_mask)
+        finally:
+            controller_lease.close()
 
     if supervisor_result is None:
         raise ControllerError("MCP_ACTIVATION_FAILED", "The foreground supervisor did not run.")

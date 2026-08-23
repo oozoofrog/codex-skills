@@ -15,9 +15,10 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, ContextManager
 
 from .runtime_state import RuntimeStateError, ensure_private_directory
 
@@ -25,6 +26,40 @@ _MAX_CONTROL_FRAME_BYTES = 4096
 _STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 _CONTROL_SOCKET_PROOF_BYTES = 32
 _CONTROL_SOCKET_PROOF_TIMEOUT_SECONDS = 0.5
+
+
+def block_stop_signals() -> set[signal.Signals] | None:
+    """Block lifecycle stop signals and return the caller's prior mask."""
+
+    if threading.current_thread() is not threading.main_thread():
+        return None
+    pthread_sigmask = getattr(signal, "pthread_sigmask", None)
+    if pthread_sigmask is None:
+        raise RuntimeStateError(
+            "CONTROL_SIGNAL_UNSAFE",
+            "The foreground supervisor cannot safely order stop signals.",
+        )
+    try:
+        return pthread_sigmask(signal.SIG_BLOCK, _STOP_SIGNALS)
+    except (OSError, ValueError) as exc:
+        raise RuntimeStateError(
+            "CONTROL_SIGNAL_UNSAFE",
+            "The foreground supervisor could not block stop signals.",
+        ) from exc
+
+
+def restore_stop_signal_mask(previous: set[signal.Signals] | None) -> None:
+    """Restore a mask returned by :func:`block_stop_signals`."""
+
+    if previous is None:
+        return
+    try:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+    except (OSError, ValueError) as exc:
+        raise RuntimeStateError(
+            "CONTROL_SIGNAL_UNSAFE",
+            "The foreground supervisor could not restore its signal mask.",
+        ) from exc
 
 
 def _control_socket_metadata(path: Path) -> os.stat_result:
@@ -299,6 +334,10 @@ class ForegroundSupervisor:
         session_id_sha256: str,
         revoke_before_terminate: Callable[[str], None],
         after_start: Callable[[subprocess.Popen[bytes]], None] | None = None,
+        after_terminate: Callable[[SupervisorResult], None] | None = None,
+        process_start_guard: Callable[[], ContextManager[bool]] | None = None,
+        initial_signal_mask: set[signal.Signals] | None = None,
+        owns_initial_signal_mask: bool = False,
         stop_timeout: float = 5.0,
     ) -> None:
         self.process_factory = process_factory
@@ -306,6 +345,14 @@ class ForegroundSupervisor:
         self.session_id_sha256 = _session_hash(session_id_sha256)
         self.revoke_before_terminate = revoke_before_terminate
         self.after_start = after_start
+        self.after_terminate = after_terminate
+        self.process_start_guard = process_start_guard
+        if not isinstance(owns_initial_signal_mask, bool):
+            raise RuntimeStateError(
+                "CONTROL_SIGNAL_UNSAFE", "The initial signal-mask ownership is invalid."
+            )
+        self._initial_signal_mask = initial_signal_mask
+        self._owns_initial_signal_mask = owns_initial_signal_mask
         self.stop_timeout = stop_timeout
         self._stop = threading.Event()
         # A signal handler can run on the main thread while child creation is
@@ -372,6 +419,12 @@ class ForegroundSupervisor:
             try:
                 self._bind_control_socket()
                 previous_handlers = self._install_signal_handlers()
+                # The controller blocks lifecycle signals before the durable
+                # activation begin.  Release that inherited gate only after
+                # handlers are installed, so a pending SIGTERM/SIGHUP becomes
+                # an attended stop and a pending SIGINT enters cleanup instead
+                # of orphaning an ``activating`` authorization.
+                self._release_initial_signal_mask()
                 listener_thread = threading.Thread(
                     target=self._serve_control,
                     name=f"gptpro-control-{self.session_id_sha256[:12]}",
@@ -435,37 +488,72 @@ class ForegroundSupervisor:
                     )
                 raise
             finally:
-                revoke_attempted = True
+                cleanup_mask: set[signal.Signals] | None = None
+                cleanup_mask_error: BaseException | None = None
                 try:
-                    self.revoke_before_terminate(self._reason)
-                    self._revoked = True
-                finally:
+                    cleanup_mask = self._block_stop_signals()
+                except BaseException as exc:
+                    # Signal shielding is required for the ordering guarantee,
+                    # but a platform failure must not skip best-effort denial
+                    # and exact-child cleanup.  Report it after cleanup unless
+                    # a more specific cleanup failure is already propagating.
+                    cleanup_mask_error = exc
+                try:
+                    revoke_attempted = True
                     try:
-                        process = self._process
-                        if process is not None and process.poll() is None:
-                            process.terminate()
-                            terminated = True
-                            try:
-                                process.wait(timeout=self.stop_timeout)
-                            except subprocess.TimeoutExpired:
-                                # This is still the exact Popen object created above; no PID lookup or broad kill.
-                                process.kill()
-                                forced = True
-                                process.wait(timeout=self.stop_timeout)
+                        self.revoke_before_terminate(self._reason)
+                        self._revoked = True
                     finally:
                         try:
-                            self._close_control_socket()
+                            process = self._process
+                            if process is not None and process.poll() is None:
+                                process.terminate()
+                                terminated = True
+                                try:
+                                    process.wait(timeout=self.stop_timeout)
+                                except subprocess.TimeoutExpired:
+                                    # This is still the exact Popen object created above; no PID lookup or broad kill.
+                                    process.kill()
+                                    forced = True
+                                    process.wait(timeout=self.stop_timeout)
                         finally:
                             try:
-                                if listener_started and listener_thread is not None:
-                                    listener_thread.join(timeout=1.0)
-                                    if listener_thread.is_alive():
-                                        raise RuntimeStateError(
-                                            "CONTROL_LISTENER_FAILED",
-                                            "The local control listener did not stop cleanly.",
-                                        )
+                                self._close_control_socket()
                             finally:
-                                self._restore_signal_handlers(previous_handlers)
+                                try:
+                                    if listener_started and listener_thread is not None:
+                                        listener_thread.join(timeout=1.0)
+                                        if listener_thread.is_alive():
+                                            raise RuntimeStateError(
+                                                "CONTROL_LISTENER_FAILED",
+                                                "The local control listener did not stop cleanly.",
+                                            )
+                                finally:
+                                    self._terminal_result = SupervisorResult(
+                                        child_returncode=(
+                                            None
+                                            if self._process is None
+                                            else self._process.returncode
+                                        ),
+                                        revoke_attempted=revoke_attempted,
+                                        revoked=self._revoked,
+                                        terminated=terminated,
+                                        forced_exact_child=forced,
+                                    )
+                                    try:
+                                        if self.after_terminate is not None:
+                                            self.after_terminate(self._terminal_result)
+                                    finally:
+                                        try:
+                                            self._restore_signal_handlers(previous_handlers)
+                                        finally:
+                                            try:
+                                                self._restore_signal_mask(cleanup_mask)
+                                            finally:
+                                                self._release_initial_signal_mask()
+                finally:
+                    if cleanup_mask_error is not None and sys.exception() is None:
+                        raise cleanup_mask_error
         finally:
             self._terminal_result = SupervisorResult(
                 child_returncode=None if self._process is None else self._process.returncode,
@@ -495,11 +583,27 @@ class ForegroundSupervisor:
                 # been stored.  The factory contract must launch the child
                 # with ``previous_mask`` so this temporary gate mask is not
                 # inherited by the Tunnel process.
+                guard = (
+                    nullcontext(True)
+                    if self.process_start_guard is None
+                    else self.process_start_guard()
+                )
                 try:
-                    self._process = self.process_factory(previous_mask)
+                    # The controller-provided guard holds the cross-process
+                    # runtime-state lock from this final authorization check
+                    # through exact Popen ownership.  Therefore an external
+                    # terminal denial either commits first and prevents spawn,
+                    # or commits only after the exact child is already owned.
+                    with guard as permitted:
+                        if permitted is not True:
+                            self._reason = "authorization_denied"
+                            self._failure_code = "ACTIVATION_CANCELLED"
+                            self._stop.set()
+                            return False
+                        self._process = self.process_factory(previous_mask)
                 except BaseException as exc:
                     raw_code = getattr(exc, "code", None)
-                    self._failure_code = (
+                    self._failure_code = self._failure_code or (
                         raw_code
                         if isinstance(raw_code, str)
                         and re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", raw_code) is not None
@@ -581,33 +685,27 @@ class ForegroundSupervisor:
 
     @staticmethod
     def _block_stop_signals() -> set[signal.Signals] | None:
-        if threading.current_thread() is not threading.main_thread():
-            return None
-        pthread_sigmask = getattr(signal, "pthread_sigmask", None)
-        if pthread_sigmask is None:
-            raise RuntimeStateError(
-                "CONTROL_SIGNAL_UNSAFE",
-                "The foreground supervisor cannot safely order stop signals.",
-            )
-        try:
-            return pthread_sigmask(signal.SIG_BLOCK, _STOP_SIGNALS)
-        except (OSError, ValueError) as exc:
-            raise RuntimeStateError(
-                "CONTROL_SIGNAL_UNSAFE",
-                "The foreground supervisor could not block stop signals.",
-            ) from exc
+        return block_stop_signals()
 
     @staticmethod
     def _restore_signal_mask(previous: set[signal.Signals] | None) -> None:
-        if previous is None:
+        restore_stop_signal_mask(previous)
+
+    def _release_initial_signal_mask(self) -> None:
+        if not self._owns_initial_signal_mask:
             return
         try:
-            signal.pthread_sigmask(signal.SIG_SETMASK, previous)
-        except (OSError, ValueError) as exc:
-            raise RuntimeStateError(
-                "CONTROL_SIGNAL_UNSAFE",
-                "The foreground supervisor could not restore its signal mask.",
-            ) from exc
+            restore_stop_signal_mask(self._initial_signal_mask)
+        except RuntimeStateError:
+            # A platform restoration failure may be retryable during cleanup.
+            raise
+        except BaseException:
+            # pthread_sigmask completed before Python delivered the pending
+            # signal (for example SIGINT -> KeyboardInterrupt).
+            self._owns_initial_signal_mask = False
+            raise
+        else:
+            self._owns_initial_signal_mask = False
 
     def _restore_signal_handlers(self, previous: dict[int, object]) -> None:
         pending = list(previous.items())

@@ -7322,6 +7322,35 @@ def command_mcp_stop(args: argparse.Namespace) -> int:
             stopped = True
             stop_evidence = "machine_global_activation"
             break
+        if not global_binding_matches:
+            # A concurrent activation may archive this exact terminal session
+            # after its controller releases the lease but before this observer
+            # sees the final active pointer.  Read only the validated archive
+            # derived from the already trusted session hash; never treat a
+            # different active package as evidence for this stop.
+            try:
+                archived_global = store.read_archived_session(session_hash)
+            except RuntimeStateError:
+                archived_global = None
+            archived_binding_matches = (
+                isinstance(archived_global, dict)
+                and archived_global.get("session_id_sha256") == session_hash
+                and archived_global.get("handoff_dir") == trusted_handoff
+            )
+            if (
+                archived_binding_matches
+                and archived_global.get("runtime_child_stopped") is True
+            ):
+                stopped = True
+                stop_evidence = "machine_global_archive"
+                break
+            if (
+                archived_binding_matches
+                and archived_global.get("activation_child_stopped") is True
+            ):
+                stopped = True
+                stop_evidence = "machine_global_activation_archive"
+                break
         if not controller_lease_is_live(store, session_hash):
             controller_lease_released = True
             break

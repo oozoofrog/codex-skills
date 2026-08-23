@@ -595,6 +595,74 @@ class RuntimeStateStore:
         with self.locked() as transaction:
             return transaction.read()
 
+    def read_archived_session(self, session_id_sha256: str) -> dict[str, Any] | None:
+        """Read one exact terminal session without trusting the active pointer.
+
+        A new activation archives the previous terminal state before replacing
+        ``active.json``.  Stop/status observers that are already bound to that
+        previous session may therefore need its immutable archived evidence.
+        The archive basename is derived only from a validated SHA-256 identity,
+        and every directory/file property is revalidated under the runtime lock.
+        """
+
+        if not isinstance(session_id_sha256, str) or _SHA256.fullmatch(
+            session_id_sha256
+        ) is None:
+            raise RuntimeStateError(
+                "RUNTIME_STATE_UNSAFE", "The archived runtime session hash is invalid."
+            )
+        with self.locked():
+            try:
+                directory = _directory_fd(self.sessions_path)
+            except RuntimeStateError as exc:
+                try:
+                    self.sessions_path.lstat()
+                except FileNotFoundError:
+                    return None
+                raise exc
+            descriptor = -1
+            try:
+                directory_metadata = os.fstat(directory)
+                if (
+                    not stat.S_ISDIR(directory_metadata.st_mode)
+                    or directory_metadata.st_uid != os.getuid()
+                    or stat.S_IMODE(directory_metadata.st_mode) != 0o700
+                ):
+                    raise RuntimeStateError(
+                        "RUNTIME_STATE_UNSAFE",
+                        "The archived runtime directory must be owner-only.",
+                    )
+                try:
+                    descriptor = os.open(
+                        f"{session_id_sha256}.json",
+                        os.O_RDONLY
+                        | getattr(os, "O_NOFOLLOW")
+                        | getattr(os, "O_CLOEXEC", 0),
+                        dir_fd=directory,
+                    )
+                except FileNotFoundError:
+                    return None
+                except OSError as exc:
+                    raise RuntimeStateError(
+                        "RUNTIME_STATE_UNSAFE",
+                        "Unable to open archived runtime state safely.",
+                    ) from exc
+                _validate_private_fd(descriptor)
+                value = self._read_state_descriptor(descriptor)
+                if (
+                    value.get("session_id_sha256") != session_id_sha256
+                    or value.get("status") not in TERMINAL_STATUSES
+                ):
+                    raise RuntimeStateError(
+                        "RUNTIME_STATE_UNSAFE",
+                        "Archived runtime state does not match its terminal session identity.",
+                    )
+                return value
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                os.close(directory)
+
     def begin_activation(self, candidate: Mapping[str, Any]) -> dict[str, Any]:
         value = dict(candidate)
         value["schema_version"] = RUNTIME_SCHEMA_VERSION
@@ -734,20 +802,24 @@ class RuntimeStateStore:
             del exists
             raise exc
         try:
-            metadata = os.fstat(descriptor)
-            if metadata.st_size > 1024 * 1024:
-                raise RuntimeStateError("RUNTIME_STATE_UNSAFE", "Runtime state is unexpectedly large.")
-            with os.fdopen(descriptor, "rb", closefd=False) as handle:
-                payload = handle.read()
-            try:
-                value = json.loads(payload.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError, RecursionError) as exc:
-                raise RuntimeStateError("RUNTIME_STATE_UNSAFE", "Runtime state is not valid JSON.") from exc
-            if not isinstance(value, dict):
-                raise RuntimeStateError("RUNTIME_STATE_UNSAFE", "Runtime state must be an object.")
-            return validate_active_state(value)
+            return self._read_state_descriptor(descriptor)
         finally:
             os.close(descriptor)
+
+    @staticmethod
+    def _read_state_descriptor(descriptor: int) -> dict[str, Any]:
+        metadata = os.fstat(descriptor)
+        if metadata.st_size > 1024 * 1024:
+            raise RuntimeStateError("RUNTIME_STATE_UNSAFE", "Runtime state is unexpectedly large.")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            payload = handle.read()
+        try:
+            value = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+            raise RuntimeStateError("RUNTIME_STATE_UNSAFE", "Runtime state is not valid JSON.") from exc
+        if not isinstance(value, dict):
+            raise RuntimeStateError("RUNTIME_STATE_UNSAFE", "Runtime state must be an object.")
+        return validate_active_state(value)
 
     def _write_unlocked(self, state: Mapping[str, Any]) -> None:
         data = _pretty_json(state)

@@ -2793,6 +2793,62 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertEqual("stopped", payload["exact_tunnel_process_status"])
         self.assertFalse(payload["foreground_controller_stop_required"])
 
+    def test_stop_reads_exact_archived_evidence_after_concurrent_new_activation(self) -> None:
+        old_handoff = self.prepare_and_approve()
+        new_handoff = self.prepare_and_approve()
+        new_verified, new_preflight = self.preflight(new_handoff)
+        store, old_session, _ = self.activate(old_handoff)
+        new_session = hashlib.sha256(b"concurrent-new-activation").hexdigest()
+
+        # Force the stop onto machine-global evidence only.  The cooperative
+        # stop then commits the exact old child evidence and a concurrent new
+        # activation archives it before command_mcp_stop begins polling.
+        old_receipt = old_handoff / "receipt.json"
+        old_receipt.write_bytes(b"{damaged-old-receipt\n")
+        old_receipt.chmod(0o600)
+
+        def stop_then_replace_active(*args, **kwargs):
+            del args, kwargs
+            stopped = self.module.record_mcp_runtime_stopped_fail_closed(
+                old_handoff,
+                store,
+                session_id_sha256=old_session,
+                reason="remote_stop",
+                child_returncode=-15,
+                forced_exact_child=False,
+            )
+            self.assertTrue(stopped["exact_child_stop_recorded"])
+            self.module.begin_mcp_activation(
+                new_verified,
+                store,
+                session_id_sha256=new_session,
+                preflight=new_preflight,
+            )
+            return True
+
+        with mock.patch.object(
+            self.module,
+            "request_cooperative_stop",
+            side_effect=stop_then_replace_active,
+        ):
+            payload = json.loads(
+                self.run_cli(
+                    "mcp-stop",
+                    "--handoff-dir",
+                    str(old_handoff),
+                    "--json",
+                ).stdout
+            )
+
+        self.assertTrue(payload["tunnel_runtime_stopped"])
+        self.assertEqual("machine_global_archive", payload["stop_evidence"])
+        self.assertEqual("stopped", payload["exact_tunnel_process_status"])
+        self.assertFalse(payload["manual_process_review_required"])
+        self.assertEqual(new_session, store.read()["session_id_sha256"])
+        archived = store.read_archived_session(old_session)
+        self.assertIsNotNone(archived)
+        self.assertTrue(archived["runtime_child_stopped"])
+
     def test_emergency_deny_rejects_wrong_handoff_or_session_binding(self) -> None:
         handoff = self.prepare_and_approve()
         store, session_hash, _ = self.activate(handoff)

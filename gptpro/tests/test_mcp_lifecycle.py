@@ -197,6 +197,51 @@ class RuntimeStateTests(unittest.TestCase):
         )
         self.assertEqual(next_session, activated["session_id_sha256"])
 
+    def test_archived_session_read_is_exact_owner_only_and_fail_closed(self) -> None:
+        store = RuntimeStateStore(self.root)
+        store.begin_activation(state_candidate(self.session, self.handoff))
+        stopped_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        store.transition(
+            self.session,
+            "activating",
+            "faulted",
+            updates={
+                "activation_child_stopped": True,
+                "activation_child_returncode": -15,
+                "activation_forced_exact_child": False,
+                "activation_stop_reason": "controller_exit",
+                "activation_stop_receipt_recorded": False,
+                "activation_stop_recorded_at": stopped_at,
+            },
+        )
+        next_session = digest(b"next-archive-reader")
+        store.begin_activation(
+            state_candidate(next_session, self.handoff, package_id="package-two")
+        )
+
+        archived = store.read_archived_session(self.session)
+        self.assertIsNotNone(archived)
+        self.assertEqual(self.session, archived["session_id_sha256"])
+        self.assertTrue(archived["activation_child_stopped"])
+        self.assertIsNone(store.read_archived_session(digest(b"not-archived")))
+        with self.assertRaises(RuntimeStateError) as invalid:
+            store.read_archived_session("../active")
+        self.assertEqual("RUNTIME_STATE_UNSAFE", invalid.exception.code)
+
+        archive_path = store.sessions_path / f"{self.session}.json"
+        archive_path.chmod(0o644)
+        with self.assertRaises(RuntimeStateError) as permissive:
+            store.read_archived_session(self.session)
+        self.assertEqual("RUNTIME_STATE_UNSAFE", permissive.exception.code)
+        archive_path.chmod(0o600)
+
+        hardlink = self.base / "archive-hardlink.json"
+        os.link(archive_path, hardlink)
+        with self.assertRaises(RuntimeStateError) as linked:
+            store.read_archived_session(self.session)
+        self.assertEqual("RUNTIME_STATE_UNSAFE", linked.exception.code)
+        hardlink.unlink()
+
     def test_terminal_session_without_stop_evidence_requires_a_safe_released_lease(self) -> None:
         for condition in ("missing", "unsafe"):
             with self.subTest(condition=condition):
