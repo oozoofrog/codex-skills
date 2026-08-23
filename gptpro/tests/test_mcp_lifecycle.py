@@ -31,6 +31,8 @@ from runtime.gptpro_mcp.audit import AuditBinding, AuditLog
 from runtime.gptpro_mcp.authorization import AuthorizationGrant
 from runtime.gptpro_mcp.clock import Clock
 from runtime.gptpro_mcp.errors import ToolError
+from runtime.gptpro_mcp import supervisor as supervisor_module
+from runtime.gptpro_mcp.live import ControllerLease
 from runtime.gptpro_mcp.runtime_state import (
     RuntimeStateError,
     RuntimeStateStore,
@@ -48,6 +50,7 @@ from runtime.gptpro_mcp.tunnel_client import (
     TunnelRuntimeFiles,
     inspect_tunnel_profile,
     loopback_url_from_file,
+    popen_with_signal_mask,
     prepare_runtime_files,
     runtime_key_environment,
     tunnel_binding_from_reference,
@@ -143,11 +146,121 @@ class RuntimeStateTests(unittest.TestCase):
         with self.assertRaises(RuntimeStateError):
             store.transition(self.session, "revoked", "active")
 
+        stopped_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        with store.locked() as transaction:
+            current = transaction.read()
+            current.update(
+                {
+                    "runtime_child_stopped": True,
+                    "runtime_child_returncode": 0,
+                    "runtime_forced_exact_child": False,
+                    "runtime_stop_reason": "user_requested",
+                    "runtime_stop_receipt_recorded": False,
+                    "runtime_stop_recorded_at": stopped_at,
+                    "revision": current["revision"] + 1,
+                    "updated_at": stopped_at,
+                }
+            )
+            transaction.write(current)
         next_session = digest(b"next")
         store.begin_activation(state_candidate(next_session, self.handoff, package_id="package-two"))
         archived = self.root / "sessions" / f"{self.session}.json"
         self.assertTrue(archived.is_file())
         self.assertEqual(0o600, archived.stat().st_mode & 0o777)
+
+    def test_terminal_session_cannot_be_archived_while_controller_lease_is_live(self) -> None:
+        store = RuntimeStateStore(self.root)
+        store.begin_activation(state_candidate(self.session, self.handoff))
+        store.transition(self.session, "activating", "revoked")
+        next_session = digest(b"next-after-cleanup")
+
+        with ControllerLease(store, self.session):
+            with self.assertRaises(RuntimeStateError) as raised:
+                store.begin_activation(
+                    state_candidate(
+                        next_session,
+                        self.handoff,
+                        package_id="package-two",
+                    )
+                )
+
+        self.assertEqual("SESSION_CONFLICT", raised.exception.code)
+        self.assertEqual(self.session, store.read()["session_id_sha256"])
+        with self.assertRaises(RuntimeStateError) as orphaned:
+            store.begin_activation(
+                state_candidate(next_session, self.handoff, package_id="package-two")
+            )
+        self.assertEqual("CONTROLLER_ORPHANED", orphaned.exception.code)
+        store.confirm_orphan_tunnel_termination(self.session)
+        activated = store.begin_activation(
+            state_candidate(next_session, self.handoff, package_id="package-two")
+        )
+        self.assertEqual(next_session, activated["session_id_sha256"])
+
+    def test_terminal_session_without_stop_evidence_requires_a_safe_released_lease(self) -> None:
+        for condition in ("missing", "unsafe"):
+            with self.subTest(condition=condition):
+                root = self.base / condition
+                store = RuntimeStateStore(root)
+                session = digest(f"terminal-{condition}".encode())
+                store.begin_activation(state_candidate(session, self.handoff))
+                store.transition(session, "activating", "revoked")
+                if condition == "unsafe":
+                    lease = ControllerLease(store, session).acquire()
+                    lease.close()
+                    lease.path.chmod(0o644)
+
+                with self.assertRaises(RuntimeStateError) as raised:
+                    store.begin_activation(
+                        state_candidate(
+                            digest(f"next-{condition}".encode()),
+                            self.handoff,
+                            package_id="package-two",
+                        )
+                    )
+
+                self.assertEqual("CONTROLLER_ORPHANED", raised.exception.code)
+                self.assertEqual(session, store.read()["session_id_sha256"])
+
+    def test_manual_orphan_confirmation_is_additive_and_not_exact_child_evidence(self) -> None:
+        store = RuntimeStateStore(self.root)
+        store.begin_activation(state_candidate(self.session, self.handoff))
+        store.transition(self.session, "activating", "revoked")
+        lease = ControllerLease(store, self.session).acquire()
+        lease.close()
+
+        confirmed = store.confirm_orphan_tunnel_termination(self.session)
+        self.assertTrue(confirmed["orphan_tunnel_termination_manually_confirmed"])
+        self.assertNotIn("runtime_child_stopped", confirmed)
+        self.assertNotIn("activation_child_stopped", confirmed)
+        self.assertEqual(
+            confirmed,
+            store.confirm_orphan_tunnel_termination(self.session),
+        )
+
+    def test_positive_exact_child_stop_allows_archive_when_terminal_lease_is_missing(self) -> None:
+        store = RuntimeStateStore(self.root)
+        store.begin_activation(state_candidate(self.session, self.handoff))
+        stopped_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        store.transition(
+            self.session,
+            "activating",
+            "faulted",
+            updates={
+                "activation_child_stopped": True,
+                "activation_child_returncode": -15,
+                "activation_forced_exact_child": False,
+                "activation_stop_reason": "controller_exit",
+                "activation_stop_receipt_recorded": False,
+                "activation_stop_recorded_at": stopped_at,
+            },
+        )
+
+        next_session = digest(b"next-after-positive-stop")
+        activated = store.begin_activation(
+            state_candidate(next_session, self.handoff, package_id="package-two")
+        )
+        self.assertEqual(next_session, activated["session_id_sha256"])
 
     def test_runtime_root_rejects_preexisting_intermediate_symlink(self) -> None:
         target = self.base / "target"
@@ -230,6 +343,65 @@ class RuntimeStateTests(unittest.TestCase):
         candidate["runtime_api_key"] = "sk-" + "x" * 32
         with self.assertRaises(RuntimeStateError) as raised:
             store.begin_activation(candidate)
+        self.assertEqual("RUNTIME_STATE_UNSAFE", raised.exception.code)
+
+    def test_exact_child_stop_evidence_is_complete_typed_and_survives_recovery(self) -> None:
+        store = RuntimeStateStore(self.root)
+        store.begin_activation(state_candidate(self.session, self.handoff))
+        stopped_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        faulted = store.transition(
+            self.session,
+            "activating",
+            "faulted",
+            updates={
+                "activation_child_stopped": True,
+                "activation_child_returncode": -15,
+                "activation_forced_exact_child": False,
+                "activation_stop_reason": "controller_exit",
+                "activation_stop_receipt_recorded": False,
+                "activation_stop_recorded_at": stopped_at,
+            },
+        )
+        self.assertTrue(faulted["activation_child_stopped"])
+        recovered = store.transition(self.session, "faulted", "revoked")
+        self.assertTrue(recovered["activation_child_stopped"])
+
+        invalid_cases = {
+            "incomplete": {"activation_child_stopped": True},
+            "boolean-returncode": {
+                "activation_child_stopped": True,
+                "activation_child_returncode": True,
+                "activation_forced_exact_child": False,
+                "activation_stop_reason": "controller_exit",
+                "activation_stop_receipt_recorded": False,
+                "activation_stop_recorded_at": stopped_at,
+            },
+            "orphan-receipt-hash": {
+                "activation_stop_receipt_event_sha256": digest(b"orphan")
+            },
+        }
+        for label, evidence in invalid_cases.items():
+            with self.subTest(label=label):
+                candidate = state_candidate(digest(label.encode()), self.handoff)
+                candidate["status"] = "faulted"
+                candidate.update(evidence)
+                with self.assertRaises(RuntimeStateError) as raised:
+                    validate_active_state(candidate)
+                self.assertEqual("RUNTIME_STATE_UNSAFE", raised.exception.code)
+
+        nonterminal = state_candidate(digest(b"nonterminal-stop"), self.handoff)
+        nonterminal.update(
+            {
+                "runtime_child_stopped": True,
+                "runtime_child_returncode": 0,
+                "runtime_forced_exact_child": False,
+                "runtime_stop_reason": "user_requested",
+                "runtime_stop_receipt_recorded": False,
+                "runtime_stop_recorded_at": stopped_at,
+            }
+        )
+        with self.assertRaises(RuntimeStateError) as raised:
+            validate_active_state(nonterminal)
         self.assertEqual("RUNTIME_STATE_UNSAFE", raised.exception.code)
 
     def test_pathological_json_is_reported_as_bounded_runtime_state_error(self) -> None:
@@ -2187,9 +2359,12 @@ class SupervisorTests(unittest.TestCase):
         self.temp.cleanup()
 
     @staticmethod
-    def sleeping_child() -> subprocess.Popen[bytes]:
-        return subprocess.Popen(
+    def sleeping_child(
+        child_signal_mask: set[signal.Signals] | None = None,
+    ) -> subprocess.Popen[bytes]:
+        return popen_with_signal_mask(
             [sys.executable, "-c", "import time; time.sleep(60)"],
+            child_signal_mask=child_signal_mask,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -2199,8 +2374,10 @@ class SupervisorTests(unittest.TestCase):
         socket_path = self.root / "control.sock"
         observed: dict[str, object] = {}
 
-        def factory() -> subprocess.Popen[bytes]:
-            process = self.sleeping_child()
+        def factory(
+            child_signal_mask: set[signal.Signals] | None,
+        ) -> subprocess.Popen[bytes]:
+            process = self.sleeping_child(child_signal_mask)
             observed["process"] = process
             return process
 
@@ -2263,8 +2440,10 @@ class SupervisorTests(unittest.TestCase):
     def test_after_start_failure_still_revokes_then_terminates_owned_child(self) -> None:
         observed: dict[str, object] = {}
 
-        def factory() -> subprocess.Popen[bytes]:
-            process = self.sleeping_child()
+        def factory(
+            child_signal_mask: set[signal.Signals] | None,
+        ) -> subprocess.Popen[bytes]:
+            process = self.sleeping_child(child_signal_mask)
             observed["process"] = process
             return process
 
@@ -2291,6 +2470,741 @@ class SupervisorTests(unittest.TestCase):
         assert isinstance(process, subprocess.Popen)
         self.assertTrue(observed["revoked_while_alive"])
         self.assertIsNotNone(process.returncode)
+        self.assertIsNotNone(supervisor.terminal_result)
+        self.assertEqual(process.returncode, supervisor.terminal_result.child_returncode)
+
+    def test_child_inherits_pre_gate_signal_mask_not_supervisor_gate_mask(self) -> None:
+        pthread_sigmask = getattr(signal, "pthread_sigmask", None)
+        if pthread_sigmask is None:
+            self.skipTest("pthread_sigmask is required by the macOS phase-1 supervisor")
+        stop_signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+        previous_mask = pthread_sigmask(signal.SIG_UNBLOCK, stop_signals)
+        observed_mask: list[int] = []
+        supervisor: ForegroundSupervisor
+
+        def factory(
+            child_signal_mask: set[signal.Signals] | None,
+        ) -> subprocess.Popen[bytes]:
+            return popen_with_signal_mask(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import json,signal;"
+                        "print(json.dumps(sorted(int(value) for value in "
+                        "signal.pthread_sigmask(signal.SIG_BLOCK, []))), flush=True);"
+                        "signal.pause()"
+                    ),
+                ],
+                child_signal_mask=child_signal_mask,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+
+        def after_start(process: subprocess.Popen[bytes]) -> None:
+            assert process.stdout is not None
+            try:
+                observed_mask.extend(json.loads(process.stdout.readline().decode("utf-8")))
+            finally:
+                process.stdout.close()
+            supervisor.request_local_stop()
+
+        supervisor = ForegroundSupervisor(
+            process_factory=factory,
+            after_start=after_start,
+            control_socket=self.root / "child-signal-mask.sock",
+            session_id_sha256=self.session,
+            revoke_before_terminate=lambda reason: None,
+            stop_timeout=1.0,
+        )
+        try:
+            result = supervisor.run()
+        finally:
+            pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+        self.assertNotIn(int(signal.SIGTERM), observed_mask)
+        self.assertNotIn(int(signal.SIGHUP), observed_mask)
+        self.assertNotIn(int(signal.SIGINT), observed_mask)
+        self.assertTrue(result.terminated)
+        self.assertFalse(result.forced_exact_child)
+        self.assertEqual(-int(signal.SIGTERM), result.child_returncode)
+
+    def test_child_exit_reason_is_sealed_before_pending_stop_signal(self) -> None:
+        class ExitedProcess:
+            pid = 4242
+            returncode = 0
+
+            def __init__(self) -> None:
+                self.sent = False
+
+            def poll(self) -> int:
+                if not self.sent:
+                    self.sent = True
+                    os.kill(os.getpid(), signal.SIGTERM)
+                return 0
+
+        reasons: list[str] = []
+        process = ExitedProcess()
+        supervisor = ForegroundSupervisor(
+            process_factory=lambda child_signal_mask: process,  # type: ignore[arg-type,return-value]
+            control_socket=self.root / "child-exit-reason.sock",
+            session_id_sha256=self.session,
+            revoke_before_terminate=reasons.append,
+        )
+
+        result = supervisor.run()
+
+        self.assertEqual(["child_exit"], reasons)
+        self.assertEqual(0, result.child_returncode)
+        self.assertFalse(result.terminated)
+        self.assertFalse(result.forced_exact_child)
+
+    def test_partial_signal_handler_install_is_rolled_back(self) -> None:
+        original_signal = signal.signal
+        original_term = signal.getsignal(signal.SIGTERM)
+        original_hup = signal.getsignal(signal.SIGHUP)
+        calls = 0
+
+        def fail_second_install(signum: int, handler: object) -> object:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("simulated signal install failure")
+            return original_signal(signum, handler)
+
+        supervisor = ForegroundSupervisor(
+            process_factory=self.sleeping_child,
+            control_socket=self.root / "ps.sock",
+            session_id_sha256=self.session,
+            revoke_before_terminate=lambda reason: None,
+        )
+        with (
+            mock.patch(
+                "runtime.gptpro_mcp.supervisor.signal.signal",
+                side_effect=fail_second_install,
+            ),
+            self.assertRaises(RuntimeStateError) as raised,
+        ):
+            supervisor.run()
+
+        self.assertEqual("CONTROL_SIGNAL_UNSAFE", raised.exception.code)
+        self.assertEqual("CONTROL_SIGNAL_UNSAFE", supervisor.failure_code)
+        self.assertEqual(original_term, signal.getsignal(signal.SIGTERM))
+        self.assertEqual(original_hup, signal.getsignal(signal.SIGHUP))
+        self.assertFalse((self.root / "ps.sock").exists())
+
+    def test_transient_signal_restore_failure_recovers_all_handlers(self) -> None:
+        original_signal = signal.signal
+        original_term = signal.getsignal(signal.SIGTERM)
+        original_hup = signal.getsignal(signal.SIGHUP)
+        calls = 0
+        supervisor: ForegroundSupervisor
+
+        def fail_first_restore(signum: int, handler: object) -> object:
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise OSError("simulated first restore failure")
+            return original_signal(signum, handler)
+
+        supervisor = ForegroundSupervisor(
+            process_factory=self.sleeping_child,
+            after_start=lambda process: supervisor.request_local_stop(),
+            control_socket=self.root / "sr.sock",
+            session_id_sha256=self.session,
+            revoke_before_terminate=lambda reason: None,
+        )
+        with mock.patch(
+            "runtime.gptpro_mcp.supervisor.signal.signal",
+            side_effect=fail_first_restore,
+        ):
+            result = supervisor.run()
+
+        self.assertIsNotNone(result.child_returncode)
+        self.assertIsNone(supervisor.failure_code)
+        self.assertEqual(original_term, signal.getsignal(signal.SIGTERM))
+        self.assertEqual(original_hup, signal.getsignal(signal.SIGHUP))
+        self.assertFalse((self.root / "sr.sock").exists())
+
+    def test_persistent_signal_restore_failure_reports_stable_error_after_other_handler(self) -> None:
+        original_signal = signal.signal
+        original_term = signal.getsignal(signal.SIGTERM)
+        original_hup = signal.getsignal(signal.SIGHUP)
+        calls = 0
+        supervisor: ForegroundSupervisor
+
+        def fail_term_restores(signum: int, handler: object) -> object:
+            nonlocal calls
+            calls += 1
+            if calls >= 3 and signum == signal.SIGTERM:
+                raise OSError("simulated persistent restore failure")
+            return original_signal(signum, handler)
+
+        supervisor = ForegroundSupervisor(
+            process_factory=self.sleeping_child,
+            after_start=lambda process: supervisor.request_local_stop(),
+            control_socket=self.root / "spr.sock",
+            session_id_sha256=self.session,
+            revoke_before_terminate=lambda reason: None,
+        )
+        try:
+            with (
+                mock.patch(
+                    "runtime.gptpro_mcp.supervisor.signal.signal",
+                    side_effect=fail_term_restores,
+                ),
+                self.assertRaises(RuntimeStateError) as raised,
+            ):
+                supervisor.run()
+        finally:
+            original_signal(signal.SIGTERM, original_term)
+            original_signal(signal.SIGHUP, original_hup)
+
+        self.assertEqual("CONTROL_SIGNAL_UNSAFE", raised.exception.code)
+        self.assertEqual("CONTROL_SIGNAL_UNSAFE", supervisor.failure_code)
+        self.assertFalse((self.root / "spr.sock").exists())
+
+    def test_listener_is_registered_before_early_factory_failure_without_hidden_thread_error(self) -> None:
+        background_errors: list[object] = []
+        previous_hook = threading.excepthook
+
+        def capture_thread_error(arguments: object) -> None:
+            background_errors.append(arguments)
+
+        threading.excepthook = capture_thread_error
+        try:
+            for index in range(25):
+                socket_path = self.root / f"early-{index}.sock"
+                supervisor: ForegroundSupervisor
+
+                def fail_factory(
+                    child_signal_mask: set[signal.Signals] | None,
+                ) -> subprocess.Popen[bytes]:
+                    del child_signal_mask
+                    self.assertTrue(supervisor._listener_ready.is_set())
+                    self.assertIsNone(supervisor._listener_error)
+                    raise RuntimeError("factory failed")
+
+                supervisor = ForegroundSupervisor(
+                    process_factory=fail_factory,
+                    control_socket=socket_path,
+                    session_id_sha256=self.session,
+                    revoke_before_terminate=lambda reason: None,
+                )
+                with self.assertRaisesRegex(RuntimeError, "factory failed"):
+                    supervisor.run()
+                self.assertFalse(socket_path.exists())
+                self.assertIsNotNone(supervisor.terminal_result)
+                self.assertIsNone(supervisor.terminal_result.child_returncode)
+        finally:
+            threading.excepthook = previous_hook
+        self.assertEqual([], background_errors)
+
+    def test_listener_thread_start_failure_cleans_owned_socket_and_records_terminal_result(self) -> None:
+        socket_path = self.root / "thread-start-failure.sock"
+        revoked: list[str] = []
+        supervisor = ForegroundSupervisor(
+            process_factory=self.sleeping_child,
+            control_socket=socket_path,
+            session_id_sha256=self.session,
+            revoke_before_terminate=revoked.append,
+        )
+        with (
+            mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("no thread")),
+            self.assertRaisesRegex(RuntimeError, "no thread"),
+        ):
+            supervisor.run()
+        self.assertFalse(socket_path.exists())
+        self.assertEqual(["controller_exit"], revoked)
+        self.assertEqual("CONTROL_LISTENER_FAILED", supervisor.failure_code)
+        self.assertIsNotNone(supervisor.terminal_result)
+        self.assertTrue(supervisor.terminal_result.revoke_attempted)
+        self.assertIsNone(supervisor.terminal_result.child_returncode)
+
+    def test_preexisting_control_socket_is_never_unlinked_by_conflicting_supervisor(self) -> None:
+        socket_path = self.root / "owned-by-other.sock"
+        owner = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        owner.bind(str(socket_path))
+        os.chmod(socket_path, 0o600)
+        owner.listen(1)
+        inode = socket_path.stat().st_ino
+        try:
+            supervisor = ForegroundSupervisor(
+                process_factory=self.sleeping_child,
+                control_socket=socket_path,
+                session_id_sha256=self.session,
+                revoke_before_terminate=lambda reason: None,
+            )
+            with self.assertRaises(RuntimeStateError) as raised:
+                supervisor.run()
+            self.assertEqual("SESSION_CONFLICT", raised.exception.code)
+            self.assertEqual("SESSION_CONFLICT", supervisor.failure_code)
+            self.assertTrue(socket_path.exists())
+            self.assertEqual(inode, socket_path.stat().st_ino)
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                client.connect(str(socket_path))
+                accepted, _ = owner.accept()
+                accepted.close()
+            finally:
+                client.close()
+        finally:
+            owner.close()
+            socket_path.unlink(missing_ok=True)
+
+    def test_cleanup_preserves_same_uid_replacement_control_socket(self) -> None:
+        socket_path = self.root / "replace.sock"
+        replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        replacement_inode: int | None = None
+        supervisor: ForegroundSupervisor
+
+        def replace_before_termination(reason: str) -> None:
+            nonlocal replacement_inode
+            self.assertEqual("user_requested", reason)
+            socket_path.unlink()
+            replacement.bind(str(socket_path))
+            os.chmod(socket_path, 0o600)
+            replacement.listen(1)
+            replacement_inode = socket_path.stat().st_ino
+
+        supervisor = ForegroundSupervisor(
+            process_factory=self.sleeping_child,
+            after_start=lambda process: supervisor.request_local_stop(),
+            control_socket=socket_path,
+            session_id_sha256=self.session,
+            revoke_before_terminate=replace_before_termination,
+        )
+        try:
+            result = supervisor.run()
+            self.assertIsNotNone(result.child_returncode)
+            self.assertTrue(socket_path.exists())
+            self.assertEqual(replacement_inode, socket_path.stat().st_ino)
+        finally:
+            replacement.close()
+            socket_path.unlink(missing_ok=True)
+
+    def test_post_bind_failure_preserves_same_uid_replacement_control_socket(self) -> None:
+        socket_path = self.root / "bind-replace.sock"
+        replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        original_chmod = os.chmod
+        replacement_inode: int | None = None
+
+        def replace_then_fail(path, mode, *args, **kwargs) -> None:
+            nonlocal replacement_inode
+            if Path(path) != socket_path:
+                original_chmod(path, mode, *args, **kwargs)
+                return
+            socket_path.unlink()
+            replacement.bind(str(socket_path))
+            original_chmod(socket_path, 0o600)
+            replacement.listen(1)
+            replacement_inode = socket_path.stat().st_ino
+            raise OSError("simulated post-bind setup failure")
+
+        supervisor = ForegroundSupervisor(
+            process_factory=self.sleeping_child,
+            control_socket=socket_path,
+            session_id_sha256=self.session,
+            revoke_before_terminate=lambda reason: None,
+        )
+        try:
+            with (
+                mock.patch(
+                    "runtime.gptpro_mcp.supervisor.os.chmod",
+                    side_effect=replace_then_fail,
+                ),
+                self.assertRaisesRegex(OSError, "post-bind setup failure"),
+            ):
+                supervisor.run()
+            self.assertTrue(socket_path.exists())
+            self.assertEqual(replacement_inode, socket_path.stat().st_ino)
+        finally:
+            replacement.close()
+            socket_path.unlink(missing_ok=True)
+
+    def test_chmod_failure_removes_the_exact_socket_just_bound(self) -> None:
+        socket_path = self.root / "chmod-fail.sock"
+        supervisor = ForegroundSupervisor(
+            process_factory=self.sleeping_child,
+            control_socket=socket_path,
+            session_id_sha256=self.session,
+            revoke_before_terminate=lambda reason: None,
+        )
+        with (
+            mock.patch(
+                "runtime.gptpro_mcp.supervisor.os.chmod",
+                side_effect=OSError("simulated chmod failure"),
+            ),
+            self.assertRaisesRegex(OSError, "chmod failure"),
+        ):
+            supervisor.run()
+        self.assertEqual("CONTROL_LISTENER_FAILED", supervisor.failure_code)
+        self.assertFalse(socket_path.exists())
+
+    def test_cleanup_does_not_unlink_a_replacement_after_identity_check(self) -> None:
+        socket_path = self.root / "cleanup-race.sock"
+        original = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        original.bind(str(socket_path))
+        os.chmod(socket_path, 0o600)
+        expected = socket_path.stat()
+        real_rename = os.rename
+        replacement_inode: int | None = None
+        raced = False
+
+        def replace_before_claim(src, dst, *args, **kwargs) -> None:
+            nonlocal raced, replacement_inode
+            if not raced:
+                raced = True
+                socket_path.unlink()
+                replacement.bind(str(socket_path))
+                os.chmod(socket_path, 0o600)
+                replacement_inode = socket_path.stat().st_ino
+            real_rename(src, dst, *args, **kwargs)
+
+        try:
+            with mock.patch.object(
+                supervisor_module.os,
+                "rename",
+                side_effect=replace_before_claim,
+            ):
+                removed = supervisor_module._claim_and_unlink_control_socket_if_matches(
+                    socket_path,
+                    (expected.st_dev, expected.st_ino),
+                )
+            self.assertFalse(removed)
+            self.assertTrue(socket_path.exists())
+            self.assertEqual(replacement_inode, socket_path.stat().st_ino)
+        finally:
+            original.close()
+            replacement.close()
+            socket_path.unlink(missing_ok=True)
+
+    def test_persistent_post_bind_metadata_failure_leaves_recoverable_stale_socket(self) -> None:
+        socket_path = self.root / "meta-fail.sock"
+        real_metadata = supervisor_module._control_socket_metadata
+        calls = 0
+
+        def fail_post_bind_reads(path: Path):
+            nonlocal calls
+            calls += 1
+            if calls >= 2:
+                raise OSError("simulated post-bind metadata failure")
+            return real_metadata(path)
+
+        supervisor = ForegroundSupervisor(
+            process_factory=self.sleeping_child,
+            control_socket=socket_path,
+            session_id_sha256=self.session,
+            revoke_before_terminate=lambda reason: None,
+        )
+        with (
+            mock.patch.object(
+                supervisor_module,
+                "_control_socket_metadata",
+                side_effect=fail_post_bind_reads,
+            ),
+            self.assertRaises(RuntimeStateError) as raised,
+        ):
+            supervisor.run()
+
+        self.assertEqual("CONTROL_LISTENER_FAILED", raised.exception.code)
+        self.assertEqual("CONTROL_LISTENER_FAILED", supervisor.failure_code)
+        self.assertTrue(socket_path.exists())
+        self.assertEqual(0, stat.S_IMODE(socket_path.stat().st_mode) & 0o022)
+        self.assertFalse(request_cooperative_stop(socket_path, self.session))
+        socket_path.unlink()
+
+    def test_slow_control_frame_is_closed_before_supervisor_returns(self) -> None:
+        socket_path = self.root / "slow-frame.sock"
+        slow_client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        supervisor: ForegroundSupervisor
+
+        def after_start(process: subprocess.Popen[bytes]) -> None:
+            del process
+            slow_client.connect(str(socket_path))
+            slow_client.sendall(b"{")
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                with supervisor._connections_lock:
+                    if supervisor._connections:
+                        break
+                time.sleep(0.01)
+            with supervisor._connections_lock:
+                self.assertEqual(1, len(supervisor._connections))
+            supervisor.request_local_stop()
+
+        supervisor = ForegroundSupervisor(
+            process_factory=self.sleeping_child,
+            after_start=after_start,
+            control_socket=socket_path,
+            session_id_sha256=self.session,
+            revoke_before_terminate=lambda reason: None,
+        )
+        try:
+            result = supervisor.run()
+        finally:
+            slow_client.close()
+        self.assertIsNotNone(result.child_returncode)
+        self.assertFalse(socket_path.exists())
+        self.assertFalse(
+            any(
+                thread.name == f"gptpro-control-{self.session[:12]}" and thread.is_alive()
+                for thread in threading.enumerate()
+            )
+        )
+
+    def test_control_client_uses_one_total_response_deadline(self) -> None:
+        socket_path = self.root / "slow-response.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(socket_path))
+        os.chmod(socket_path, 0o600)
+        listener.listen(1)
+
+        def drip_response() -> None:
+            connection, _ = listener.accept()
+            try:
+                connection.recv(4096)
+                for chunk in (b"{", b'"accepted"', b":", b"true", b"}\n"):
+                    connection.sendall(chunk)
+                    time.sleep(0.08)
+            except OSError:
+                pass
+            finally:
+                connection.close()
+
+        server_thread = threading.Thread(target=drip_response)
+        server_thread.start()
+        started = time.monotonic()
+        try:
+            self.assertFalse(
+                request_cooperative_stop(socket_path, self.session, timeout=0.15)
+            )
+        finally:
+            server_thread.join(timeout=1.0)
+            listener.close()
+            socket_path.unlink(missing_ok=True)
+        self.assertLess(time.monotonic() - started, 0.75)
+        self.assertFalse(server_thread.is_alive())
+
+    def test_selector_construction_failure_is_foreground_and_leaves_no_thread_error(self) -> None:
+        socket_path = self.root / "selector-failure.sock"
+        background_errors: list[object] = []
+        previous_hook = threading.excepthook
+        threading.excepthook = lambda arguments: background_errors.append(arguments)
+        try:
+            supervisor = ForegroundSupervisor(
+                process_factory=self.sleeping_child,
+                control_socket=socket_path,
+                session_id_sha256=self.session,
+                revoke_before_terminate=lambda reason: None,
+            )
+            with (
+                mock.patch(
+                    "runtime.gptpro_mcp.supervisor.selectors.DefaultSelector",
+                    side_effect=OSError("selector unavailable"),
+                ),
+                self.assertRaises(RuntimeStateError) as raised,
+            ):
+                supervisor.run()
+            self.assertEqual("CONTROL_LISTENER_FAILED", raised.exception.code)
+            self.assertEqual("CONTROL_LISTENER_FAILED", supervisor.failure_code)
+            self.assertIsNotNone(supervisor.terminal_result)
+            self.assertFalse(socket_path.exists())
+        finally:
+            threading.excepthook = previous_hook
+        self.assertEqual([], background_errors)
+
+    def test_remote_stop_accepted_before_spawn_never_creates_child(self) -> None:
+        socket_path = self.root / "remote-pre-spawn.sock"
+        spawned: list[bool] = []
+        stop_results: list[bool] = []
+        supervisor = ForegroundSupervisor(
+            process_factory=lambda child_signal_mask: spawned.append(True),  # type: ignore[arg-type,return-value]
+            control_socket=socket_path,
+            session_id_sha256=self.session,
+            revoke_before_terminate=lambda reason: None,
+        )
+        original_start = supervisor._start_process_if_running
+
+        def accept_remote_then_start() -> bool:
+            thread = threading.Thread(
+                target=lambda: stop_results.append(
+                    request_cooperative_stop(socket_path, self.session)
+                )
+            )
+            thread.start()
+            thread.join(timeout=2.0)
+            self.assertFalse(thread.is_alive())
+            return original_start()
+
+        supervisor._start_process_if_running = accept_remote_then_start  # type: ignore[method-assign]
+        with self.assertRaises(RuntimeStateError) as raised:
+            supervisor.run()
+
+        self.assertEqual("ACTIVATION_CANCELLED", raised.exception.code)
+        self.assertEqual("ACTIVATION_CANCELLED", supervisor.failure_code)
+        self.assertEqual([True], stop_results)
+        self.assertEqual([], spawned)
+        self.assertFalse(socket_path.exists())
+
+    def test_remote_stop_during_factory_is_acknowledged_after_child_ownership(self) -> None:
+        socket_path = self.root / "remote-in-factory.sock"
+        events: list[str] = []
+        stop_results: list[bool] = []
+        stop_thread: threading.Thread | None = None
+        supervisor: ForegroundSupervisor
+
+        def factory(
+            child_signal_mask: set[signal.Signals] | None,
+        ) -> subprocess.Popen[bytes]:
+            nonlocal stop_thread
+            events.append("factory_enter")
+
+            def stop() -> None:
+                stop_results.append(
+                    request_cooperative_stop(socket_path, self.session)
+                )
+                events.append("ack_returned")
+
+            stop_thread = threading.Thread(target=stop)
+            stop_thread.start()
+            self.assertTrue(supervisor._remote_stop_pending.wait(timeout=2.0))
+            self.assertTrue(stop_thread.is_alive())
+            process = self.sleeping_child(child_signal_mask)
+            events.append("child_owned")
+            return process
+
+        supervisor = ForegroundSupervisor(
+            process_factory=factory,
+            after_start=lambda process: events.append("after_start"),
+            control_socket=socket_path,
+            session_id_sha256=self.session,
+            revoke_before_terminate=lambda reason: events.append(f"revoke:{reason}"),
+            stop_timeout=1.0,
+        )
+
+        with self.assertRaises(RuntimeStateError) as raised:
+            supervisor.run()
+        assert stop_thread is not None
+        stop_thread.join(timeout=2.0)
+
+        self.assertEqual("ACTIVATION_CANCELLED", raised.exception.code)
+        self.assertFalse(stop_thread.is_alive())
+        self.assertEqual([True], stop_results)
+        self.assertNotIn("after_start", events)
+        self.assertLess(events.index("child_owned"), events.index("ack_returned"))
+        self.assertIn("revoke:remote_stop", events)
+
+    def test_pending_remote_stop_prevents_activation_publication(self) -> None:
+        published: list[bool] = []
+        supervisor = ForegroundSupervisor(
+            process_factory=self.sleeping_child,
+            control_socket=self.root / "pending-publish.sock",
+            session_id_sha256=self.session,
+            revoke_before_terminate=lambda reason: None,
+        )
+        supervisor._remote_stop_pending.set()
+
+        def finish_stop() -> None:
+            time.sleep(0.01)
+            supervisor.request_local_stop("remote_stop")
+
+        thread = threading.Thread(target=finish_stop)
+        thread.start()
+        result = supervisor.publish_activation_if_running(
+            lambda: published.append(True)
+        )
+        thread.join(timeout=1.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(result)
+        self.assertEqual([], published)
+        self.assertTrue(supervisor.stop_requested)
+
+    def test_signal_accepted_before_spawn_never_creates_child(self) -> None:
+        socket_path = self.root / "signal-pre-spawn.sock"
+        spawned: list[bool] = []
+        supervisor = ForegroundSupervisor(
+            process_factory=lambda child_signal_mask: spawned.append(True),  # type: ignore[arg-type,return-value]
+            control_socket=socket_path,
+            session_id_sha256=self.session,
+            revoke_before_terminate=lambda reason: None,
+        )
+        original_start = supervisor._start_process_if_running
+
+        def signal_then_start() -> bool:
+            os.kill(os.getpid(), signal.SIGTERM)
+            return original_start()
+
+        supervisor._start_process_if_running = signal_then_start  # type: ignore[method-assign]
+        with self.assertRaises(RuntimeStateError) as raised:
+            supervisor.run()
+
+        self.assertEqual("ACTIVATION_CANCELLED", raised.exception.code)
+        self.assertEqual("ACTIVATION_CANCELLED", supervisor.failure_code)
+        self.assertEqual([], spawned)
+        self.assertFalse(socket_path.exists())
+
+    def test_signal_sent_inside_factory_is_accepted_only_after_child_is_owned(self) -> None:
+        socket_path = self.root / "signal-in-factory.sock"
+        events: list[str] = []
+        reasons: list[str] = []
+        supervisor: ForegroundSupervisor
+
+        def factory(
+            child_signal_mask: set[signal.Signals] | None,
+        ) -> subprocess.Popen[bytes]:
+            events.append("factory_enter")
+            os.kill(os.getpid(), signal.SIGTERM)
+            self.assertFalse(supervisor.stop_requested)
+            events.append("signal_pending")
+            process = self.sleeping_child(child_signal_mask)
+            events.append("child_owned")
+            return process
+
+        supervisor = ForegroundSupervisor(
+            process_factory=factory,
+            after_start=lambda process: events.append("after_start"),
+            control_socket=socket_path,
+            session_id_sha256=self.session,
+            revoke_before_terminate=reasons.append,
+            stop_timeout=1.0,
+        )
+
+        with self.assertRaises(RuntimeStateError) as raised:
+            supervisor.run()
+
+        self.assertEqual("ACTIVATION_CANCELLED", raised.exception.code)
+        self.assertEqual(["factory_enter", "signal_pending", "child_owned"], events)
+        self.assertEqual(["signal_term"], reasons)
+        self.assertIsNotNone(supervisor.terminal_result)
+        self.assertTrue(supervisor.terminal_result.terminated)
+        self.assertFalse(supervisor.terminal_result.forced_exact_child)
+
+    def test_keyboard_interrupt_preserves_an_already_sealed_stop_reason(self) -> None:
+        reasons: list[str] = []
+        supervisor: ForegroundSupervisor
+
+        def interrupt_after_remote_stop(process: subprocess.Popen[bytes]) -> None:
+            del process
+            supervisor.request_local_stop("remote_stop")
+            raise KeyboardInterrupt
+
+        supervisor = ForegroundSupervisor(
+            process_factory=self.sleeping_child,
+            after_start=interrupt_after_remote_stop,
+            control_socket=self.root / "ki.sock",
+            session_id_sha256=self.session,
+            revoke_before_terminate=reasons.append,
+        )
+
+        with self.assertRaises(KeyboardInterrupt):
+            supervisor.run()
+
+        self.assertEqual(["remote_stop"], reasons)
+        self.assertNotEqual("ACTIVATION_CANCELLED", supervisor.failure_code)
 
     def test_stubborn_child_failure_still_removes_socket_and_restores_signals(self) -> None:
         class StubbornProcess:
@@ -2316,7 +3230,7 @@ class SupervisorTests(unittest.TestCase):
         socket_path = self.root / "stubborn.sock"
         supervisor: ForegroundSupervisor
         supervisor = ForegroundSupervisor(
-            process_factory=StubbornProcess,
+            process_factory=lambda child_signal_mask: StubbornProcess(),
             after_start=lambda process: supervisor.request_local_stop(),
             control_socket=socket_path,
             session_id_sha256=self.session,

@@ -14,6 +14,7 @@ import selectors
 import secrets
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -77,6 +78,72 @@ _REQUEST_CORRELATION_TUNNEL_VERSION = re.compile(
     r"0\.0\.12\+881c9a8fed7cccbe6607cd419863bbca506b8215 "
     r"\(git sha: 881c9a8fed7cccbe6607cd419863bbca506b8215\)"
 )
+
+_SIGNAL_MASK_LAUNCHER = """\
+import os
+import signal
+import sys
+
+mask = {
+    signal.Signals(int(value))
+    for value in sys.argv[1].split(",")
+    if value
+}
+signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+os.execve(sys.argv[2], sys.argv[2:], os.environ)
+"""
+
+
+def popen_with_signal_mask(
+    argv: list[str],
+    *,
+    child_signal_mask: set[signal.Signals] | None,
+    **kwargs: Any,
+) -> subprocess.Popen[bytes]:
+    """Spawn ``argv`` with an exact inherited mask without a threaded preexec hook.
+
+    The foreground supervisor blocks stop signals across its spawn commit.  A
+    tiny isolated Python launcher restores the caller's prior mask and then
+    replaces itself with the already-pinned Tunnel binary, preserving the same
+    PID/Popen ownership.  This avoids ``preexec_fn`` in the multi-threaded
+    controller and makes a parent stop accepted only after child creation.
+    """
+
+    if (
+        not argv
+        or not isinstance(argv[0], str)
+        or not argv[0]
+        or not all(isinstance(value, str) for value in argv)
+    ):
+        raise ValueError("spawn argv must contain a non-empty executable and string arguments")
+    if child_signal_mask is None:
+        return subprocess.Popen(argv, **kwargs)
+    pthread_sigmask = getattr(signal, "pthread_sigmask", None)
+    if pthread_sigmask is None:
+        raise TunnelClientError(
+            "CONTROL_SIGNAL_UNSAFE",
+            "The Tunnel child signal mask cannot be restored safely.",
+        )
+    del pthread_sigmask
+    try:
+        encoded_mask = ",".join(
+            str(int(value)) for value in sorted(child_signal_mask, key=int)
+        )
+    except (TypeError, ValueError) as exc:
+        raise TunnelClientError(
+            "CONTROL_SIGNAL_UNSAFE",
+            "The Tunnel child signal mask is invalid.",
+        ) from exc
+    command = [
+        sys.executable,
+        "-I",
+        "-S",
+        "-c",
+        _SIGNAL_MASK_LAUNCHER,
+        encoded_mask,
+        *argv,
+    ]
+    return subprocess.Popen(command, **kwargs)
 _OFFICIAL_PROFILE_PATHS = frozenset(
     {
         ("config_version",),
@@ -2200,6 +2267,7 @@ class TunnelClient:
         cwd: Path | None = None,
         expected_mcp_target_sha256: str | None = None,
         request_correlation_diagnostic: bool = False,
+        child_signal_mask: set[signal.Signals] | None = None,
     ) -> subprocess.Popen[bytes]:
         self._assert_binary_unchanged()
         name = _profile(profile)
@@ -2292,8 +2360,9 @@ class TunnelClient:
                 "The MCP interpreter or entrypoint changed before foreground execution.",
             )
         try:
-            return subprocess.Popen(
+            return popen_with_signal_mask(
                 argv,
+                child_signal_mask=child_signal_mask,
                 shell=False,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,

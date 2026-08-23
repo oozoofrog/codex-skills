@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import uuid
 from contextlib import redirect_stderr, redirect_stdout
@@ -181,6 +182,37 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.run_cli(*approval)
         return handoff
 
+    def test_active_announcement_fails_immediately_on_stdout_backpressure(self) -> None:
+        read_descriptor, write_descriptor = os.pipe()
+        os.set_blocking(write_descriptor, False)
+        try:
+            while True:
+                try:
+                    os.write(write_descriptor, b"x" * 4096)
+                except BlockingIOError:
+                    break
+            os.set_blocking(write_descriptor, True)
+            writer = os.fdopen(write_descriptor, "w", encoding="utf-8", closefd=False)
+            started = self.module.time.monotonic()
+            try:
+                with (
+                    mock.patch.object(self.module.sys, "stdout", writer),
+                    self.assertRaises(self.module.ControllerError) as raised,
+                ):
+                    self.module._write_atomic_json_line_nonblocking(
+                        {"event": "mcp_active"},
+                        error_code="ACTIVE_ANNOUNCEMENT_UNAVAILABLE",
+                    )
+            finally:
+                writer.close()
+            elapsed = self.module.time.monotonic() - started
+        finally:
+            os.close(write_descriptor)
+            os.close(read_descriptor)
+
+        self.assertEqual("ACTIVE_ANNOUNCEMENT_UNAVAILABLE", raised.exception.code)
+        self.assertLess(elapsed, 0.5)
+
     def preflight(self, handoff: Path) -> tuple[dict, dict]:
         verified = self.module.verify_package(handoff)
         preflight = self.module.mcp_activation_preflight(
@@ -296,6 +328,54 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertEqual(0, trace["disclosure_audit"]["tool_calls"])
         self.assertEqual(0, trace["disclosure_audit"]["disclosed_bytes"])
 
+        stop = self.module.record_mcp_activation_stopped_fail_closed(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            reason="controller_exit",
+            child_returncode=0,
+            forced_exact_child=False,
+        )
+        repeated = self.module.record_mcp_activation_stopped_fail_closed(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            reason="controller_exit",
+            child_returncode=0,
+            forced_exact_child=False,
+        )
+        self.assertTrue(stop["activation_stop_receipt_recorded"])
+        self.assertTrue(repeated["activation_stop_receipt_recorded"])
+        runtime = store.read()
+        self.assertTrue(runtime["activation_child_stopped"])
+        self.assertEqual(0, runtime["activation_child_returncode"])
+        self.assertFalse(runtime["activation_forced_exact_child"])
+        self.assertTrue(runtime["activation_stop_receipt_recorded"])
+        receipt = self.load(handoff / "receipt.json")
+        activation_stops = [
+            event for event in receipt["events"] if event["type"] == "mcp_activation_stopped"
+        ]
+        self.assertEqual(1, len(activation_stops))
+        self.assertTrue(activation_stops[0]["data"]["exact_child_stop_observed"])
+        self.assertNotIn("tunnel_runtime_stopped", failed_state["mcp_protocol_trace"])
+        self.assertFalse(any(event["type"] == "mcp_stopped" for event in receipt["events"]))
+        self.run_cli("verify", "--handoff-dir", str(handoff))
+        final_trace = json.loads(
+            self.run_cli(
+                "mcp-protocol-trace", "--handoff-dir", str(handoff), "--json"
+            ).stdout
+        )["protocol_trace"]
+        self.assertTrue(final_trace["artifact_identity_bound"])
+        self.assertTrue(final_trace["lifecycle_binding_valid"])
+        self.assertFalse(final_trace["terminal_evidence"]["runtime_stop_observed"])
+        self.assertTrue(
+            final_trace["terminal_evidence"]["activation_failure_stop_observed"]
+        )
+        self.assertEqual(
+            "activation_failed_child_stopped_protocol_eof_unobserved",
+            final_trace["terminal_evidence"]["status"],
+        )
+
     def test_content_verification_fails_closed_without_inverting_package_lock_order(self) -> None:
         handoff = self.prepare_and_approve()
         state = self.load(handoff / "state.json")
@@ -345,6 +425,344 @@ class WebMcpRuntimeTests(unittest.TestCase):
                 for event in recovered["receipt"]["events"]
             ),
         )
+
+    def test_failed_activation_stop_receipt_requires_strict_additive_contract(self) -> None:
+        handoff = self.prepare_and_approve()
+        verified, preflight = self.preflight(handoff)
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        session_hash = hashlib.sha256(b"strict-activation-stop").hexdigest()
+        self.module.begin_mcp_activation(
+            verified,
+            store,
+            session_id_sha256=session_hash,
+            preflight=preflight,
+        )
+        self.module.fail_mcp_activation(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            error_code="TUNNEL_NOT_READY",
+        )
+        failed = self.module.verify_package(handoff)
+        malformed_receipt = self.module.receipt_with_event(
+            failed["receipt"],
+            "mcp_activation_stopped",
+            {
+                "phase_before": "approved",
+                "phase_after": "approved",
+                "session_id_sha256": session_hash,
+                "reason": "controller_exit",
+                "exact_child_stop_observed": True,
+                "child_returncode": True,
+                "forced_exact_child": False,
+            },
+        )
+        with self.assertRaisesRegex(
+            self.module.HandoffError, "exact-child stop evidence is invalid"
+        ):
+            self.module.verify_schema3_mcp_session(
+                failed["state"],
+                malformed_receipt,
+                failed["manifest"],
+                manifest_sha256=failed["manifest_sha256"],
+            )
+
+    def test_failed_activation_rejects_a_second_same_session_failure_receipt(self) -> None:
+        handoff = self.prepare_and_approve()
+        verified, preflight = self.preflight(handoff)
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        session_hash = hashlib.sha256(b"duplicate-activation-failure").hexdigest()
+        self.module.begin_mcp_activation(
+            verified,
+            store,
+            session_id_sha256=session_hash,
+            preflight=preflight,
+        )
+        self.module.fail_mcp_activation(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            error_code="TUNNEL_NOT_READY",
+        )
+        self.module.record_mcp_activation_stopped_fail_closed(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            reason="controller_exit",
+            child_returncode=0,
+            forced_exact_child=False,
+        )
+        failed = self.module.verify_package(handoff)
+        duplicated = self.module.receipt_with_event(
+            failed["receipt"],
+            "mcp_activation_failed",
+            {
+                "phase_before": "approved",
+                "phase_after": "approved",
+                "session_id_sha256": session_hash,
+                "error_code": "DUPLICATE_FAILURE",
+            },
+        )
+        with self.assertRaisesRegex(
+            self.module.HandoffError, "differs from its receipt"
+        ):
+            self.module.verify_schema3_mcp_session(
+                failed["state"],
+                duplicated,
+                failed["manifest"],
+                manifest_sha256=failed["manifest_sha256"],
+            )
+
+    def test_failed_activation_rejects_a_cross_session_failure_receipt(self) -> None:
+        handoff = self.prepare_and_approve()
+        verified, preflight = self.preflight(handoff)
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        session_hash = hashlib.sha256(b"bound-activation-failure").hexdigest()
+        self.module.begin_mcp_activation(
+            verified,
+            store,
+            session_id_sha256=session_hash,
+            preflight=preflight,
+        )
+        self.module.fail_mcp_activation(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            error_code="TUNNEL_NOT_READY",
+        )
+        failed = self.module.verify_package(handoff)
+        duplicated = self.module.receipt_with_event(
+            failed["receipt"],
+            "mcp_activation_failed",
+            {
+                "phase_before": "approved",
+                "phase_after": "approved",
+                "session_id_sha256": hashlib.sha256(
+                    b"unrelated-activation-failure"
+                ).hexdigest(),
+                "error_code": "CROSS_SESSION_FAILURE",
+            },
+        )
+
+        with self.assertRaisesRegex(
+            self.module.HandoffError, "differs from its receipt"
+        ):
+            self.module.verify_schema3_mcp_session(
+                failed["state"],
+                duplicated,
+                failed["manifest"],
+                manifest_sha256=failed["manifest_sha256"],
+            )
+
+    def test_failed_activation_stop_reconciles_a_late_commit_error(self) -> None:
+        handoff = self.prepare_and_approve()
+        verified, preflight = self.preflight(handoff)
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        session_hash = hashlib.sha256(b"activation-stop-late-commit").hexdigest()
+        self.module.begin_mcp_activation(
+            verified,
+            store,
+            session_id_sha256=session_hash,
+            preflight=preflight,
+        )
+        self.module.fail_mcp_activation(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            error_code="TUNNEL_NOT_READY",
+        )
+        original_commit = self.module.commit_lifecycle_pair
+
+        def commit_then_report_failure(*args, **kwargs):
+            original_commit(*args, **kwargs)
+            raise self.module.RuntimeStateError(
+                "RUNTIME_STATE_WRITE_FAILED", "simulated late directory sync failure"
+            )
+
+        with mock.patch.object(
+            self.module,
+            "commit_lifecycle_pair",
+            side_effect=commit_then_report_failure,
+        ):
+            stopped = self.module.record_mcp_activation_stopped_fail_closed(
+                handoff,
+                store,
+                session_id_sha256=session_hash,
+                reason="controller_exit",
+                child_returncode=0,
+                forced_exact_child=False,
+            )
+        self.assertTrue(stopped["activation_stop_receipt_recorded"])
+        self.assertTrue(store.read()["activation_stop_receipt_recorded"])
+        receipt = self.module.verify_package(handoff)["receipt"]
+        self.assertEqual(
+            1,
+            len(self.module.receipt_events(receipt, "mcp_activation_stopped")),
+        )
+
+    def test_failed_activation_with_unavailable_trace_still_records_global_child_stop(self) -> None:
+        handoff = self.prepare_and_approve()
+        verified, preflight = self.preflight(handoff)
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        session_hash = hashlib.sha256(b"activation-stop-missing-trace").hexdigest()
+        self.module.begin_mcp_activation(
+            verified,
+            store,
+            session_id_sha256=session_hash,
+            preflight=preflight,
+        )
+        self.module.fail_mcp_activation(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            error_code="TUNNEL_NOT_READY",
+        )
+        diagnostic = self.load(handoff / "state.json")["mcp_protocol_trace"]
+        (handoff / diagnostic["protocol_trace_file"]).unlink()
+        stopped = self.module.record_mcp_activation_stopped_fail_closed(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            reason="controller_exit",
+            child_returncode=-15,
+            forced_exact_child=False,
+        )
+        self.assertTrue(stopped["exact_child_stop_recorded"])
+        self.assertFalse(stopped["package_evidence_available"])
+        self.assertFalse(stopped["activation_stop_receipt_recorded"])
+        runtime = store.read()
+        self.assertTrue(runtime["activation_child_stopped"])
+        self.assertFalse(runtime["activation_stop_receipt_recorded"])
+        receipt = self.load(handoff / "receipt.json")
+        self.assertEqual(
+            0, len(self.module.receipt_events(receipt, "mcp_activation_stopped"))
+        )
+
+    def test_failed_activation_exact_child_stop_survives_attended_recovery_to_revoked(self) -> None:
+        handoff = self.prepare_and_approve()
+        verified, preflight = self.preflight(handoff)
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        session_hash = hashlib.sha256(b"activation-stop-after-recovery").hexdigest()
+        self.module.begin_mcp_activation(
+            verified,
+            store,
+            session_id_sha256=session_hash,
+            preflight=preflight,
+        )
+        recovered = self.module.recover_interrupted_mcp_activation(
+            handoff,
+            store,
+            reason="user_requested",
+        )
+        self.assertEqual("revoked", recovered["authorization"]["status"])
+        stopped = self.module.record_mcp_activation_stopped_fail_closed(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            reason="remote_stop",
+            child_returncode=-15,
+            forced_exact_child=False,
+        )
+        self.assertTrue(stopped["package_evidence_available"])
+        self.assertFalse(stopped["activation_stop_receipt_recorded"])
+        self.assertEqual("revoked", store.read()["status"])
+        self.assertTrue(store.read()["activation_child_stopped"])
+
+    def test_failed_global_activation_publish_still_records_exact_child_stop(self) -> None:
+        handoff = self.prepare_and_approve()
+        verified, preflight = self.preflight(handoff)
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        session_hash = hashlib.sha256(b"partial-activation-publication").hexdigest()
+        begun = self.module.begin_mcp_activation(
+            verified,
+            store,
+            session_id_sha256=session_hash,
+            preflight=preflight,
+        )
+        original_transition = store.transition
+
+        def fail_only_active_transition(session, current, target, **kwargs):
+            if current == "activating" and target == "active":
+                raise self.module.RuntimeStateError(
+                    "RUNTIME_STATE_WRITE_FAILED", "simulated global activation failure"
+                )
+            return original_transition(session, current, target, **kwargs)
+
+        with mock.patch.object(
+            store, "transition", side_effect=fail_only_active_transition
+        ):
+            with self.assertRaisesRegex(
+                self.module.HandoffError, "RUNTIME_STATE_WRITE_FAILED"
+            ):
+                self.module.complete_mcp_activation(
+                    handoff,
+                    store,
+                    session_id_sha256=session_hash,
+                    audit_header_sha256=begun["audit_header_sha256"],
+                    successful_control_plane_poll_observed=True,
+                )
+        self.assertEqual("faulted", store.read()["status"])
+        self.assertEqual(
+            "faulted", self.module.verify_package(handoff)["state"]["mcp_session"]["status"]
+        )
+        stopped = self.module.record_mcp_activation_stopped_fail_closed(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            reason="controller_exit",
+            child_returncode=-15,
+            forced_exact_child=False,
+        )
+        self.assertTrue(stopped["exact_child_stop_recorded"])
+        self.assertFalse(stopped["activation_stop_receipt_recorded"])
+        self.assertTrue(store.read()["activation_child_stopped"])
+        receipt = self.module.verify_package(handoff)["receipt"]
+        self.assertEqual(
+            0, len(self.module.receipt_events(receipt, "mcp_activation_stopped"))
+        )
+
+    def test_mcp_stop_reports_machine_global_activation_child_stop(self) -> None:
+        handoff = self.prepare_and_approve()
+        verified, preflight = self.preflight(handoff)
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        session_hash = hashlib.sha256(b"activation-stop-command").hexdigest()
+        self.module.begin_mcp_activation(
+            verified,
+            store,
+            session_id_sha256=session_hash,
+            preflight=preflight,
+        )
+
+        def stop_exact_activation_child(*args, **kwargs):
+            del args, kwargs
+            self.module.record_mcp_activation_stopped_fail_closed(
+                handoff,
+                store,
+                session_id_sha256=session_hash,
+                reason="remote_stop",
+                child_returncode=-15,
+                forced_exact_child=False,
+            )
+            return True
+
+        with (
+            mock.patch.object(self.module, "runtime_store_for", return_value=store),
+            mock.patch.object(
+                self.module,
+                "request_cooperative_stop",
+                side_effect=stop_exact_activation_child,
+            ),
+        ):
+            payload = json.loads(
+                self.run_cli(
+                    "mcp-stop", "--handoff-dir", str(handoff), "--json"
+                ).stdout
+            )
+        self.assertTrue(payload["tunnel_runtime_stopped"])
+        self.assertEqual("machine_global_activation", payload["stop_evidence"])
+        self.assertEqual("stopped", payload["exact_tunnel_process_status"])
+        self.assertFalse(payload["manual_process_review_required"])
+        self.assertTrue(store.read()["activation_child_stopped"])
 
     def test_probe_is_secretless_sanitized_and_reports_bounded_local_setup(self) -> None:
         result = self.run_cli(
@@ -999,7 +1417,101 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertFalse(trace_status["protocol_trace"]["closed"])
         self.assertFalse(completed["audit"]["footer"])
         self.run_cli("verify", "--handoff-dir", str(handoff))
-        self.run_cli("mcp-verify-audit", "--handoff-dir", str(handoff))
+
+    def test_concurrent_normal_stop_records_one_receipt_and_one_global_binding(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, session_hash, _ = self.activate(handoff)
+        self.module.stop_mcp_authorization(handoff, store)
+        barrier = threading.Barrier(3)
+        results: list[dict] = []
+        errors: list[BaseException] = []
+
+        def record() -> None:
+            barrier.wait()
+            try:
+                results.append(
+                    self.module.record_mcp_runtime_stopped_fail_closed(
+                        handoff,
+                        store,
+                        session_id_sha256=session_hash,
+                        reason="remote_stop",
+                        child_returncode=-15,
+                        forced_exact_child=False,
+                    )
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=record) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=5.0)
+            self.assertFalse(thread.is_alive())
+
+        self.assertEqual([], errors)
+        self.assertEqual(2, len(results))
+        self.assertTrue(all(item["runtime_stop_receipt_recorded"] for item in results))
+        receipt = self.module.verify_package(handoff)["receipt"]
+        self.assertEqual(1, len(self.module.receipt_events(receipt, "mcp_stopped")))
+        self.assertTrue(store.read()["runtime_stop_receipt_recorded"])
+
+    def test_concurrent_failed_activation_stop_records_one_receipt_and_binding(self) -> None:
+        handoff = self.prepare_and_approve()
+        verified, preflight = self.preflight(handoff)
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        session_hash = hashlib.sha256(b"concurrent-activation-stop").hexdigest()
+        self.module.begin_mcp_activation(
+            verified,
+            store,
+            session_id_sha256=session_hash,
+            preflight=preflight,
+        )
+        self.module.fail_mcp_activation(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            error_code="TUNNEL_NOT_READY",
+        )
+        barrier = threading.Barrier(3)
+        results: list[dict] = []
+        errors: list[BaseException] = []
+
+        def record() -> None:
+            barrier.wait()
+            try:
+                results.append(
+                    self.module.record_mcp_activation_stopped_fail_closed(
+                        handoff,
+                        store,
+                        session_id_sha256=session_hash,
+                        reason="controller_exit",
+                        child_returncode=-15,
+                        forced_exact_child=False,
+                    )
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=record) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=5.0)
+            self.assertFalse(thread.is_alive())
+
+        self.assertEqual([], errors)
+        self.assertEqual(2, len(results))
+        self.assertTrue(
+            all(item["activation_stop_receipt_recorded"] for item in results)
+        )
+        receipt = self.module.verify_package(handoff)["receipt"]
+        self.assertEqual(
+            1, len(self.module.receipt_events(receipt, "mcp_activation_stopped"))
+        )
+        self.assertTrue(store.read()["activation_stop_receipt_recorded"])
 
         verified = self.module.verify_package(handoff)
         with self.assertRaisesRegex(self.module.HandoffError, "only once"):
@@ -1309,8 +1821,28 @@ class WebMcpRuntimeTests(unittest.TestCase):
 
         trace = self.close_protocol_trace(handoff)
         self.assertTrue(trace.closed)
-        self.module.record_mcp_stopped(handoff, session_id_sha256=session_hash)
-        self.module.record_mcp_stopped(handoff, session_id_sha256=session_hash)
+        runtime_stop = self.module.record_mcp_runtime_stopped_fail_closed(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            reason="user_requested",
+            child_returncode=0,
+            forced_exact_child=False,
+        )
+        repeated_stop = self.module.record_mcp_runtime_stopped_fail_closed(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            reason="user_requested",
+            child_returncode=0,
+            forced_exact_child=False,
+        )
+        self.assertTrue(runtime_stop["exact_child_stop_recorded"])
+        self.assertTrue(runtime_stop["runtime_stop_receipt_recorded"])
+        self.assertTrue(repeated_stop["runtime_stop_receipt_recorded"])
+        runtime_state = store.read()
+        self.assertTrue(runtime_state["runtime_child_stopped"])
+        self.assertTrue(runtime_state["runtime_stop_receipt_recorded"])
         state = self.load(handoff / "state.json")
         receipt = self.load(handoff / "receipt.json")
         self.assertTrue(state["mcp_session"]["tunnel_runtime_stopped"])
@@ -1350,6 +1882,59 @@ class WebMcpRuntimeTests(unittest.TestCase):
                 self.load(handoff / "manifest.json"),
                 manifest_sha256=self.module.sha256_file(handoff / "manifest.json"),
             )
+
+    def test_runtime_stop_reconciles_a_late_commit_error_without_false_global_evidence(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, session_hash, _ = self.activate(handoff)
+        self.module.stop_mcp_authorization(handoff, store)
+        self.close_protocol_trace(handoff)
+        original_commit = self.module.commit_lifecycle_pair
+
+        def commit_then_report_failure(*args, **kwargs):
+            original_commit(*args, **kwargs)
+            raise self.module.RuntimeStateError(
+                "RUNTIME_STATE_WRITE_FAILED", "simulated late directory sync failure"
+            )
+
+        with mock.patch.object(
+            self.module,
+            "commit_lifecycle_pair",
+            side_effect=commit_then_report_failure,
+        ):
+            stopped = self.module.record_mcp_runtime_stopped_fail_closed(
+                handoff,
+                store,
+                session_id_sha256=session_hash,
+                reason="user_requested",
+                child_returncode=0,
+                forced_exact_child=False,
+            )
+        self.assertTrue(stopped["runtime_stop_receipt_recorded"])
+        runtime = store.read()
+        self.assertTrue(runtime["runtime_stop_receipt_recorded"])
+        receipt = self.module.verify_package(handoff)["receipt"]
+        self.assertEqual(1, len(self.module.receipt_events(receipt, "mcp_stopped")))
+
+    def test_runtime_stop_rejects_reason_drift_between_package_and_global_evidence(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, session_hash, _ = self.activate(handoff)
+        self.module.stop_mcp_authorization(handoff, store)
+        self.close_protocol_trace(handoff)
+        self.module.record_mcp_stopped(
+            handoff,
+            session_id_sha256=session_hash,
+            reason="user_requested",
+        )
+        with self.assertRaisesRegex(self.module.HandoffError, "conflict"):
+            self.module.record_mcp_runtime_stopped_fail_closed(
+                handoff,
+                store,
+                session_id_sha256=session_hash,
+                reason="child_exit",
+                child_returncode=0,
+                forced_exact_child=False,
+            )
+        self.assertNotIn("runtime_child_stopped", store.read())
 
     def test_forced_stop_records_valid_prefix_without_fabricating_a_footer(self) -> None:
         handoff = self.prepare_and_approve()
@@ -1880,6 +2465,86 @@ class WebMcpRuntimeTests(unittest.TestCase):
         )
         self.run_cli("verify", "--handoff-dir", str(handoff))
 
+    def test_late_activation_failure_does_not_rewrite_external_revoke(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, session_hash, _ = self.activate(handoff)
+        self.module.stop_mcp_authorization(handoff, store, reason="remote_stop")
+
+        self.module.fail_mcp_activation(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            error_code="SESSION_CONFLICT",
+        )
+
+        latest = self.module.verify_package(handoff)
+        self.assertEqual("revoked", store.read()["status"])
+        self.assertEqual("revoked", latest["state"]["mcp_session"]["status"])
+        self.assertEqual(
+            0,
+            len(
+                self.module.receipt_events(
+                    latest["receipt"], "mcp_recovery_recorded"
+                )
+            ),
+        )
+
+    def test_external_revoke_wins_between_global_failure_deny_and_package_record(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, session_hash, _ = self.activate(handoff)
+        failure_ready = threading.Event()
+        allow_failure_package_record = threading.Event()
+        failures: list[BaseException] = []
+        real_record = self.module._record_mcp_activation_failure_package
+
+        def delayed_record(*args, **kwargs) -> None:
+            failure_ready.set()
+            if not allow_failure_package_record.wait(timeout=5):
+                raise AssertionError("failure package record barrier timed out")
+            real_record(*args, **kwargs)
+
+        def record_failure() -> None:
+            try:
+                self.module.fail_mcp_activation(
+                    handoff,
+                    store,
+                    session_id_sha256=session_hash,
+                    error_code="SESSION_CONFLICT",
+                )
+            except BaseException as exc:
+                failures.append(exc)
+
+        with mock.patch.object(
+            self.module,
+            "_record_mcp_activation_failure_package",
+            side_effect=delayed_record,
+        ):
+            worker = threading.Thread(target=record_failure)
+            worker.start()
+            self.assertTrue(failure_ready.wait(timeout=5))
+            stopped = self.module.stop_mcp_authorization(
+                handoff,
+                store,
+                reason="remote_stop",
+            )
+            allow_failure_package_record.set()
+            worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual([], failures)
+        self.assertEqual("revoked", stopped["authorization"]["status"])
+        latest = self.module.verify_package(handoff)
+        self.assertEqual("revoked", store.read()["status"])
+        self.assertEqual("revoked", latest["state"]["mcp_session"]["status"])
+        self.assertEqual(
+            0,
+            len(
+                self.module.receipt_events(
+                    latest["receipt"], "mcp_recovery_recorded"
+                )
+            ),
+        )
+
     def test_status_and_stop_cli_report_authorization_separately_from_process(self) -> None:
         handoff = self.prepare_and_approve()
         store, session_hash, _ = self.activate(handoff)
@@ -1911,8 +2576,15 @@ class WebMcpRuntimeTests(unittest.TestCase):
             ).stdout
         )
         self.assertEqual("revoked", stopped["authorization"]["status"])
+        self.assertTrue(stopped["authorization_denied"])
+        self.assertEqual("revoked", stopped["authorization_status"])
+        self.assertTrue(stopped["revocation_receipt_recorded"])
+        self.assertTrue(stopped["authorization_revoked"])
         self.assertFalse(stopped["tunnel_runtime_stopped"])
-        self.assertTrue(stopped["foreground_controller_stop_required"])
+        self.assertTrue(stopped["controller_lease_released"])
+        self.assertEqual("unconfirmed", stopped["exact_tunnel_process_status"])
+        self.assertTrue(stopped["manual_process_review_required"])
+        self.assertFalse(stopped["foreground_controller_stop_required"])
         revoked_status = json.loads(
             self.run_cli(
                 "mcp-status",
@@ -1963,9 +2635,23 @@ class WebMcpRuntimeTests(unittest.TestCase):
                     name: path.read_bytes() for name, path in evidence_paths.items()
                 }
 
+                def stop_exact_child(*args, **kwargs):
+                    del args, kwargs
+                    self.module.record_mcp_runtime_stopped_fail_closed(
+                        handoff,
+                        store,
+                        session_id_sha256=session_hash,
+                        reason="remote_stop",
+                        child_returncode=-15,
+                        forced_exact_child=False,
+                    )
+                    return True
+
                 with (
                     mock.patch.object(
-                        self.module, "request_cooperative_stop", return_value=True
+                        self.module,
+                        "request_cooperative_stop",
+                        side_effect=stop_exact_child,
                     ) as cooperative_stop,
                     mock.patch.object(self.module.os, "kill") as broad_signal,
                 ):
@@ -1992,20 +2678,63 @@ class WebMcpRuntimeTests(unittest.TestCase):
                 self.assertFalse(payload["package_evidence_available"])
                 self.assertEqual("unavailable", payload["package_evidence_status"])
                 self.assertEqual("authorization_denied", payload["status"])
+                self.assertTrue(payload["authorization_denied"])
+                self.assertEqual("faulted", payload["authorization_status"])
+                self.assertFalse(payload["revocation_receipt_recorded"])
+                self.assertFalse(payload["authorization_revoked"])
                 self.assertEqual(
                     "PACKAGE_EVIDENCE_UNAVAILABLE", payload["audit"]["code"]
                 )
                 self.assertTrue(payload["cooperative_stop_requested"])
-                self.assertFalse(payload["tunnel_runtime_stopped"])
-                self.assertIsNone(payload["stop_evidence"])
-                self.assertTrue(payload["controller_lease_released"])
-                self.assertEqual("unconfirmed", payload["exact_tunnel_process_status"])
-                self.assertTrue(payload["manual_process_review_required"])
+                self.assertTrue(payload["tunnel_runtime_stopped"])
+                self.assertEqual("machine_global", payload["stop_evidence"])
+                self.assertFalse(payload["controller_lease_released"])
+                self.assertEqual("stopped", payload["exact_tunnel_process_status"])
+                self.assertFalse(payload["manual_process_review_required"])
                 self.assertFalse(payload["foreground_controller_stop_required"])
+                runtime = store.read()
+                self.assertTrue(runtime["runtime_child_stopped"])
+                self.assertFalse(runtime["runtime_stop_receipt_recorded"])
                 cooperative_stop.assert_called_once_with(
                     self.module.control_socket_path(store.root), session_hash
                 )
                 broad_signal.assert_not_called()
+
+    def test_stop_ack_loss_still_reports_durable_exact_child_evidence(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, session_hash, _ = self.activate(handoff)
+
+        def stop_exact_child_without_ack(*args, **kwargs):
+            del args, kwargs
+            self.module.record_mcp_runtime_stopped_fail_closed(
+                handoff,
+                store,
+                session_id_sha256=session_hash,
+                reason="remote_stop",
+                child_returncode=-15,
+                forced_exact_child=False,
+            )
+            return False
+
+        with mock.patch.object(
+            self.module,
+            "request_cooperative_stop",
+            side_effect=stop_exact_child_without_ack,
+        ):
+            payload = json.loads(
+                self.run_cli(
+                    "mcp-stop",
+                    "--handoff-dir",
+                    str(handoff),
+                    "--json",
+                ).stdout
+            )
+
+        self.assertFalse(payload["cooperative_stop_requested"])
+        self.assertTrue(payload["tunnel_runtime_stopped"])
+        self.assertEqual("package_receipt", payload["stop_evidence"])
+        self.assertEqual("stopped", payload["exact_tunnel_process_status"])
+        self.assertFalse(payload["foreground_controller_stop_required"])
 
     def test_emergency_deny_rejects_wrong_handoff_or_session_binding(self) -> None:
         handoff = self.prepare_and_approve()
@@ -2023,6 +2752,303 @@ class WebMcpRuntimeTests(unittest.TestCase):
             )
         self.assertEqual("active", store.read()["status"])
         self.assertEqual(session_hash, store.read()["session_id_sha256"])
+
+    def test_emergency_deny_preserves_canonical_handoff_after_package_damage(self) -> None:
+        handoff = self.prepare_and_approve()
+        alias = self.root / "approved-handoff-alias"
+        alias.symlink_to(handoff, target_is_directory=True)
+        # Activation resolves accepted directory aliases to the canonical
+        # package binding; exercise the later stop with the same alias spelling.
+        store, session_hash, _ = self.activate(handoff)
+        receipt_path = handoff / "receipt.json"
+        damaged = b"{damaged-symlinked-package-receipt\n"
+        receipt_path.write_bytes(damaged)
+        receipt_path.chmod(0o600)
+
+        result = self.module.revoke_mcp_authorization_fail_closed(
+            alias,
+            store,
+            expected_session_id_sha256=session_hash,
+        )
+
+        self.assertFalse(result["package_evidence_available"])
+        self.assertTrue(result["authorization_denied"])
+        self.assertEqual("faulted", result["authorization_status"])
+        self.assertEqual("faulted", store.read()["status"])
+        self.assertEqual(str(handoff.resolve()), store.read()["handoff_dir"])
+        self.assertEqual(damaged, receipt_path.read_bytes())
+
+        def stop_exact_child(*args, **kwargs):
+            del args, kwargs
+            self.module.record_mcp_runtime_stopped_fail_closed(
+                handoff,
+                store,
+                session_id_sha256=session_hash,
+                reason="remote_stop",
+                child_returncode=-15,
+                forced_exact_child=False,
+            )
+            return True
+
+        with mock.patch.object(
+            self.module,
+            "request_cooperative_stop",
+            side_effect=stop_exact_child,
+        ):
+            payload = json.loads(
+                self.run_cli(
+                    "mcp-stop",
+                    "--handoff-dir",
+                    str(alias),
+                    "--json",
+                ).stdout
+            )
+
+        self.assertTrue(payload["tunnel_runtime_stopped"])
+        self.assertEqual("machine_global", payload["stop_evidence"])
+        self.assertEqual("stopped", payload["exact_tunnel_process_status"])
+        self.assertFalse(payload["manual_process_review_required"])
+        self.assertEqual(damaged, receipt_path.read_bytes())
+
+    def test_failed_activation_stop_uses_only_global_state_when_package_is_damaged(self) -> None:
+        handoff = self.prepare_and_approve()
+        verified, preflight = self.preflight(handoff)
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        session_hash = hashlib.sha256(b"damaged-failed-activation").hexdigest()
+        self.module.begin_mcp_activation(
+            verified,
+            store,
+            session_id_sha256=session_hash,
+            preflight=preflight,
+        )
+        self.module.fail_mcp_activation(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            error_code="TUNNEL_NOT_READY",
+        )
+        receipt_path = handoff / "receipt.json"
+        damaged = b"{damaged-failed-activation-receipt\n"
+        receipt_path.write_bytes(damaged)
+        receipt_path.chmod(0o600)
+
+        stopped = self.module.record_mcp_activation_stopped_fail_closed(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            reason="controller_exit",
+            child_returncode=-15,
+            forced_exact_child=False,
+        )
+
+        self.assertFalse(stopped["package_evidence_available"])
+        self.assertFalse(stopped["activation_stop_receipt_recorded"])
+        self.assertEqual(damaged, receipt_path.read_bytes())
+        runtime = store.read()
+        self.assertEqual("faulted", runtime["status"])
+        self.assertTrue(runtime["activation_child_stopped"])
+        self.assertEqual(-15, runtime["activation_child_returncode"])
+        self.assertFalse(runtime["activation_stop_receipt_recorded"])
+        self.assertNotIn("activation_stop_receipt_event_sha256", runtime)
+        self.assertNotIn("activation_protocol_trace_artifact_sha256", runtime)
+        public = self.module.public_runtime_authorization(runtime)
+        self.assertTrue(public["activation_child_stopped"])
+        self.assertEqual(-15, public["activation_child_returncode"])
+        self.assertFalse(public["activation_stop_receipt_recorded"])
+
+    def test_missing_handoff_records_global_runtime_stop_then_reconciles_receipt(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, session_hash, _ = self.activate(handoff)
+        revoked = self.module.revoke_mcp_authorization_fail_closed(
+            handoff,
+            store,
+            expected_session_id_sha256=session_hash,
+            reason="remote_stop",
+        )
+        self.assertTrue(revoked["authorization_revoked"])
+        saved = self.root / "saved-runtime-handoff"
+        handoff.rename(saved)
+
+        global_only = self.module.record_mcp_runtime_stopped_fail_closed(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            reason="remote_stop",
+            child_returncode=-15,
+            forced_exact_child=False,
+        )
+
+        self.assertFalse(global_only["package_evidence_available"])
+        self.assertFalse(global_only["runtime_stop_receipt_recorded"])
+        self.assertTrue(store.read()["runtime_child_stopped"])
+        self.assertFalse(store.read()["runtime_stop_receipt_recorded"])
+        saved.rename(handoff)
+
+        reconciled = self.module.record_mcp_runtime_stopped_fail_closed(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            reason="remote_stop",
+            child_returncode=-15,
+            forced_exact_child=False,
+        )
+
+        self.assertTrue(reconciled["package_evidence_available"])
+        self.assertTrue(reconciled["runtime_stop_receipt_recorded"])
+        runtime = store.read()
+        self.assertTrue(runtime["runtime_stop_receipt_recorded"])
+        self.assertEqual(64, len(runtime["runtime_stop_receipt_event_sha256"]))
+        verified = self.module.verify_package(handoff)
+        self.assertEqual(
+            1,
+            len(self.module.receipt_events(verified["receipt"], "mcp_stopped")),
+        )
+
+    def test_missing_handoff_records_activation_stop_then_reconciles_receipt(self) -> None:
+        handoff = self.prepare_and_approve()
+        verified, preflight = self.preflight(handoff)
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        session_hash = hashlib.sha256(b"missing-activation-handoff").hexdigest()
+        self.module.begin_mcp_activation(
+            verified,
+            store,
+            session_id_sha256=session_hash,
+            preflight=preflight,
+        )
+        self.module.fail_mcp_activation(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            error_code="TUNNEL_NOT_READY",
+        )
+        saved = self.root / "saved-activation-handoff"
+        handoff.rename(saved)
+
+        global_only = self.module.record_mcp_activation_stopped_fail_closed(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            reason="controller_exit",
+            child_returncode=-15,
+            forced_exact_child=False,
+        )
+
+        self.assertFalse(global_only["package_evidence_available"])
+        self.assertFalse(global_only["activation_stop_receipt_recorded"])
+        self.assertTrue(store.read()["activation_child_stopped"])
+        self.assertFalse(store.read()["activation_stop_receipt_recorded"])
+        saved.rename(handoff)
+
+        reconciled = self.module.record_mcp_activation_stopped_fail_closed(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            reason="controller_exit",
+            child_returncode=-15,
+            forced_exact_child=False,
+        )
+
+        self.assertTrue(reconciled["package_evidence_available"])
+        self.assertTrue(reconciled["activation_stop_receipt_recorded"])
+        runtime = store.read()
+        self.assertTrue(runtime["activation_stop_receipt_recorded"])
+        self.assertEqual(64, len(runtime["activation_stop_receipt_event_sha256"]))
+        verified = self.module.verify_package(handoff)
+        self.assertEqual(
+            1,
+            len(
+                self.module.receipt_events(
+                    verified["receipt"], "mcp_activation_stopped"
+                )
+            ),
+        )
+
+    def test_activation_failure_denies_globally_before_reading_damaged_package(self) -> None:
+        handoff = self.prepare_and_approve()
+        verified, preflight = self.preflight(handoff)
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        session_hash = hashlib.sha256(b"damage-before-activation-failure").hexdigest()
+        self.module.begin_mcp_activation(
+            verified,
+            store,
+            session_id_sha256=session_hash,
+            preflight=preflight,
+        )
+        receipt_path = handoff / "receipt.json"
+        damaged = b"{damage-before-global-denial\n"
+        receipt_path.write_bytes(damaged)
+        receipt_path.chmod(0o600)
+
+        self.module.fail_mcp_activation(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            error_code="TUNNEL_NOT_READY",
+        )
+
+        runtime = store.read()
+        self.assertEqual("faulted", runtime["status"])
+        self.assertEqual("TUNNEL_NOT_READY", runtime["activation_failure_code"])
+        self.assertEqual(damaged, receipt_path.read_bytes())
+        stopped = self.module.record_mcp_activation_stopped_fail_closed(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            reason="controller_exit",
+            child_returncode=-15,
+            forced_exact_child=False,
+        )
+        self.assertTrue(stopped["exact_child_stop_recorded"])
+        self.assertFalse(stopped["package_evidence_available"])
+        self.assertFalse(stopped["activation_stop_receipt_recorded"])
+        self.assertEqual(damaged, receipt_path.read_bytes())
+        self.assertTrue(store.read()["activation_child_stopped"])
+
+    def test_missing_package_failure_receipt_does_not_block_global_child_stop(self) -> None:
+        handoff = self.prepare_and_approve()
+        verified, preflight = self.preflight(handoff)
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        session_hash = hashlib.sha256(b"missing-package-failure-receipt").hexdigest()
+        self.module.begin_mcp_activation(
+            verified,
+            store,
+            session_id_sha256=session_hash,
+            preflight=preflight,
+        )
+        with mock.patch.object(
+            self.module,
+            "_record_mcp_activation_failure_package",
+            side_effect=self.module.HandoffError("simulated package evidence failure"),
+        ):
+            self.module.fail_mcp_activation(
+                handoff,
+                store,
+                session_id_sha256=session_hash,
+                error_code="TUNNEL_NOT_READY",
+            )
+
+        self.assertEqual("faulted", store.read()["status"])
+        self.assertEqual(
+            0,
+            len(
+                self.module.receipt_events(
+                    self.module.verify_package(handoff)["receipt"],
+                    "mcp_activation_failed",
+                )
+            ),
+        )
+        stopped = self.module.record_mcp_activation_stopped_fail_closed(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            reason="controller_exit",
+            child_returncode=-15,
+            forced_exact_child=False,
+        )
+        self.assertTrue(stopped["exact_child_stop_recorded"])
+        self.assertFalse(stopped["package_evidence_available"])
+        self.assertFalse(stopped["activation_stop_receipt_recorded"])
+        self.assertTrue(store.read()["activation_child_stopped"])
 
     def test_activate_controller_revoke_callback_uses_emergency_deny(self) -> None:
         handoff = self.prepare_and_approve()
@@ -2057,21 +3083,33 @@ class WebMcpRuntimeTests(unittest.TestCase):
                 "PROFILE_OPERATION_CONFLICT", profile_conflict.exception.code
             )
             begun = hooks.begin_activation(session_hash)
-            hooks.complete_activation(session_hash, begun["audit_header_sha256"])
+            hooks.complete_activation(
+                session_hash,
+                begun["audit_header_sha256"],
+                lambda: None,
+            )
             receipt_path = handoff / "receipt.json"
             damaged = b"{controller-revoke-package-damage\n"
             receipt_path.write_bytes(damaged)
             receipt_path.chmod(0o600)
             revoked = hooks.revoke_authorization("child_exit")
             observed["revoked"] = revoked
+            observed["runtime_stop"] = hooks.record_stopped(
+                session_hash, "child_exit", 0, False
+            )
             observed["damaged"] = damaged
             return SimpleNamespace(
                 status="stopped",
                 session_id_sha256=session_hash,
                 stop_reason="child_exit",
                 control_plane_poll_confirmed=True,
-                authorization_revoked=True,
+                authorization_denied=True,
+                authorization_status="faulted",
+                revocation_receipt_recorded=False,
+                authorization_revoked=False,
                 stopped_recorded=False,
+                exact_child_stop_recorded=True,
+                activation_stop_receipt_recorded=False,
                 forced_exact_child=False,
                 request_correlation={
                     "schema_version": 1,
@@ -2122,12 +3160,32 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertIsInstance(revoked, dict)
         self.assertFalse(revoked["package_evidence_available"])
         self.assertEqual("faulted", revoked["authorization"]["status"])
+        self.assertTrue(revoked["authorization_denied"])
+        self.assertEqual("faulted", revoked["authorization_status"])
+        self.assertFalse(revoked["revocation_receipt_recorded"])
+        self.assertFalse(revoked["authorization_revoked"])
+        runtime_stop = observed["runtime_stop"]
+        self.assertIsInstance(runtime_stop, dict)
+        self.assertTrue(runtime_stop["exact_child_stop_recorded"])
+        self.assertFalse(runtime_stop["runtime_stop_receipt_recorded"])
+        self.assertFalse(runtime_stop["package_evidence_available"])
         self.assertEqual("faulted", store.read()["status"])
+        self.assertTrue(store.read()["runtime_child_stopped"])
+        self.assertFalse(store.read()["runtime_stop_receipt_recorded"])
+        public = self.module.public_runtime_authorization(store.read())
+        self.assertTrue(public["runtime_child_stopped"])
+        self.assertEqual(0, public["runtime_child_returncode"])
+        self.assertFalse(public["runtime_stop_receipt_recorded"])
         self.assertEqual(
             observed["damaged"], (handoff / "receipt.json").read_bytes()
         )
         terminal = json.loads(output.getvalue().splitlines()[-1])
-        self.assertEqual("mcp_stopped", terminal["event"])
+        self.assertEqual("mcp_exact_child_stopped", terminal["event"])
+        self.assertTrue(terminal["exact_child_stop_recorded"])
+        self.assertTrue(terminal["authorization_denied"])
+        self.assertEqual("faulted", terminal["authorization_status"])
+        self.assertFalse(terminal["revocation_receipt_recorded"])
+        self.assertFalse(terminal["authorization_revoked"])
         self.assertEqual(
             "PACKAGE_EVIDENCE_UNAVAILABLE",
             terminal["request_correlation_diagnostic"]["code"],
@@ -2147,6 +3205,10 @@ class WebMcpRuntimeTests(unittest.TestCase):
             now=expires_at + timedelta(seconds=1),
         )
         self.assertTrue(result["expired"])
+        self.assertTrue(result["authorization_denied"])
+        self.assertEqual("expired", result["authorization_status"])
+        self.assertFalse(result["revocation_receipt_recorded"])
+        self.assertFalse(result["authorization_revoked"])
         self.assertEqual("expired", store.read()["status"])
         state = self.load(handoff / "state.json")
         self.assertEqual("approved", state["phase"])
@@ -2234,6 +3296,16 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertFalse(recovered["process_discovery_attempted"])
         self.assertFalse(recovered["process_signal_attempted"])
         self.assertEqual("revoked", self.load(handoff / "state.json")["mcp_session"]["status"])
+        confirmed = json.loads(
+            self.run_cli(
+                *command,
+                "--confirm-orphan-tunnel-stopped",
+            ).stdout
+        )
+        self.assertTrue(confirmed["orphan_tunnel_termination_manually_confirmed"])
+        self.assertFalse(confirmed["orphan_child_may_remain"])
+        self.assertFalse(confirmed["tunnel_runtime_stopped"])
+        self.assertNotIn("runtime_child_stopped", store.read())
         self.run_cli("verify", "--handoff-dir", str(handoff))
 
     def test_pre_audit_crash_recovery_faults_global_and_retires_only_stale_socket(self) -> None:
@@ -2279,6 +3351,75 @@ class WebMcpRuntimeTests(unittest.TestCase):
         ]
         self.assertEqual(1, len(failures))
         self.run_cli("verify", "--handoff-dir", str(handoff))
+
+    def test_recover_retires_nonwritable_post_bind_stale_socket_in_private_parent(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, _ = self.interrupt_before_audit_header(handoff)
+        control_path = self.module.control_socket_path(store.root)
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(str(control_path))
+        os.chmod(control_path, 0o755, follow_symlinks=False)
+        stale.close()
+
+        recovered = json.loads(
+            self.run_cli(
+                "mcp-recover",
+                "--handoff-dir",
+                str(handoff),
+                "--confirm-controller-lost",
+            ).stdout
+        )
+        self.assertEqual("retired", recovered["control_socket"]["status"])
+        self.assertTrue(recovered["control_socket"]["retired"])
+        self.assertFalse(control_path.exists())
+
+    def test_missing_handoff_can_record_global_only_attended_orphan_clearance(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, session_hash, _ = self.activate(handoff)
+        original_package = {
+            path.name: path.read_bytes()
+            for path in handoff.iterdir()
+            if path.is_file()
+        }
+        saved = self.root / "saved-orphan-handoff"
+        handoff.rename(saved)
+        denied = self.module.deny_mcp_authorization_without_package(
+            handoff,
+            store,
+            expected_session_id_sha256=session_hash,
+        )
+        self.assertEqual("faulted", denied["status"])
+        self.assertNotIn("runtime_child_stopped", denied)
+        self.assertNotIn("activation_child_stopped", denied)
+
+        recovered = json.loads(
+            self.run_cli(
+                "mcp-recover",
+                "--handoff-dir",
+                str(handoff),
+                "--confirm-controller-lost",
+                "--confirm-orphan-tunnel-stopped",
+            ).stdout
+        )
+
+        self.assertFalse(recovered["package_evidence_recovered"])
+        self.assertEqual("global_only_faulted", recovered["recovery_mode"])
+        self.assertTrue(recovered["orphan_tunnel_termination_manually_confirmed"])
+        self.assertFalse(recovered["orphan_child_may_remain"])
+        self.assertFalse(recovered["tunnel_runtime_stopped"])
+        runtime = store.read()
+        self.assertTrue(runtime["orphan_tunnel_termination_manually_confirmed"])
+        self.assertNotIn("runtime_child_stopped", runtime)
+        self.assertNotIn("activation_child_stopped", runtime)
+        self.assertFalse(handoff.exists())
+        self.assertEqual(
+            original_package,
+            {
+                path.name: path.read_bytes()
+                for path in saved.iterdir()
+                if path.is_file()
+            },
+        )
 
     def test_corrupt_pre_audit_crash_is_faulted_but_active_audit_corruption_is_not_rewritten(self) -> None:
         pre_handoff = self.prepare_and_approve()

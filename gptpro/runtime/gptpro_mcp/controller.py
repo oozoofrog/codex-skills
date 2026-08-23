@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
@@ -77,8 +78,13 @@ class ControllerResult:
     child_returncode: int | None
     terminated_exact_child: bool
     forced_exact_child: bool
+    authorization_denied: bool
+    authorization_status: str
+    revocation_receipt_recorded: bool
     authorization_revoked: bool
     stopped_recorded: bool
+    exact_child_stop_recorded: bool
+    activation_stop_receipt_recorded: bool
     request_correlation: Mapping[str, Any] | None = None
 
 
@@ -91,10 +97,11 @@ class ControllerHooks:
     """
 
     begin_activation: Callable[[str], Mapping[str, Any]]
-    complete_activation: Callable[[str, str], Any]
+    complete_activation: Callable[[str, str, Callable[[], None]], Any]
     fail_activation: Callable[[str, str], None]
     revoke_authorization: Callable[[str], Any]
-    record_stopped: Callable[[str, str], None]
+    record_stopped: Callable[[str, str, int, bool], Mapping[str, Any] | None]
+    record_activation_stopped: Callable[[str, str, int, bool], Mapping[str, Any] | None]
     on_active: Callable[[ActiveSession], None] | None = None
 
 
@@ -109,6 +116,7 @@ class TunnelRuntime(Protocol):
         profile_dir: Path | None = None,
         cwd: Path | None = None,
         request_correlation_diagnostic: bool = False,
+        child_signal_mask: set[signal.Signals] | None = None,
     ) -> subprocess.Popen[bytes]: ...
 
     def health(
@@ -201,23 +209,69 @@ def run_foreground(
     begun = False
     activation_completed = False
     failure_attempted = False
-    revocation_succeeded = False
+    authorization_denied = False
+    authorization_status = "unknown"
+    revocation_receipt_recorded = False
+    authorization_revoked = False
     stopped_recorded = False
+    exact_child_stop_recorded = False
+    activation_stop_receipt_recorded = False
     process_started = False
     started_process: subprocess.Popen[bytes] | None = None
     health_confirmed = False
     stop_reason = "controller_exit"
     failure_code = "MCP_ACTIVATION_FAILED"
+    denial_failure_code: str | None = None
     audit_header_sha256 = ""
     supervisor_result: SupervisorResult | None = None
     request_correlation_report: Mapping[str, Any] | None = None
 
     def mark_failed(code: str) -> None:
-        nonlocal failure_attempted
+        nonlocal denial_failure_code, failure_attempted
         if failure_attempted or not begun or activation_completed:
             return
+        if denial_failure_code is None:
+            denial_failure_code = _safe_code(code, "MCP_ACTIVATION_FAILED")
+        hooks.fail_activation(session_id_sha256, denial_failure_code)
+        # A callback is successful only after the machine-global authorization
+        # is durably denied.  Leave retries enabled when that write fails.
         failure_attempted = True
-        hooks.fail_activation(session_id_sha256, _safe_code(code, "MCP_ACTIVATION_FAILED"))
+
+    def record_failed_activation_stop() -> None:
+        """Record one terminal child after denial, from any exception layer."""
+
+        nonlocal activation_stop_receipt_recorded, exact_child_stop_recorded
+        if (
+            not process_started
+            or activation_completed
+            or exact_child_stop_recorded
+            or supervisor_result is None
+            or supervisor_result.child_returncode is None
+        ):
+            return
+        mark_failed(failure_code)
+        try:
+            activation_stop = hooks.record_activation_stopped(
+                session_id_sha256,
+                stop_reason,
+                supervisor_result.child_returncode,
+                supervisor_result.forced_exact_child,
+            )
+        except Exception as exc:
+            raise _as_controller_error(exc, "MCP_ACTIVATION_STOP_RECORD_FAILED") from None
+        activation_stop_receipt_recorded = bool(
+            isinstance(activation_stop, Mapping)
+            and activation_stop.get("activation_stop_receipt_recorded") is True
+        )
+        exact_child_stop_recorded = bool(
+            isinstance(activation_stop, Mapping)
+            and activation_stop.get("exact_child_stop_recorded") is True
+        )
+        if not exact_child_stop_recorded:
+            raise ControllerError(
+                "MCP_ACTIVATION_STOP_RECORD_FAILED",
+                "The exact failed-activation child stop was not durably recorded.",
+            )
 
     controller_lease = ControllerLease(runtime_store, session_id_sha256).acquire()
     try:
@@ -249,7 +303,9 @@ def run_foreground(
             RUNTIME_DIRECTORY_ENV: str(runtime_store.root),
         }
 
-        def process_factory() -> subprocess.Popen[bytes]:
+        def process_factory(
+            child_signal_mask: set[signal.Signals] | None,
+        ) -> subprocess.Popen[bytes]:
             nonlocal failure_code, process_started, started_process
             try:
                 process = tunnel_client.spawn_run(
@@ -260,6 +316,7 @@ def run_foreground(
                     profile_dir=profile_dir,
                     cwd=cwd,
                     request_correlation_diagnostic=request_correlation_diagnostic,
+                    child_signal_mask=child_signal_mask,
                 )
             except Exception as exc:
                 failure_code = _exception_code(exc, "TUNNEL_NOT_READY")
@@ -268,11 +325,27 @@ def run_foreground(
             started_process = process
             return process
 
+        supervisor: ForegroundSupervisor | None = None
+
+        def require_activation_not_cancelled() -> None:
+            nonlocal failure_code
+            if supervisor is not None and supervisor.stop_requested:
+                supervisor.settle_pending_remote_stop()
+                failure_code = _safe_code(
+                    supervisor.failure_code, "ACTIVATION_CANCELLED"
+                )
+                raise ControllerError(
+                    failure_code,
+                    "Activation was cancelled before it became available.",
+                )
+
         def after_start(process: subprocess.Popen[bytes]) -> None:
             nonlocal activation_completed, failure_code, health_confirmed
             deadline = monotonic() + ready_timeout
             while True:
+                require_activation_not_cancelled()
                 if process.poll() is not None:
+                    supervisor.seal_child_exit_if_observed(process)
                     failure_code = "TUNNEL_EXITED"
                     raise ControllerError(
                         failure_code,
@@ -291,6 +364,7 @@ def run_foreground(
                         failure_code = code
                         raise _as_controller_error(exc, code) from None
                     check = None
+                require_activation_not_cancelled()
                 if check is not None and check.ok:
                     if not check.control_plane_poll_confirmed:
                         failure_code = "TUNNEL_CONTROL_PLANE_UNCONFIRMED"
@@ -299,28 +373,72 @@ def run_foreground(
                             "Tunnel health did not confirm a successful control-plane poll.",
                         )
                     if process.poll() is not None:
+                        supervisor.seal_child_exit_if_observed(process)
                         failure_code = "TUNNEL_EXITED"
                         raise ControllerError(
                             failure_code,
                             "The foreground Tunnel process exited during activation.",
                         )
+                    require_activation_not_cancelled()
                     health_confirmed = True
+
+                    def publish_activation() -> None:
+                        nonlocal activation_completed
+
+                        active_announcement_committed = False
+
+                        def announce_committed_active() -> None:
+                            nonlocal active_announcement_committed, failure_code
+                            if process.poll() is not None:
+                                supervisor.seal_child_exit_if_observed(process)
+                                failure_code = "TUNNEL_EXITED"
+                                raise ControllerError(
+                                    failure_code,
+                                    "The foreground Tunnel exited before active publication.",
+                                )
+                            if hooks.on_active is not None:
+                                hooks.on_active(
+                                    ActiveSession(
+                                        status="active",
+                                        session_id_sha256=session_id_sha256,
+                                        control_socket=socket_path,
+                                        control_plane_poll_confirmed=True,
+                                    )
+                                )
+                            active_announcement_committed = True
+
+                        hooks.complete_activation(
+                            session_id_sha256,
+                            audit_header_sha256,
+                            announce_committed_active,
+                        )
+                        if not active_announcement_committed:
+                            raise ControllerError(
+                                "MCP_ACTIVATION_FAILED",
+                                "Activation did not publish its active announcement under the package lock.",
+                            )
+                        # The successful callback return is the package-lock
+                        # publication point.  The active announcement above is
+                        # part of that same cross-process critical section, so
+                        # a separate mcp-stop is ordered after it.
+                        activation_completed = True
+                        authorization = _require_runtime_status(
+                            runtime_store,
+                            session_id_sha256,
+                            {"active", "revoking", "revoked", "expired", "faulted"},
+                        )
+                        if authorization["status"] != "active":
+                            return
+
                     try:
-                        hooks.complete_activation(session_id_sha256, audit_header_sha256)
-                        _require_runtime_status(runtime_store, session_id_sha256, {"active"})
+                        published = supervisor.publish_activation_if_running(
+                            publish_activation
+                        )
                     except Exception as exc:
                         failure_code = _exception_code(exc, "MCP_ACTIVATION_FAILED")
                         raise
-                    activation_completed = True
-                    if hooks.on_active is not None:
-                        hooks.on_active(
-                            ActiveSession(
-                                status="active",
-                                session_id_sha256=session_id_sha256,
-                                control_socket=socket_path,
-                                control_plane_poll_confirmed=True,
-                            )
-                        )
+                    if not published:
+                        require_activation_not_cancelled()
                     return
                 if check is not None and check.code not in {None, "TUNNEL_NOT_READY"}:
                     failure_code = _safe_code(check.code, "TUNNEL_NOT_READY")
@@ -332,19 +450,37 @@ def run_foreground(
                         "The foreground Tunnel did not become ready before the timeout.",
                         retryable=True,
                     )
-                sleep(min(health_poll_interval, max(0.0, deadline - monotonic())))
+                # Keep cancellation latency bounded even when a caller chooses
+                # a long health polling interval.
+                sleep(
+                    min(
+                        health_poll_interval,
+                        0.05,
+                        max(0.0, deadline - monotonic()),
+                    )
+                )
 
         def revoke_before_terminate(reason: str) -> None:
             nonlocal request_correlation_key, request_correlation_report
-            nonlocal revocation_succeeded, stop_reason
+            nonlocal authorization_denied, authorization_status
+            nonlocal revocation_receipt_recorded, authorization_revoked, stop_reason
+            nonlocal failure_code
             stop_reason = reason
             if activation_completed:
-                hooks.revoke_authorization(reason)
-                _require_runtime_status(
+                revoke_result = hooks.revoke_authorization(reason)
+                authorization = _require_runtime_status(
                     runtime_store, session_id_sha256, {"revoked", "expired", "faulted"}
                 )
-                revocation_succeeded = True
-                if request_correlation_diagnostic:
+                authorization_status = str(authorization["status"])
+                authorization_denied = authorization_status in {"revoked", "expired", "faulted"}
+                if isinstance(revoke_result, Mapping):
+                    revocation_receipt_recorded = (
+                        revoke_result.get("revocation_receipt_recorded") is True
+                    )
+                authorization_revoked = (
+                    authorization_status == "revoked" and revocation_receipt_recorded
+                )
+                if request_correlation_diagnostic and authorization_revoked:
                     try:
                         if request_correlation_key is None:
                             raise ControllerError(
@@ -373,6 +509,20 @@ def run_foreground(
                     finally:
                         request_correlation_key = None
             else:
+                if (
+                    failure_code == "MCP_ACTIVATION_FAILED"
+                    and supervisor is not None
+                    and supervisor.failure_code is not None
+                ):
+                    failure_code = _safe_code(
+                        supervisor.failure_code, "MCP_ACTIVATION_FAILED"
+                    )
+                elif (
+                    failure_code == "MCP_ACTIVATION_FAILED"
+                    and supervisor is not None
+                    and supervisor.stop_requested
+                ):
+                    failure_code = "ACTIVATION_CANCELLED"
                 mark_failed(failure_code)
 
         supervisor = supervisor_factory(
@@ -388,13 +538,11 @@ def run_foreground(
             supervisor_result = supervisor.run()
         except BaseException as exc:
             supervisor_error = exc
+            supervisor_result = supervisor.terminal_result
 
-        # Never persist stopped evidence when exact-child cleanup raised or did
-        # not produce an observed return code. Authorization may already be
-        # denied, but that is distinct from proving process termination.
-        if supervisor_error is not None:
-            raise supervisor_error
         if supervisor_result is None or supervisor_result.child_returncode is None:
+            if supervisor_error is not None:
+                raise supervisor_error
             raise ControllerError(
                 "TUNNEL_STOP_UNCONFIRMED",
                 "The exact Tunnel child termination could not be confirmed.",
@@ -402,15 +550,32 @@ def run_foreground(
 
         # The supervisor has now completed revoke-first cleanup and observed
         # the exact child's terminal return code before package evidence is written.
-        if activation_completed and revocation_succeeded:
+        if activation_completed and authorization_denied:
             try:
-                hooks.record_stopped(session_id_sha256, stop_reason)
-                stopped_recorded = True
+                runtime_stop = hooks.record_stopped(
+                    session_id_sha256,
+                    stop_reason,
+                    supervisor_result.child_returncode,
+                    supervisor_result.forced_exact_child,
+                )
+                exact_child_stop_recorded = bool(
+                    isinstance(runtime_stop, Mapping)
+                    and runtime_stop.get("exact_child_stop_recorded") is True
+                )
+                stopped_recorded = bool(
+                    isinstance(runtime_stop, Mapping)
+                    and runtime_stop.get("runtime_stop_receipt_recorded") is True
+                )
             except Exception as exc:
                 raise _as_controller_error(exc, "MCP_STOP_RECORD_FAILED") from None
+        elif process_started and not activation_completed:
+            record_failed_activation_stop()
+        if supervisor_error is not None:
+            raise supervisor_error
     except BaseException as exc:
         try:
             mark_failed(_exception_code(exc, failure_code))
+            record_failed_activation_stop()
         except Exception as fail_exc:
             raise _as_controller_error(fail_exc, "MCP_ACTIVATION_FAILED") from None
         if isinstance(exc, KeyboardInterrupt):
@@ -430,8 +595,13 @@ def run_foreground(
         child_returncode=supervisor_result.child_returncode,
         terminated_exact_child=supervisor_result.terminated,
         forced_exact_child=supervisor_result.forced_exact_child,
-        authorization_revoked=revocation_succeeded,
+        authorization_denied=authorization_denied,
+        authorization_status=authorization_status,
+        revocation_receipt_recorded=revocation_receipt_recorded,
+        authorization_revoked=authorization_revoked,
         stopped_recorded=stopped_recorded,
+        exact_child_stop_recorded=exact_child_stop_recorded,
+        activation_stop_receipt_recorded=activation_stop_receipt_recorded,
         request_correlation=request_correlation_report,
     )
 
