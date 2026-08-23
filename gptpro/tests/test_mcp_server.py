@@ -7,6 +7,8 @@ import io
 import importlib.util
 import json
 import os
+import select
+import signal
 import struct
 import subprocess
 import sys
@@ -1296,14 +1298,119 @@ class EntrypointTests(unittest.TestCase):
             mock.patch.dict(os.environ, environment, clear=True),
             mock.patch("builtins.__import__", side_effect=guarded_import),
         ):
-            runtime, lease, server_class = module._runtime_from_environment()
+            runtime, lease, server_class, parent_shutdown_contract = (
+                module._runtime_from_environment()
+            )
         self.assertIsNone(lease)
         self.assertIsNotNone(runtime)
         self.assertIsNotNone(server_class)
+        self.assertFalse(parent_shutdown_contract)
         self.assertTrue(observations)
         self.assertTrue(
             all(value is None for snapshot in observations for value in snapshot.values())
         )
+
+    def test_active_entrypoint_records_sigterm_only_after_stdio_eof(self) -> None:
+        script = SKILL_ROOT / "scripts/gptpro_mcp.py"
+        with tempfile.TemporaryDirectory() as temporary:
+            trace_root = Path(temporary).resolve()
+            code = f"""
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+script = Path({str(script)!r})
+spec = importlib.util.spec_from_file_location("gptpro_mcp_signal_test", script)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+from runtime.gptpro_mcp.protocol import LegacyMcpServer
+from runtime.gptpro_mcp.protocol_trace import ProtocolTrace, ProtocolTraceBinding
+
+binding = ProtocolTraceBinding(
+    package_id="signal-test",
+    session_id_sha256="1" * 64,
+    manifest_sha256="2" * 64,
+    approval_event_sha256="3" * 64,
+    archive_sha256="4" * 64,
+    file_set_sha256="5" * 64,
+    tool_schema_sha256="6" * 64,
+    audit_header_sha256="7" * 64,
+    tunnel_profile_sha256="8" * 64,
+    tunnel_client_binary_sha256="9" * 64,
+    mcp_target_sha256="a" * 64,
+    mcp_runtime_tree_sha256="b" * 64,
+)
+trace = ProtocolTrace(Path({str(trace_root)!r}), binding)
+trace.open_or_create()
+
+class Runtime:
+    def call(self, *args, **kwargs):
+        raise AssertionError("no request is expected")
+
+class Lease:
+    def close(self):
+        return None
+
+class Server:
+    def __init__(self, runtime):
+        self.inner = LegacyMcpServer(runtime, trace=trace)
+
+    def note_parent_shutdown(self):
+        self.inner.note_parent_shutdown()
+        sys.stderr.write("SIGNAL_OBSERVED\\n")
+        sys.stderr.flush()
+
+    def serve(self, input_stream, output_stream, stderr):
+        stderr.write("READY\\n")
+        stderr.flush()
+        return self.inner.serve(input_stream, output_stream, stderr)
+
+module._runtime_from_environment = lambda: (Runtime(), Lease(), Server, True)
+returncode = module.serve()
+summary = trace.verify()
+print(json.dumps({{
+    "closed": summary.closed,
+    "close_reason": summary.close_reason,
+    "event_count": summary.event_count,
+}}))
+raise SystemExit(returncode)
+"""
+            process = subprocess.Popen(
+                [sys.executable, "-B", "-c", code],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            )
+            try:
+                self.assertTrue(select.select([process.stderr], [], [], 5)[0])
+                self.assertEqual("READY", process.stderr.readline().strip())
+                process.send_signal(signal.SIGTERM)
+                self.assertTrue(select.select([process.stderr], [], [], 5)[0])
+                self.assertEqual("SIGNAL_OBSERVED", process.stderr.readline().strip())
+                self.assertIsNotNone(process.stdin)
+                process.stdin.close()
+                self.assertEqual(0, process.wait(timeout=5))
+                self.assertIsNotNone(process.stdout)
+                result = json.loads(process.stdout.read())
+                self.assertEqual(
+                    {"closed": True, "close_reason": "parent_shutdown", "event_count": 0},
+                    result,
+                )
+                self.assertEqual("", process.stderr.read())
+            finally:
+                if process.stdin is not None and not process.stdin.closed:
+                    process.stdin.close()
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+                if process.stdout is not None:
+                    process.stdout.close()
+                if process.stderr is not None:
+                    process.stderr.close()
 
     def test_help_has_no_runtime_side_effect(self) -> None:
         script = SKILL_ROOT / "scripts/gptpro_mcp.py"

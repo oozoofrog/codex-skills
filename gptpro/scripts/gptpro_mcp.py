@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import functools
 import os
+import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ _INHERITED_SECRET_ENV = (
 )
 _SESSION_CAPABILITY_ENV = "GPTPRO_MCP_SESSION_CAPABILITY"
 _RUNTIME_DIRECTORY_ENV = "GPTPRO_MCP_RUNTIME_DIR"
+_PARENT_SHUTDOWN_CONTRACT_ENV = "GPTPRO_MCP_PARENT_SHUTDOWN_CONTRACT"
 
 
 class RuntimeBootstrapError(Exception):
@@ -52,12 +54,17 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _runtime_from_environment() -> tuple[Any, Any | None, Any]:
+def _runtime_from_environment() -> tuple[Any, Any | None, Any, bool]:
     # Consume the only permitted capability values and remove inherited Tunnel
     # credentials before importing any bundled runtime module. This keeps
     # import-time code outside the control-plane secret boundary.
     capability_text = os.environ.pop(_SESSION_CAPABILITY_ENV, "")
     runtime_text = os.environ.pop(_RUNTIME_DIRECTORY_ENV, "")
+    parent_shutdown_contract_text = os.environ.pop(
+        _PARENT_SHUTDOWN_CONTRACT_ENV, ""
+    )
+    if parent_shutdown_contract_text not in {"", "1"}:
+        raise RuntimeBootstrapError("The parent-shutdown contract is invalid.")
     for name in _INHERITED_SECRET_ENV:
         os.environ.pop(name, None)
     try:
@@ -65,6 +72,7 @@ def _runtime_from_environment() -> tuple[Any, Any | None, Any]:
         from runtime.gptpro_mcp.live import (
             RUNTIME_DIRECTORY_ENV,
             SESSION_CAPABILITY_ENV,
+            PARENT_SHUTDOWN_CONTRACT_ENV,
             ActiveRuntimeContext,
             RuntimeServerLease,
             decode_session_capability,
@@ -80,10 +88,15 @@ def _runtime_from_environment() -> tuple[Any, Any | None, Any]:
         if (
             SESSION_CAPABILITY_ENV != _SESSION_CAPABILITY_ENV
             or RUNTIME_DIRECTORY_ENV != _RUNTIME_DIRECTORY_ENV
+            or PARENT_SHUTDOWN_CONTRACT_ENV != _PARENT_SHUTDOWN_CONTRACT_ENV
         ):
             raise RuntimeBootstrapError("The bundled capability contract is inconsistent.")
         if not capability_text and not runtime_text:
-            return ToolRuntime(DenyAllAuthorizationProvider()), None, LegacyMcpServer
+            if parent_shutdown_contract_text:
+                raise RuntimeBootstrapError(
+                    "The parent-shutdown contract requires an active runtime."
+                )
+            return ToolRuntime(DenyAllAuthorizationProvider()), None, LegacyMcpServer, False
         if not capability_text or not runtime_text:
             raise RuntimeStateError(
                 "RUNTIME_STATE_UNSAFE", "The foreground MCP capability environment is incomplete."
@@ -151,7 +164,12 @@ def _runtime_from_environment() -> tuple[Any, Any | None, Any]:
             raise RuntimeBootstrapError("The active protocol trace is already closed.")
         lease = RuntimeServerLease(store, session_hash).acquire()
         server_factory = functools.partial(LegacyMcpServer, trace=trace)
-        return ToolRuntime(context, committer=context), lease, server_factory
+        return (
+            ToolRuntime(context, committer=context),
+            lease,
+            server_factory,
+            parent_shutdown_contract_text == "1",
+        )
     except RuntimeBootstrapError:
         raise
     except (ImportError, RuntimeStateError, ProtocolTraceError, ValueError) as exc:
@@ -162,12 +180,46 @@ def _runtime_from_environment() -> tuple[Any, Any | None, Any]:
 
 def serve() -> int:
     try:
-        runtime, lease, server_class = _runtime_from_environment()
+        runtime, lease, server_class, parent_shutdown_contract = _runtime_from_environment()
     except RuntimeBootstrapError:
         print("RUNTIME_BOOTSTRAP_FAILED: active authorization is unavailable", file=sys.stderr)
         return 2
     try:
-        return server_class(runtime).serve(sys.stdin, sys.stdout, sys.stderr)
+        server = server_class(runtime)
+        if lease is None or not parent_shutdown_contract:
+            return server.serve(sys.stdin, sys.stdout, sys.stderr)
+
+        note_parent_shutdown = getattr(server, "note_parent_shutdown", None)
+        if not callable(note_parent_shutdown):
+            print(
+                "RUNTIME_SIGNAL_HANDLER_FAILED: active runtime cannot record parent shutdown",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+            def handle_parent_shutdown(signum: int, frame: Any) -> None:
+                del signum, frame
+                note_parent_shutdown()
+
+            signal.signal(signal.SIGTERM, handle_parent_shutdown)
+        except (OSError, RuntimeError, ValueError):
+            print(
+                "RUNTIME_SIGNAL_HANDLER_FAILED: active runtime cannot observe parent shutdown",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            return server.serve(sys.stdin, sys.stdout, sys.stderr)
+        finally:
+            try:
+                signal.signal(signal.SIGTERM, previous_sigterm)
+            except (OSError, RuntimeError, ValueError):
+                print(
+                    "RUNTIME_SIGNAL_HANDLER_RESTORE_FAILED: parent shutdown handler was not restored",
+                    file=sys.stderr,
+                )
     finally:
         if lease is not None:
             lease.close()

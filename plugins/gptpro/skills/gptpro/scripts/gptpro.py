@@ -6130,6 +6130,9 @@ def command_mcp_probe(args: argparse.Namespace) -> int:
                 "request_correlation_contract_supported": (
                     capabilities.request_correlation_contract_supported
                 ),
+                "parent_shutdown_contract_supported": (
+                    getattr(capabilities, "parent_shutdown_contract_supported", False)
+                ),
                 "supported": capabilities.supported,
             }
             payload["ok"] = payload["ok"] and bool(payload["tunnel_client"]["supported"])
@@ -6383,6 +6386,9 @@ def _command_mcp_activate_with_profile_lease(
             profile_dir=tunnel_profile_dir_for(args),
             ready_timeout=float(args.ready_timeout),
             request_correlation_diagnostic=diagnose_request_correlation,
+            parent_shutdown_contract_supported=getattr(
+                capabilities, "parent_shutdown_contract_supported", False
+            ),
         )
     except (ControllerError, TunnelClientError, RuntimeStateError) as exc:
         raise HandoffError(f"{exc.code}: {exc.message}") from exc
@@ -6669,8 +6675,14 @@ def protocol_trace_terminal_evidence_payload(
     runtime_stop_observed = session.get("tunnel_runtime_stopped") is True
     activation_stop_observed = failed_activation_stop_evidence(verified) is not None
     protocol_stream_closed = summary.closed if summary is not None else None
+    close_reason = summary.close_reason if summary is not None else None
     protocol_eof_observed = (
-        summary.close_reason == "stdio_eof" if summary is not None else None
+        close_reason in {"stdio_eof", "parent_shutdown"}
+        if summary is not None
+        else None
+    )
+    parent_shutdown_observed = (
+        close_reason == "parent_shutdown" if summary is not None else None
     )
     if activation_stop_observed and not lifecycle_bound:
         status = "activation_failed_child_stopped_trace_artifact_unbound"
@@ -6678,6 +6690,8 @@ def protocol_trace_terminal_evidence_payload(
         status = "activation_failed_child_stopped_invalid_trace_artifact_bound"
     elif activation_stop_observed and summary is not None and summary.close_reason == "stdio_eof":
         status = "activation_failed_child_stopped_stdio_eof_observed"
+    elif activation_stop_observed and summary is not None and summary.close_reason == "parent_shutdown":
+        status = "activation_failed_child_stopped_parent_shutdown_eof_observed"
     elif activation_stop_observed and summary is not None and summary.close_reason == "protocol_broken":
         status = "activation_failed_child_stopped_protocol_break_observed"
     elif activation_stop_observed:
@@ -6690,6 +6704,8 @@ def protocol_trace_terminal_evidence_payload(
         status = "runtime_stopped_invalid_trace_artifact_bound"
     elif summary is not None and summary.close_reason == "stdio_eof":
         status = "runtime_stopped_stdio_eof_observed"
+    elif summary is not None and summary.close_reason == "parent_shutdown":
+        status = "runtime_stopped_parent_shutdown_eof_observed"
     elif summary is not None and summary.close_reason == "protocol_broken":
         status = "runtime_stopped_protocol_break_observed"
     else:
@@ -6700,6 +6716,7 @@ def protocol_trace_terminal_evidence_payload(
         "activation_failure_stop_observed": activation_stop_observed,
         "protocol_stream_closed": protocol_stream_closed,
         "protocol_eof_observed": protocol_eof_observed,
+        "parent_shutdown_observed": parent_shutdown_observed,
         "final_artifact_bound_to_stop_receipt": lifecycle_bound,
     }
 
@@ -6891,6 +6908,12 @@ def mcp_request_correlation_payload(
         return base
     if trace_summary.closed is not True:
         base["code"] = "REQUEST_CORRELATION_TRACE_OPEN"
+        return base
+    if trace_summary.close_reason == "protocol_broken":
+        base["code"] = "REQUEST_CORRELATION_PROTOCOL_BROKEN"
+        return base
+    if trace_summary.close_reason not in {"stdio_eof", "parent_shutdown"}:
+        base["code"] = "REQUEST_CORRELATION_TRACE_INCOMPLETE"
         return base
     response_events = [
         event

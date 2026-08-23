@@ -132,7 +132,7 @@ python3 <skill-dir>/scripts/gptpro.py mcp-stop --handoff-dir .gptpro/handoffs/<p
 python3 <skill-dir>/scripts/gptpro.py mcp-protocol-trace --handoff-dir .gptpro/handoffs/<package-id> --json
 ```
 
-Read `protocol_trace.terminal_evidence` as a conjunction: protocol footer observation, normal runtime stop, failed-activation child stop, and final artifact binding are separate facts. `runtime_stopped_protocol_eof_unobserved` and `activation_failed_child_stopped_protocol_eof_unobserved` retain an honestly open protocol prefix; neither permits rewriting it as `closed: true`.
+Read `protocol_trace.terminal_evidence` as a conjunction: protocol footer observation, normal runtime stop, failed-activation child stop, parent-shutdown observation, and final artifact binding are separate facts. The active MCP child records `parent_shutdown` only after the pinned Tunnel's stop signal and actual stdin EOF reach the normal server-finalization path; the signal handler never writes a footer. `runtime_stopped_protocol_eof_unobserved` and `activation_failed_child_stopped_protocol_eof_unobserved` retain an honestly open protocol prefix; neither permits rewriting it as `closed: true`.
 
 `init` defaults to repository-local Git metadata (`.git/info/exclude`) so it does not change tracked files. Use `--ignore-scope repository` only when the user explicitly wants `.gitignore` updated, or `--ignore-scope none` to create storage without Git exclusion. The prepare command prints the created handoff directory. Keep `.gptpro/` out of commits unless the user explicitly requests preserving a receipt artifact.
 

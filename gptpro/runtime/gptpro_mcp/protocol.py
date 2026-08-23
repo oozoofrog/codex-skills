@@ -86,6 +86,17 @@ class LegacyMcpServer:
         self._output: TextIO | None = None
         self._stderr: TextIO | None = None
         self._broken = threading.Event()
+        # The active Tunnel closes this process's stdin before forwarding
+        # SIGTERM.  Keep the handler side effect to one atomic Python
+        # assignment; the normal read-loop/finally path remains responsible
+        # for proving EOF and writing the trace footer.
+        self._parent_shutdown_requested = False
+        self._input_eof_observed = False
+
+    def note_parent_shutdown(self) -> None:
+        """Record an attended parent stop without doing I/O in a signal handler."""
+
+        self._parent_shutdown_requested = True
 
     def serve(self, input_stream: TextIO, output_stream: TextIO, stderr: TextIO) -> int:
         self._output = output_stream
@@ -96,6 +107,7 @@ class LegacyMcpServer:
                     break
                 line = input_stream.readline(MAX_INPUT_FRAME_CHARS + 1)
                 if not line:
+                    self._input_eof_observed = True
                     break
                 if len(line) > MAX_INPUT_FRAME_CHARS:
                     while line and not line.endswith("\n"):
@@ -122,9 +134,13 @@ class LegacyMcpServer:
             self._executor.shutdown(wait=True, cancel_futures=False)
             if self._trace is not None:
                 try:
-                    self._trace.close(
-                        "protocol_broken" if self._broken.is_set() else "stdio_eof"
-                    )
+                    if self._broken.is_set() or not self._input_eof_observed:
+                        close_reason = "protocol_broken"
+                    elif self._parent_shutdown_requested:
+                        close_reason = "parent_shutdown"
+                    else:
+                        close_reason = "stdio_eof"
+                    self._trace.close(close_reason)
                 except (ProtocolTraceError, ValueError):
                     self._broken.set()
                     self._log("MCP_PROTOCOL_TRACE_FAILED")

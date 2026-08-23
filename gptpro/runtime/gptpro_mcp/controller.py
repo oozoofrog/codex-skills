@@ -21,6 +21,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 from .live import (
     ControllerLease,
+    PARENT_SHUTDOWN_CONTRACT_ENV,
     RUNTIME_DIRECTORY_ENV,
     SESSION_CAPABILITY_ENV,
     decode_session_capability,
@@ -167,6 +168,7 @@ def run_foreground(
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     request_correlation_diagnostic: bool = False,
+    parent_shutdown_contract_supported: bool = False,
 ) -> ControllerResult:
     """Run one approved package until an attended or child-exit stop.
 
@@ -181,6 +183,7 @@ def run_foreground(
         health_poll_interval=health_poll_interval,
         stop_timeout=stop_timeout,
         request_correlation_diagnostic=request_correlation_diagnostic,
+        parent_shutdown_contract_supported=parent_shutdown_contract_supported,
     )
     environment = dict(child_environment)
     raw_capability, encoded_capability, session_id_sha256 = capability_factory()
@@ -302,6 +305,8 @@ def run_foreground(
             SESSION_CAPABILITY_ENV: encoded_capability,
             RUNTIME_DIRECTORY_ENV: str(runtime_store.root),
         }
+        if parent_shutdown_contract_supported:
+            child_extra_environment[PARENT_SHUTDOWN_CONTRACT_ENV] = "1"
 
         def process_factory(
             child_signal_mask: set[signal.Signals] | None,
@@ -613,6 +618,7 @@ def _validate_inputs(
     health_poll_interval: float,
     stop_timeout: float,
     request_correlation_diagnostic: bool,
+    parent_shutdown_contract_supported: bool,
 ) -> None:
     if not isinstance(tunnel_profile, str) or _PROFILE.fullmatch(tunnel_profile) is None:
         raise ControllerError("MCP_INVALID_ARGUMENT", "The Tunnel profile alias is invalid.")
@@ -631,6 +637,11 @@ def _validate_inputs(
         raise ControllerError(
             "MCP_INVALID_ARGUMENT",
             "The request-correlation diagnostic flag is invalid.",
+        )
+    if not isinstance(parent_shutdown_contract_supported, bool):
+        raise ControllerError(
+            "MCP_INVALID_ARGUMENT",
+            "The parent-shutdown compatibility flag is invalid.",
         )
 
 

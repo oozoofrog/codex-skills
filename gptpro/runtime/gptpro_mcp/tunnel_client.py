@@ -66,7 +66,11 @@ _CANONICAL_CONTROL_PLANE_BASE_URL = "https://api.openai.com"
 # non-empty at precedence selection time and normalizes to an empty URL prefix.
 _CANONICAL_CONTROL_PLANE_URL_PATH = "/"
 _TRUSTED_GPTPRO_CHILD_ENV_NAMES = frozenset(
-    {"GPTPRO_MCP_SESSION_CAPABILITY", "GPTPRO_MCP_RUNTIME_DIR"}
+    {
+        "GPTPRO_MCP_SESSION_CAPABILITY",
+        "GPTPRO_MCP_RUNTIME_DIR",
+        "GPTPRO_MCP_PARENT_SHUTDOWN_CONTRACT",
+    }
 )
 _SESSION_CAPABILITY = re.compile(r"[A-Za-z0-9_-]{43}")
 _PROFILE_KEY = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,127}")
@@ -74,7 +78,7 @@ _PROFILE_MAX_BYTES = 64 * 1024
 _MAX_UNIX_SOCKET_PATH_BYTES = 100
 _MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
 _COMMAND_STOP_GRACE_SECONDS = 1.0
-_REQUEST_CORRELATION_TUNNEL_VERSION = re.compile(
+_PINNED_TUNNEL_V012_VERSION = re.compile(
     r"0\.0\.12\+881c9a8fed7cccbe6607cd419863bbca506b8215 "
     r"\(git sha: 881c9a8fed7cccbe6607cd419863bbca506b8215\)"
 )
@@ -277,7 +281,13 @@ class TunnelCapabilities:
     def request_correlation_contract_supported(self) -> bool:
         """Whether this exact binary version has the pinned private log contract."""
 
-        return _REQUEST_CORRELATION_TUNNEL_VERSION.fullmatch(self.version) is not None
+        return _PINNED_TUNNEL_V012_VERSION.fullmatch(self.version) is not None
+
+    @property
+    def parent_shutdown_contract_supported(self) -> bool:
+        """Whether this exact binary closes MCP stdin while forwarding SIGTERM."""
+
+        return _PINNED_TUNNEL_V012_VERSION.fullmatch(self.version) is not None
 
 
 @dataclass(frozen=True)
@@ -1246,12 +1256,22 @@ def _minimal_tunnel_environment(
 
     if trusted_child_environment is not None:
         supplied_names = set(trusted_child_environment)
-        if supplied_names != _TRUSTED_GPTPRO_CHILD_ENV_NAMES:
+        required_names = {
+            "GPTPRO_MCP_SESSION_CAPABILITY",
+            "GPTPRO_MCP_RUNTIME_DIR",
+        }
+        if (
+            not required_names.issubset(supplied_names)
+            or not supplied_names.issubset(_TRUSTED_GPTPRO_CHILD_ENV_NAMES)
+        ):
             raise TunnelClientError(
                 "RUNTIME_STATE_UNSAFE", "The MCP child capability environment is incomplete or unsafe."
             )
         capability = trusted_child_environment.get("GPTPRO_MCP_SESSION_CAPABILITY")
         runtime_directory = trusted_child_environment.get("GPTPRO_MCP_RUNTIME_DIR")
+        parent_shutdown_contract = trusted_child_environment.get(
+            "GPTPRO_MCP_PARENT_SHUTDOWN_CONTRACT"
+        )
         if not isinstance(capability, str) or _SESSION_CAPABILITY.fullmatch(capability) is None:
             raise TunnelClientError(
                 "RUNTIME_STATE_UNSAFE", "The MCP child session capability is invalid."
@@ -1265,12 +1285,19 @@ def _minimal_tunnel_environment(
             raise TunnelClientError(
                 "RUNTIME_STATE_UNSAFE", "The MCP child runtime directory is invalid."
             )
+        if parent_shutdown_contract is not None and parent_shutdown_contract != "1":
+            raise TunnelClientError(
+                "RUNTIME_STATE_UNSAFE",
+                "The MCP child parent-shutdown contract is invalid.",
+            )
         child.update(
             {
                 "GPTPRO_MCP_SESSION_CAPABILITY": capability,
                 "GPTPRO_MCP_RUNTIME_DIR": runtime_directory,
             }
         )
+        if parent_shutdown_contract == "1":
+            child["GPTPRO_MCP_PARENT_SHUTDOWN_CONTRACT"] = "1"
     return child
 
 

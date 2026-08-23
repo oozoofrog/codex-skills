@@ -1969,10 +1969,12 @@ time.sleep(60)
         )
         self.assertTrue(exact.supported)
         self.assertTrue(exact.request_correlation_contract_supported)
+        self.assertTrue(exact.parent_shutdown_contract_supported)
 
         unknown = replace(exact, version="v99.0.0")
         self.assertTrue(unknown.supported)
         self.assertFalse(unknown.request_correlation_contract_supported)
+        self.assertFalse(unknown.parent_shutdown_contract_supported)
 
     def test_probe_does_not_treat_pid_file_as_exact_pid_support(self) -> None:
         pid_file_only = self.root / "tunnel-client-pid-file-only"
@@ -2227,6 +2229,19 @@ time.sleep(60)
                 },
             )
         self.assertEqual("RUNTIME_STATE_UNSAFE", untrusted_environment.exception.code)
+
+        with self.assertRaises(TunnelClientError) as invalid_shutdown_contract:
+            client.spawn_run(
+                "gptpro-web",
+                env=runtime_env,
+                runtime_files=clean_files,
+                extra_env={
+                    "GPTPRO_MCP_SESSION_CAPABILITY": "C" * 43,
+                    "GPTPRO_MCP_RUNTIME_DIR": str(clean_files.url_file.parent),
+                    "GPTPRO_MCP_PARENT_SHUTDOWN_CONTRACT": "true",
+                },
+            )
+        self.assertEqual("RUNTIME_STATE_UNSAFE", invalid_shutdown_contract.exception.code)
 
     def test_runtime_file_preparation_retires_only_an_owned_stale_health_socket(self) -> None:
         runtime_root = self.root / "s"

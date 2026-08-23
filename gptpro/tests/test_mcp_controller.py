@@ -25,6 +25,7 @@ from runtime.gptpro_mcp.controller import (
     run_foreground,
 )
 from runtime.gptpro_mcp.live import (
+    PARENT_SHUTDOWN_CONTRACT_ENV,
     RUNTIME_DIRECTORY_ENV,
     SESSION_CAPABILITY_ENV,
     decode_session_capability,
@@ -334,6 +335,7 @@ class ControllerTests(unittest.TestCase):
             child_environment={"CONTROL_PLANE_API_KEY": "sk-" + "x" * 32},
             hooks=self.hooks(on_active=on_active),
             health_poll_interval=0.01,
+            parent_shutdown_contract_supported=True,
         )
         self.assert_remote_stops_accepted()
 
@@ -358,6 +360,7 @@ class ControllerTests(unittest.TestCase):
         raw = decode_session_capability(capability)
         self.assertEqual(result.session_id_sha256, digest(raw))
         self.assertEqual(str(self.store.root), extra_env[RUNTIME_DIRECTORY_ENV])
+        self.assertEqual("1", extra_env[PARENT_SHUTDOWN_CONTRACT_ENV])
         self.assertNotIn(capability, repr(result))
         self.assertNotIn("sk-", repr(result))
         self.assertEqual(self.store.root / "control.sock", control_socket_path(self.store.root))
@@ -1139,6 +1142,19 @@ class ControllerTests(unittest.TestCase):
                 request_correlation_diagnostic="true",  # type: ignore[arg-type]
             )
         self.assertEqual("MCP_INVALID_ARGUMENT", diagnostic_flag.exception.code)
+        self.assertEqual([], self.events)
+        self.assertIsNone(self.store.read())
+
+        with self.assertRaises(ControllerError) as shutdown_flag:
+            run_foreground(
+                tunnel_client=tunnel,
+                runtime_store=self.store,
+                tunnel_profile="gptpro-web",
+                child_environment={},
+                hooks=self.hooks(),
+                parent_shutdown_contract_supported="true",  # type: ignore[arg-type]
+            )
+        self.assertEqual("MCP_INVALID_ARGUMENT", shutdown_flag.exception.code)
         self.assertEqual([], self.events)
         self.assertIsNone(self.store.read())
 

@@ -1867,6 +1867,7 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertTrue(diagnostic["terminal_evidence"]["runtime_stop_observed"])
         self.assertTrue(diagnostic["terminal_evidence"]["protocol_stream_closed"])
         self.assertTrue(diagnostic["terminal_evidence"]["protocol_eof_observed"])
+        self.assertFalse(diagnostic["terminal_evidence"]["parent_shutdown_observed"])
         self.assertTrue(
             diagnostic["terminal_evidence"]["final_artifact_bound_to_stop_receipt"]
         )
@@ -1882,6 +1883,38 @@ class WebMcpRuntimeTests(unittest.TestCase):
                 self.load(handoff / "manifest.json"),
                 manifest_sha256=self.module.sha256_file(handoff / "manifest.json"),
             )
+
+    def test_parent_shutdown_footer_is_eof_observed_and_receipt_bound(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, session_hash, _ = self.activate(handoff)
+        self.module.stop_mcp_authorization(handoff, store)
+        trace = self.close_protocol_trace(handoff, "parent_shutdown")
+        self.assertTrue(trace.closed)
+        self.assertEqual("parent_shutdown", trace.close_reason)
+        self.module.record_mcp_runtime_stopped_fail_closed(
+            handoff,
+            store,
+            session_id_sha256=session_hash,
+            reason="user_requested",
+            child_returncode=0,
+            forced_exact_child=False,
+        )
+
+        diagnostic = json.loads(
+            self.run_cli(
+                "mcp-protocol-trace", "--handoff-dir", str(handoff), "--json"
+            ).stdout
+        )["protocol_trace"]
+        terminal = diagnostic["terminal_evidence"]
+        self.assertEqual(
+            "runtime_stopped_parent_shutdown_eof_observed", terminal["status"]
+        )
+        self.assertTrue(terminal["runtime_stop_observed"])
+        self.assertTrue(terminal["protocol_stream_closed"])
+        self.assertTrue(terminal["protocol_eof_observed"])
+        self.assertTrue(terminal["parent_shutdown_observed"])
+        self.assertTrue(terminal["final_artifact_bound_to_stop_receipt"])
+        self.run_cli("verify", "--handoff-dir", str(handoff))
 
     def test_runtime_stop_reconciles_a_late_commit_error_without_false_global_evidence(self) -> None:
         handoff = self.prepare_and_approve()
@@ -1970,6 +2003,7 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertTrue(terminal["runtime_stop_observed"])
         self.assertFalse(terminal["protocol_stream_closed"])
         self.assertFalse(terminal["protocol_eof_observed"])
+        self.assertFalse(terminal["parent_shutdown_observed"])
         self.assertTrue(terminal["final_artifact_bound_to_stop_receipt"])
         status = json.loads(
             self.run_cli(
@@ -1996,6 +2030,7 @@ class WebMcpRuntimeTests(unittest.TestCase):
         trace_summary = SimpleNamespace(
             truncated=False,
             closed=True,
+            close_reason="parent_shutdown",
             events=trace_events,
         )
         audits = (
@@ -2162,6 +2197,7 @@ class WebMcpRuntimeTests(unittest.TestCase):
         trace_summary = SimpleNamespace(
             truncated=False,
             closed=True,
+            close_reason="stdio_eof",
             events=(
                 {
                     "sequence": 1,
@@ -2222,6 +2258,7 @@ class WebMcpRuntimeTests(unittest.TestCase):
         open_trace = SimpleNamespace(
             truncated=False,
             closed=False,
+            close_reason=None,
             events=(
                 {
                     "sequence": 1,
@@ -2241,9 +2278,28 @@ class WebMcpRuntimeTests(unittest.TestCase):
             )
         self.assertEqual("REQUEST_CORRELATION_TRACE_OPEN", open_result["code"])
 
+        broken_trace = SimpleNamespace(
+            truncated=False,
+            closed=True,
+            close_reason="protocol_broken",
+            events=open_trace.events,
+        )
+        with mock.patch.object(
+            self.module,
+            "verify_bound_protocol_trace",
+            return_value=(None, broken_trace, None, True),
+        ):
+            broken = self.module.mcp_request_correlation_payload(
+                {"state": {}}, captured
+            )
+        self.assertEqual(
+            "REQUEST_CORRELATION_PROTOCOL_BROKEN", broken["code"]
+        )
+
         late_trace = SimpleNamespace(
             truncated=False,
             closed=True,
+            close_reason="stdio_eof",
             events=tuple(
                 {
                     "sequence": index,
@@ -2267,6 +2323,7 @@ class WebMcpRuntimeTests(unittest.TestCase):
         no_tool_trace = SimpleNamespace(
             truncated=False,
             closed=True,
+            close_reason="stdio_eof",
             events=(
                 {
                     "sequence": 1,
@@ -3063,6 +3120,7 @@ class WebMcpRuntimeTests(unittest.TestCase):
             supported=True,
             health_require_control_plane_poll=True,
             request_correlation_contract_supported=True,
+            parent_shutdown_contract_supported=True,
         )
         fake_client.doctor.return_value = SimpleNamespace(
             ok=True,
@@ -3076,7 +3134,7 @@ class WebMcpRuntimeTests(unittest.TestCase):
         )
 
         def fake_run_foreground(*, hooks, **kwargs):
-            del kwargs
+            self.assertTrue(kwargs["parent_shutdown_contract_supported"])
             with self.assertRaises(self.module.RuntimeStateError) as profile_conflict:
                 self.module.ProfileControllerLease(store.root).acquire()
             self.assertEqual(
