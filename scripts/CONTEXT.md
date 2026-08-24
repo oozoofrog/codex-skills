@@ -2,11 +2,11 @@
 
 ## Scope
 - `scripts/`는 저장소 자체를 동기화하거나 자동화하는 운영 스크립트를 둔다.
-- 상위 규칙은 [../CLAUDE.md](../CLAUDE.md)를 따른다.
+- 상위 규칙은 [../AGENTS.md](../AGENTS.md)를 따른다.
 
 ## Key Files
 - [sync_repo.sh](./sync_repo.sh): fetch/rebase/add/commit/push 흐름을 묶는 핵심 동기화 스크립트
-- [manage_skills.py](./manage_skills.py): top-level Skill 목록 조회와 선택 설치/update 도구
+- [manage_skills.py](./manage_skills.py): `gptpro` 설치 상태 조회와 안전한 설치/update 도구
 - [auto_sync_daemon.py](./auto_sync_daemon.py): 변경 감시와 debounce 기반 자동 동기화 실행기
 - [install_auto_sync_launchd.sh](./install_auto_sync_launchd.sh): launchd 설치 진입점
 - [uninstall_auto_sync_launchd.sh](./uninstall_auto_sync_launchd.sh): launchd 제거 진입점

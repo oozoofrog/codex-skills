@@ -1,11 +1,11 @@
 # AGENTS.md
 
 ## Collaboration Rules
-- Use the `skill-creator` workflow when creating or materially updating a skill.
-- Keep `SKILL.md` frontmatter limited to `name` and `description`.
-- Keep trigger language in `SKILL.md` aligned with each skill's UI metadata file.
+- Use the `skill-creator` workflow when creating or materially updating `gptpro`.
+- Keep `gptpro/SKILL.md` frontmatter limited to `name` and `description`.
+- Keep trigger language aligned across the standalone Skill, Plugin mirror, UI metadata, and `README.md`.
 - Prefer `references/` for long guidance and keep top-level instructions lean.
-- Treat `.system/` as mirrored upstream content unless the task explicitly requires a local patch.
+- Keep `gptpro/` and `plugins/gptpro/skills/gptpro/` byte-identical.
 
 ## Output Contract
 - List changed files or directories.
@@ -13,7 +13,7 @@
 - State any remaining manual follow-up or risk.
 
 ## Review Rules
-- Check trigger wording consistency between `SKILL.md`, the UI metadata file, and `README.md`.
+- Check trigger wording consistency between both `SKILL.md` copies, both UI metadata files, and `README.md`.
 - Check local links and path references for breakage.
 - Check user-visible additions against `CHANGELOG.md`.
 - If a rule was missing and caused rework, update the relevant context document instead of fixing code only.

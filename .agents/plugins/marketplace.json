@@ -1,7 +1,7 @@
 {
   "name": "codex-skills",
   "interface": {
-    "displayName": "Codex Skills"
+    "displayName": "GPT Pro"
   },
   "plugins": [
     {

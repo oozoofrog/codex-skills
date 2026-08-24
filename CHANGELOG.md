@@ -1,6 +1,6 @@
 # Changelog
 
-이 저장소의 의미 있는 skill 묶음 변경을 기록합니다.
+이 저장소의 의미 있는 `gptpro` 변경을 기록합니다.
 
 ## [Unreleased]
 
@@ -18,13 +18,11 @@
 - `gptpro` Skill: plan/ask/review/debug/architecture 모드, Git SHA와 packaged-tree pinning, secret/exclude scan, manifest/archive hash 검증, 승인 gate, visible Chrome handoff, response import, receipt/state, advisory 검증 계약
 - `gptpro` skills-only Plugin과 repo Marketplace: Codex Plugin 브라우저 및 `$skill-installer` 기반 네트워크 설치 경로
 - Plugin manifest, Marketplace entry, standalone/Plugin Skill mirror 일치 검증 테스트와 설치 문서
-- `scripts/manage_skills.py`: top-level Skill 목록 조회와 선택 설치, dry-run, hash-checked atomic update
+- `scripts/manage_skills.py`: `gptpro` 설치 상태 조회, dry-run, hash-checked atomic update
 - 선택 설치 운영 문서와 단위/통합 테스트
-- `hierarchical-context-architecture` skill 추가
-- 루트 `CLAUDE.md`, `AGENTS.md` 및 `docs/`, `scripts/`, `.system/`, `hierarchical-context-architecture/`용 `CONTEXT.md` 초안 추가
-- `docs/release-checklist.md` 추가
 
 ### Updated
+- 저장소의 현재 트리, 설치 도구, 운영 문서, Plugin marketplace를 `gptpro` 단일 패키지 계약으로 정렬
 - `gptpro` 사용 문서를 일반 GitHub-first 상담과 명시적 schema-4 `mcp-research` 상담으로 나누고, 바로 복사할 수 있는 요청 예시, 사용자·Codex·ChatGPT Pro 역할 분담, package-specific 세 범위 승인, attended ChatGPT 단계, 별도 승인 context note, revoke/stop·응답 검증까지의 실제 운영 순서를 추가
 - `gptpro` schema-3/4 disclosure accounting now charges the canonical bytes of the complete model-visible MCP success result—including structured metadata, hashes, cursors, counters, and the fixed text envelope—rather than only tool-specific evidence-body estimates. New audit schema 2 binds this meaning as `complete_model_visible_result_v1`; schema-1 logs remain verifiable but are labeled `legacy_tool_body_estimate` and cannot accept new calls. Audit versions now require exact JSON integers, every current audit requires the exact accounting pair, schema-4 requires it defensively before package publication, and schema-3 compatibility requires an actual legacy audit with omitted bindings rather than stripped current fields. Once MCP readiness is established, a structurally valid unadvertised tool name reaches the governance boundary, consumes one call only after a durable zero-content rejection, and returns JSON-RPC `-32602` with stable code `MCP_INVALID_ARGUMENT`; the audit uses a reserved label plus requested-name hash without retaining the raw name. Pre-append audit failure no longer desynchronizes the in-memory counter; a post-append failure reconciles any provable counters, latches the process session, and best-effort faults/closes persistent authorization instead of guessing or duplicating work. Stop/recover rejects a validly rehashed audit whose activation-time header identity changed, distinguishes proven evidence mismatch from operational recovery failure, and completed package/receipt evidence must match the actual footer's full recorded state and close reason. A valid close-before-package crash window remains recoverable, status never reports its closed audit as effectively active, and an idempotent rerun reconciles an already-terminal exact global authorization and closed audit into the package receipt without inventing child-stop evidence
 - `gptpro` foreground lifecycle now blocks `SIGINT`/`SIGTERM`/`SIGHUP` before the first durable activation write, hands that mask to the supervisor until its handlers are installed, and keeps stop signals blocked through authorization denial, exact-child termination, terminal evidence recording, and controller-lease release. A final exact-session `activating` check holds the cross-process runtime-state lock through Popen ownership, so a terminal denial committed first creates no Tunnel child. Transient denial writes are retried and re-read from durable state; persistent failure leaves explicit orphan recovery rather than false stop evidence. `mcp-stop` also validates the exact owner-only archived terminal session when a concurrent new activation replaces `active.json`, avoiding a false manual-review result after the old exact child was already proven stopped
@@ -48,36 +46,6 @@
 - `gptpro`에 로그인·OAuth/app scope·권한·파일 선택·모델 확인·수동 전송·불확실한 제출·response export를 정상적인 attended human checkpoint로 다루는 read-only `human-handoff` workflow 추가
 - `gptpro` 첫 사용 시 `.gptpro/handoffs`와 Git 제외 규칙을 preview 후 선택적으로 구성하는 멱등 `init` workflow 추가
 - `gptpro` 기본 전달을 ZIP 업로드에서 `auto` 선택형 구조화 텍스트(`paste`/`text-file`)로 변경하고, 실제 전송 bytes/hash에 승인·receipt를 결속
-- 사용자 스킬 정리: 중복 discovery 제거, `macos-release` 단일화, `codex-research`를 기존 `.codex-research/` 호환 runner로 축소
-- 누락된 `agents/openai.yaml` metadata를 사용자 스킬에 보강하고, `SKILL.md` extra frontmatter를 제거
-- README skill catalog를 현재 활성 사용자 스킬 기준으로 재작성
-- `hierarchical-context-architecture` 검증 스크립트에 `--strict`와 `.context-audit.yml` 기반 운영 설정 지원 추가
-- `hierarchical-context-architecture` 문서에 운영 모드와 감사 설정 예시 추가
-- 저장소 루트에 `.context-audit.yml`을 추가해 기본 감사 실행에 strict 운영 기준 적용
-- README skill catalog를 표 형태와 빠른 선택 가이드 중심으로 재구성
-- 릴리즈 운영 파일 섹션에 `docs/release-checklist.md` 링크 추가
-- README에 `hierarchical-context-architecture` 사용 예시와 선택 가이드 추가
 
 ### Removed
-- `fixer` legacy plugin doctor skill 제거 (`plugin-doctor`로 통합)
-- `ooz-macos-release` 제거 (`macos-release`로 통합)
-- `codex-research/skills/codex-research` nested duplicate 제거
-
-## [0.1.1] - 2026-03-14
-### Added
-- README에 skill별 사용 예시 섹션 추가
-- `docs/release-notes-template.md` 추가
-- `CHANGELOG.md` 추가
-
-### Updated
-- README에 신규 skill 설명과 릴리즈 운영 파일 섹션 추가
-
-## [0.1.0] - 2026-03-14
-### Added
-- `frontend-design`
-- `git-pr-workflow`
-- `ralph-loop`
-- `macos-release` 업데이트
-- `swift-master` SourceKit-LSP 보강
-- `ios-swift-orchestrator` SourceKit-LSP 라우팅 보강
-- 첫 annotated tag `v0.1.0`
+- `gptpro`와 직접 관련 없는 이전 저장소 구성 제거

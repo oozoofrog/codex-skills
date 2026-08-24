@@ -3,11 +3,11 @@
 ## Scope
 
 - `docs/` stores operator-facing repository documentation.
-- Follow the repository-wide rules in [../AGENTS.md](../AGENTS.md) and [../CLAUDE.md](../CLAUDE.md).
+- Follow the repository-wide rules in [../AGENTS.md](../AGENTS.md).
 
 ## Key files
 
-- [selective-installation.md](./selective-installation.md): list, install, dry-run, and safe update workflow for individual skills.
+- [selective-installation.md](./selective-installation.md): list, install, dry-run, and safe update workflow for `gptpro`.
 
 ## Local rules
 

@@ -29,6 +29,8 @@ class PluginDistributionTests(unittest.TestCase):
             (REPO_ROOT / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8")
         )
         self.assertEqual("codex-skills", marketplace["name"])
+        self.assertEqual("GPT Pro", marketplace["interface"]["displayName"])
+        self.assertEqual(["gptpro"], [plugin["name"] for plugin in marketplace["plugins"]])
         entry = next(plugin for plugin in marketplace["plugins"] if plugin["name"] == "gptpro")
         self.assertEqual({"source": "local", "path": "./plugins/gptpro"}, entry["source"])
         self.assertEqual("AVAILABLE", entry["policy"]["installation"])

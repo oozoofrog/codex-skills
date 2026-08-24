@@ -35,6 +35,7 @@ class ManageSkillsTests(unittest.TestCase):
         listing = json.loads(
             self.run_cli("list", "--dest", str(self.destination), "--format", "json").stdout
         )
+        self.assertEqual(["gptpro"], [item["name"] for item in listing])
         gptpro = next(item for item in listing if item["name"] == "gptpro")
         self.assertEqual("not-installed", gptpro["status"])
 

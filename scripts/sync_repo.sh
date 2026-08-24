@@ -42,11 +42,7 @@ changed_roots() {
     NF == 0 { next }
     {
       split($0, parts, "/")
-      if (parts[1] == ".system" && parts[2] != "") {
-        print parts[1] "/" parts[2]
-      } else {
-        print parts[1]
-      }
+      print parts[1]
     }
   ' | awk '!seen[$0]++'
 }
@@ -60,7 +56,7 @@ build_auto_commit_message() {
   done < <(changed_roots)
 
   if [[ "${#paths[@]}" -eq 0 ]]; then
-    printf 'Auto-sync skills'
+    printf 'Auto-sync gptpro'
     return
   fi
 
@@ -70,9 +66,9 @@ build_auto_commit_message() {
   summary="$(IFS=', '; printf '%s' "${preview[*]}")"
 
   if [[ "${#paths[@]}" -gt "${limit}" ]]; then
-    printf 'Auto-sync skills: %s (+%d more)' "${summary}" "$(( ${#paths[@]} - limit ))"
+    printf 'Auto-sync gptpro: %s (+%d more)' "${summary}" "$(( ${#paths[@]} - limit ))"
   else
-    printf 'Auto-sync skills: %s' "${summary}"
+    printf 'Auto-sync gptpro: %s' "${summary}"
   fi
 }
 
@@ -184,7 +180,7 @@ if ! git diff --cached --quiet; then
     if [[ "${AUTO_MODE}" -eq 1 ]]; then
       COMMIT_MESSAGE="$(build_auto_commit_message)"
     else
-      COMMIT_MESSAGE="Sync skills: $(date '+%Y-%m-%d %H:%M:%S %z')"
+      COMMIT_MESSAGE="Sync gptpro: $(date '+%Y-%m-%d %H:%M:%S %z')"
     fi
   fi
   log "Creating commit: ${COMMIT_MESSAGE}"

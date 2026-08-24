@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""List and selectively install skill packages from this repository."""
+"""List and atomically install the gptpro Skill from this repository."""
 
 from __future__ import annotations
 
@@ -18,10 +18,11 @@ from typing import Any
 
 IGNORED_TREE_NAMES = {".DS_Store", "__pycache__"}
 IGNORED_TREE_SUFFIXES = {".pyc", ".pyo"}
+PACKAGE_NAME = "gptpro"
 
 
 class ManagerError(Exception):
-    """Expected selective-install error."""
+    """Expected gptpro installation error."""
 
 
 def repository_root() -> Path:
@@ -34,13 +35,10 @@ def default_destination() -> Path:
 
 
 def discover_skills(root: Path) -> dict[str, Path]:
-    packages: dict[str, Path] = {}
-    for child in sorted(root.iterdir(), key=lambda path: path.name):
-        if child.name.startswith(".") or not child.is_dir():
-            continue
-        if (child / "SKILL.md").is_file():
-            packages[child.name] = child
-    return packages
+    source = root / PACKAGE_NAME
+    if not (source / "SKILL.md").is_file():
+        return {}
+    return {PACKAGE_NAME: source}
 
 
 def tree_hash(root: Path) -> str:
@@ -99,7 +97,7 @@ def command_list(args: argparse.Namespace) -> int:
         print(json.dumps(payload, sort_keys=True, indent=2))
         return 0
     if not payload:
-        print("No top-level skill packages found.")
+        print("The gptpro Skill package was not found.")
         return 0
     for item in payload:
         print(f"{item['name']}\t{item['status']}\t{item['destination']}")
@@ -154,15 +152,12 @@ def install_one(source: Path, target: Path, *, update: bool, dry_run: bool) -> s
 def command_install(args: argparse.Namespace) -> int:
     root = repository_root()
     packages = discover_skills(root)
-    unknown = [name for name in args.skills if name not in packages]
-    if unknown:
-        raise ManagerError(f"Unknown skill package(s): {', '.join(unknown)}")
+    if args.skill not in packages:
+        raise ManagerError(f"Unknown skill package: {args.skill}")
     destination = Path(args.dest).expanduser().resolve() if args.dest else default_destination().resolve()
-    results = []
-    for name in args.skills:
-        target = destination / name
-        result = install_one(packages[name], target, update=args.update, dry_run=args.dry_run)
-        results.append({"name": name, "result": result, "destination": str(target)})
+    target = destination / args.skill
+    result = install_one(packages[args.skill], target, update=args.update, dry_run=args.dry_run)
+    results = [{"name": args.skill, "result": result, "destination": str(target)}]
     print(json.dumps(results, sort_keys=True, indent=2))
     return 0
 
@@ -171,13 +166,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    listing = subparsers.add_parser("list", help="List top-level skill packages and install status")
+    listing = subparsers.add_parser("list", help="List gptpro install status")
     listing.add_argument("--dest", help="Skills directory; defaults to ${CODEX_HOME:-~/.codex}/skills")
     listing.add_argument("--format", choices=("text", "json"), default="text")
     listing.set_defaults(func=command_list)
 
-    install = subparsers.add_parser("install", help="Install only the named skill packages")
-    install.add_argument("skills", nargs="+", help="Top-level skill package names")
+    install = subparsers.add_parser("install", help="Install or update gptpro")
+    install.add_argument("skill", help="Skill package name; only gptpro is available")
     install.add_argument("--dest", help="Skills directory; defaults to ${CODEX_HOME:-~/.codex}/skills")
     install.add_argument("--update", action="store_true", help="Replace a differing valid installation atomically")
     install.add_argument("--dry-run", action="store_true", help="Report actions without copying files")

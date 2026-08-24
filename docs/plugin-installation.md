@@ -22,7 +22,7 @@ Until the Plugin is published in the universal Plugins Directory, register this 
 codex plugin marketplace add oozoofrog/codex-skills --ref main
 ```
 
-Then open the Plugins browser, select the `Codex Skills` marketplace, and install `GPT Pro Collaborator`. In Codex CLI, `/plugins` opens the same marketplace browser.
+Then open the Plugins browser, select the `GPT Pro` marketplace, and install `GPT Pro Collaborator`. In Codex CLI, `/plugins` opens the same marketplace browser.
 
 For a CLI-only installation after registration:
 
