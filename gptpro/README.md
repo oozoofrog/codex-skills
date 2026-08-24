@@ -32,13 +32,31 @@ python3 scripts/manage_skills.py install gptpro --update
 
 ## Use
 
-Invoke `$gptpro` and provide a mode plus task, for example:
+For an ordinary GitHub-first consultation, invoke `$gptpro` with a mode and task:
 
 ```text
 $gptpro review 모드로 현재 변경의 정확성과 빠진 테스트를 검토해주세요.
 ```
 
-The Skill will prepare and verify local artifacts first. Transmission is a separate attended action: it must show the exact manifest summary and receive approval before pasting, attaching, or submitting to `chatgpt.com`.
+To let Pro explore an approved immutable local snapshot with the seven schema-4 read-only tools, request `mcp-research` explicitly and name a narrow scope:
+
+```text
+$gptpro review 모드로 src와 tests를 Pro가 읽어가며 분석하도록 mcp-research로 진행해주세요.
+실제 수정은 Pro 응답을 현재 코드와 테스트로 검증한 뒤에만 해주세요.
+```
+
+Do not request Web MCP merely because a repository is local. Start with the ordinary path unless the consultation benefits from iterative workspace mapping, multi-range reads, multiple searches, prepared diff/evidence, or the separately approved context-note ledger. Web MCP currently requires macOS, Python 3.11 or newer, a reviewed official `tunnel-client`, ChatGPT Developer Mode, and attended app/workspace selection.
+
+The user normally does not need to construct CLI commands. The Skill:
+
+1. previews first-use local setup without writing;
+2. prepares, scans, hashes, and verifies a package;
+3. shows the exact outbound prompt and maximum disclosure contract;
+4. stops for package-specific approval;
+5. guides or performs only the authorized attended delivery steps;
+6. revokes/stops a Web MCP session, imports the marked response, and independently evaluates the advice.
+
+Transmission is always a separate attended action. Login, Developer Mode, app/workspace selection, OAuth, model selection, and an ambiguous send state remain visible human checkpoints. A successful Tunnel activation is not permission to send the prompt, and a successful Pro response is not permission to modify the repository.
 
 처음 사용하는 분은 설치부터 첫 상담, 승인, ChatGPT 화면 조작, 응답 검증, `.gptpro/` 관리와 문제 해결까지 설명한 [한국어 사용자 매뉴얼](references/user-manual.md)을 먼저 읽으세요.
 

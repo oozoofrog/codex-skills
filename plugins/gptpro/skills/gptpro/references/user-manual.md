@@ -7,8 +7,10 @@ ChatGPT Pro는 조언을 제공하고, Codex는 저장소 확인, 코드 수정,
 ## 목차
 
 - [가장 짧은 사용법](#가장-짧은-사용법)
+- [누가 무엇을 하나요?](#누가-무엇을-하나요)
 - [설치](#설치)
 - [무엇을 선택해야 하나요?](#무엇을-선택해야-하나요)
+- [Schema 4 상담을 실제로 진행하는 순서](#schema-4-상담을-실제로-진행하는-순서)
 - [처음 상담하는 전체 흐름](#처음-상담하는-전체-흐름)
 - [다섯 가지 상담 모드](#다섯-가지-상담-모드)
 - [전송 방식 이해하기](#전송-방식-이해하기)
@@ -23,11 +25,22 @@ ChatGPT Pro는 조언을 제공하고, Codex는 저장소 확인, 코드 수정,
 
 ## 가장 짧은 사용법
 
-설치가 끝났다면 Codex에서 다음처럼 요청하면 됩니다.
+설치가 끝났다면 먼저 일반 상담으로 시작하세요.
 
 ```text
 $gptpro review 모드로 현재 변경의 정확성과 빠진 테스트를 검토해주세요.
 ```
+
+Codex가 GitHub-first `auto` 경로를 준비하고, 현재 commit을 안전하게 사용할 수 없으면 승인 전에만 paste 또는 text-file 경로를 제안합니다.
+
+ChatGPT Pro가 승인된 로컬 snapshot을 여러 번 검색하고 읽으면서 더 깊게 분석해야 한다면 `mcp-research`를 명시합니다.
+
+```text
+$gptpro review 모드로 src와 tests를 Pro가 읽어가며 분석하도록 mcp-research로 진행해주세요.
+공개 범위는 필요한 파일로 최소화하고, 실제 수정은 Pro 응답을 검증한 뒤에만 해주세요.
+```
+
+`mcp-research`라는 말이 없으면 Web MCP는 자동으로 선택되지 않습니다. 처음부터 전체 repository를 공개하도록 요청하기보다 `src/**`, `tests/**`처럼 목적에 필요한 범위를 함께 말하는 편이 좋습니다.
 
 이후 Codex가 다음을 순서대로 진행합니다.
 
@@ -40,6 +53,16 @@ $gptpro review 모드로 현재 변경의 정확성과 빠진 테스트를 검�
 7. 검증을 통과한 조언만 사용합니다.
 
 사용자는 보통 Python 명령을 직접 입력할 필요가 없습니다. Codex가 명령을 실행하고, 사람이 판단해야 하는 승인과 ChatGPT 화면 조작이 필요할 때 멈춰서 안내합니다.
+
+## 누가 무엇을 하나요?
+
+| 주체 | 담당하는 일 | 담당하지 않는 일 |
+| --- | --- | --- |
+| 사용자 | 상담 목적·공개 범위 결정, package-specific 승인, 로그인·Developer Mode·앱/워크스페이스·전송 확인 | 코드와 보안 경계를 직접 분석하거나 복잡한 CLI를 조립할 필요는 없음 |
+| Codex | 파일 선택, secret/exclude 검사, package·hash·receipt 생성, Tunnel 수명주기, 응답 import, 코드·테스트 기반 독립 검증 | 승인 전 전송, 계정 선택 대행, Pro 조언의 무검증 적용 |
+| ChatGPT Pro | 승인된 prompt와 허용된 repository snapshot을 읽고 계획·리뷰·디버깅·설계 조언 제공 | 로컬 파일 수정, shell/build/test 실행, Git 변경, 최종 의사결정 |
+
+가장 중요한 원칙은 **Pro는 분석 파트너이고 Codex가 실행 책임자**라는 점입니다. Pro가 “수정했다”거나 “테스트가 통과했다”고 말해도 Codex가 로컬에서 직접 확인하기 전에는 실제 완료 증거가 아닙니다.
 
 ## 설치
 
@@ -88,6 +111,73 @@ Skill이 발견되지 않으면 먼저 새 작업을 열었는지 확인합니�
 | Pro가 저장소 구조·여러 범위·검색·diff·테스트 증거를 오가며 분석하게 함 | `mcp-research` | 실험적 읽기 전용 협업 경로입니다. Pro 결과는 Chat으로 받고, Codex context note만 별도 승인 후 ledger에 게시할 수 있습니다. |
 
 잘 모르겠다면 `auto`를 사용하세요. `mcp-read`와 `mcp-research`는 자동으로 선택되지 않으며, 사용자가 명시적으로 요청해야 합니다.
+
+## Schema 4 상담을 실제로 진행하는 순서
+
+이 절은 CLI 참고서가 아니라 실제 사용자 경험의 순서입니다. 세부 명령은 Codex가 [Workflow reference](workflow.md)와 [repository research](mcp-research.md)를 따라 실행합니다.
+
+### 준비 조건
+
+- macOS와 Python 3.11 이상
+- 검토된 공식 OpenAI `tunnel-client`
+- 로그인된 ChatGPT와 해당 account/workspace의 Developer Mode
+- ChatGPT에서 사용할 Schema 4 전용 MCP 앱과 Tunnel
+
+일반 `auto`, `github`, `paste`, `text-file` 상담에는 이 준비가 필요하지 않습니다.
+
+### 1. 목적과 최소 범위를 요청합니다
+
+```text
+$gptpro architecture 모드로 결제 모듈의 경계와 마이그레이션 위험을 mcp-research로 분석해주세요.
+공개 범위는 src/payments와 tests/payments로 제한하고 실제 수정은 하지 마세요.
+```
+
+테스트 결과나 빌드 로그도 함께 검토하려면 secret이 없는 UTF-8 파일만 evidence 후보로 지정해 달라고 요청하세요. Codex는 evidence까지 package hash와 공개 상한에 포함합니다.
+
+### 2. Codex가 package를 준비하고 검증합니다
+
+Codex는 선택 파일, 준비 시점 Git SHA, snapshot diff, workspace map, 선택적 evidence를 고정합니다. secret/exclude 검사에서 문제가 나오거나 범위가 너무 넓으면 이 단계에서 새 package를 준비합니다.
+
+### 3. 표시된 한 package만 승인합니다
+
+승인 화면에서 다음 세 내용을 확인합니다.
+
+1. ChatGPT에 보낼 정확한 `prompt.md`
+2. MCP로 읽을 수 있는 최대 파일·diff·evidence 범위, 7개 read-only 도구, 호출·바이트·시간 제한
+3. Pro의 결과는 visible Chat으로 받고, Codex context note는 매번 원문·bytes·hash를 다시 승인한다는 ledger 정책
+
+한 문장으로 세 항목을 함께 승인할 수 있지만, package ID와 표시된 범위를 반드시 포함해야 합니다.
+
+```text
+새 패키지 <package-id>의 prompt.md 전송, 표시된 MCP 최대 공개 범위,
+읽기 전용 analysis ledger 사용 및 지정된 ChatGPT Web workspace의 Schema 4 앱 활성화를 승인합니다.
+```
+
+### 4. Codex가 Tunnel을 점검하고 foreground로 활성화합니다
+
+Codex는 secret을 읽지 않는 probe와 profile 검사를 먼저 수행합니다. Python/Homebrew 경로 drift처럼 사용자의 별도 판단이 필요한 변경은 자동으로 덮어쓰지 않습니다. 활성화가 성공해도 아직 prompt 전송 승인을 새로 만든 것은 아닙니다.
+
+### 5. 사용자가 ChatGPT 화면의 신뢰 경계를 확인합니다
+
+새 일반 `Chat`에서 원하는 Pro 모델을 선택하고, 올바른 Personal/조직 workspace와 Schema 4 전용 앱이 도구 메뉴에 연결됐는지 확인합니다. 로그인, OAuth, Developer Mode, 앱 연결 또는 전송 버튼처럼 계정 권한이 걸린 단계는 사용자가 직접 수행할 수 있습니다.
+
+### 6. 승인된 prompt를 한 번만 보냅니다
+
+Pro는 필요에 따라 workspace map, 여러 범위 읽기, 여러 검색어, prepared diff, evidence, analysis status를 호출합니다. 도구 호출 수와 반환된 전체 model-visible bytes는 실제 공개 예산에서 차감됩니다. 보냈는지 모호하면 자동 재전송하지 않고 먼저 화면을 확인합니다.
+
+### 7. 추가 Codex note는 그때마다 다시 승인합니다
+
+Pro가 추가 사실을 요청해도 package 승인을 재사용하지 않습니다. Codex가 note 원문, byte 수, SHA-256, note ID와 현재 ledger head를 보여준 뒤 사용자가 정확히 승인한 note만 게시할 수 있습니다. 이 note도 repository를 수정하지 않습니다.
+
+### 8. 응답 완료 뒤 권한을 닫고 검증합니다
+
+Codex는 먼저 content authorization을 deny/revoke하고, 그 package를 소유한 정확한 Tunnel child의 종료 증거를 확인합니다. 그다음 package marker가 있는 응답을 import하고 현재 코드·테스트로 조언을 독립 검증합니다. 최종 보고에서 다음 사실을 서로 구분해야 합니다.
+
+- Pro가 실제로 호출한 도구 수와 공개된 bytes
+- authorization deny/revoke 상태
+- 정확한 Tunnel runtime 종료 여부
+- 응답 import와 `accepted|partially-accepted|rejected` 평가
+- Codex가 실제로 실행한 테스트와 아직 남은 사람 검증
 
 ## 처음 상담하는 전체 흐름
 
