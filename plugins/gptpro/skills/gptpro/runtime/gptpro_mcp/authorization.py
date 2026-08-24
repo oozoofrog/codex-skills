@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .errors import ToolError
-from .schema import PROTOCOL_PROFILE, tool_schema_sha256, validate_limits
+from .schema import contract_for_schema, validate_limits_for_schema
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
@@ -65,7 +65,10 @@ class AuthorizationGrant:
                 recovery="Revoke this session and prepare a new approved package.",
             )
         try:
-            return validate_limits(disclosure.get("limits"))
+            schema_version = self.manifest.get("schema_version")
+            if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+                raise ValueError("schema version is invalid")
+            return validate_limits_for_schema(schema_version, disclosure.get("limits"))
         except (TypeError, ValueError) as exc:
             raise ToolError(
                 "PACKAGE_TAMPERED",
@@ -109,19 +112,21 @@ class AuthorizationGrant:
         transport = manifest.get("transport")
         delivery = manifest.get("delivery")
         connector = manifest.get("connector")
-        if manifest.get("schema_version") != 3 or manifest.get("package_id") != self.package_id:
+        schema_version = manifest.get("schema_version")
+        if schema_version not in {3, 4} or manifest.get("package_id") != self.package_id:
             raise ToolError(
                 "SCHEMA_VERSION_UNSUPPORTED",
-                "The active package is not a schema-3 MCP package.",
-                recovery="Prepare a new package with explicit mcp-read transport.",
+                "The active package is not a supported MCP package.",
+                recovery="Prepare a new package with explicit mcp-read or mcp-research transport.",
             )
+        contract = contract_for_schema(int(schema_version))
         if not isinstance(transport, dict) or (
             transport.get("requested"), transport.get("resolved")
-        ) != ("mcp-read", "mcp-read"):
+        ) != (contract["transport"], contract["transport"]):
             raise ToolError(
                 "CHANNEL_NOT_APPROVED",
-                "The package was not approved for mcp-read transport.",
-                recovery="Prepare and approve a new explicit mcp-read package.",
+                "The package was not approved for this MCP transport.",
+                recovery=f"Prepare and approve a new explicit {contract['transport']} package.",
             )
         if delivery != {"channel": "browser", "approval_required": True}:
             raise ToolError(
@@ -131,14 +136,14 @@ class AuthorizationGrant:
             )
         if not isinstance(connector, dict) or (
             connector.get("type") != "secure-mcp-tunnel"
-            or connector.get("protocol_profile") != PROTOCOL_PROFILE
+            or connector.get("protocol_profile") != contract["protocol_profile"]
         ):
             raise ToolError(
                 "CONNECTOR_NOT_APPROVED",
                 "The package connector does not match the Secure MCP Tunnel profile.",
                 recovery="Prepare and approve a package for this connector profile.",
             )
-        if connector.get("tool_schema_sha256") != tool_schema_sha256():
+        if connector.get("tool_schema_sha256") != contract["tool_schema_sha256"]:
             raise ToolError(
                 "TOOL_SCHEMA_MISMATCH",
                 "The approved tool catalog differs from this runtime.",

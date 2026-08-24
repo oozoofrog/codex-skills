@@ -239,7 +239,10 @@ class WebMcpFoundationTests(unittest.TestCase):
         )
         self.assertIn(f"Approved hard limits (compact JSON): `{compact_limits}`.", prompt)
         self.assertIn("`include_paths=true` and `path_page_size=1`", prompt)
-        self.assertIn("Invalid and rejected tool attempts consume", prompt)
+        self.assertIn(
+            "Tool attempts and rejections durably recorded by the governance audit consume",
+            prompt,
+        )
         expiry = datetime.fromisoformat(
             disclosure["approval_valid_until"].removesuffix("Z") + "+00:00"
         )

@@ -30,7 +30,7 @@
 
 | Skill | Best for |
 |---|---|
-| `gptpro` | 검증된 GitHub SHA 기반 handoff와 명시적 schema-3 read-only Web MCP runtime으로 로그인된 ChatGPT Pro와 승인된 repo 상담 수행. Web MCP 계정 E2E는 별도 검증 gate |
+| `gptpro` | 검증된 GitHub SHA handoff와 명시적 opt-in schema-3 `mcp-read`/schema-4 `mcp-research` read-only Web MCP로 로그인된 ChatGPT Pro와 승인된 repo 상담 수행. Web MCP 계정 E2E는 별도 검증 gate |
 | `goal-research-loop` | 새 목표 지향 반복 연구 루프 설계·운영 |
 | `codex-research` | 기존 `.codex-research/` runner 상태 재개·점검 |
 | `hey-codex` | 명시 요청 시 별도 Codex CLI 인스턴스 실행 |

@@ -17,8 +17,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "GPT Pro Collaborator",
-    "shortDescription": "Approved ChatGPT Pro handoffs and read-only Web MCP",
-    "longDescription": "Prepare approved immutable repository consultations for logged-in ChatGPT Pro using GitHub-first text handoffs or an explicitly selected experimental read-only Web MCP session. The MCP path binds one approved package to a foreground official Secure MCP Tunnel client, private local authorization state, bounded tools, and a fail-before-return audit; account and Developer Mode steps remain attended.",
+    "shortDescription": "Approved Pro handoffs and bounded Web MCP research",
+    "longDescription": "Prepare approved immutable repository consultations for logged-in ChatGPT Pro using GitHub-first text handoffs or an explicitly selected experimental read-only Web MCP session. Schema 4 exposes seven bounded read-only research tools and separately approved Codex context notes; Pro returns advice in visible Chat. The MCP path binds one package to a foreground official Secure MCP Tunnel client, private local authorization state, and a fail-before-return disclosure audit; account and Developer Mode steps remain attended.",
     "developerName": "oozoofrog",
     "category": "Productivity",
     "capabilities": [

@@ -4,7 +4,7 @@
 
 It initializes local handoff storage, scans and hashes selected repository files, records the exact Git state, excludes likely secrets and build noise, requires transport-specific user approval, guides the visible Chrome or human handoff, imports only the package-marked response, and records Codex's later evaluation. GitHub-first handoffs pin a remotely verified immutable commit and send only a prompt; text handoffs retain structured Markdown alternatives. A ZIP is retained locally for audit and integrity checks but is not uploaded by default.
 
-This build also contains an **experimental read-only Web MCP runtime** for an explicit `mcp-read` schema-3 package. It verifies and reads the immutable local ZIP without extraction, exposes exactly three bounded read-only tools, stores one active package authorization in private user-global state, durably audits content before returning it, and supervises the official `tunnel-client` v0.0.12 public foreground flow. It does not automate Developer Mode, ChatGPT app/workspace selection, account authorization, or prompt submission. Local tests and a green Tunnel health check are not evidence of a successful logged-in ChatGPT account E2E; report that separately. See [Web MCP repository consultation](references/web-mcp.md).
+This build also contains two explicit experimental Web MCP contracts. Schema-3 `mcp-read` retains the original three-tool immutable repository reader. Schema-4 `mcp-research` adds a prepare-time workspace map and a diff against the exact Git SHA recorded as `HEAD` in the manifest, explicit test/build/diagnostic evidence, multi-range reads, multi-query search, and an owner-controlled context-note ledger. All seven schema-4 MCP tools are read-only so the contract remains usable with ChatGPT Pro's current read/fetch-only custom-MCP support. Pro returns findings in the visible Chat response; it cannot mutate the ledger or repository. Separately approved exact-byte Codex notes may be appended locally and then read by Pro. Both paths supervise the official `tunnel-client` foreground flow and leave Developer Mode, ChatGPT app/workspace selection, account authorization, and prompt submission attended. See [Web MCP repository consultation](references/web-mcp.md), [repository research](references/mcp-research.md), and OpenAI's [Developer mode and MCP apps](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt).
 
 ## Install
 
@@ -68,7 +68,7 @@ The default `--transport auto` is GitHub-first:
 
 Auto records the exact GitHub fallback reason. Supplying `--github-pr-url` makes a verification mismatch fatal instead of falling back. The 128 KiB cutoff is a conservative Skill policy, not a published ChatGPT limit. Override it with `--max-paste-bytes`, require GitHub with `--transport github`, or avoid app access with `--transport paste|text-file`. A transport never changes after approval because approval binds the exact outbound bytes and repository disclosure.
 
-Normal `auto|github|paste|text-file` handoffs continue to use manifest schema 2. Only an explicit `--transport mcp-read` uses schema 3, whose approval binds a maximum dynamic disclosure set and is never inferred from `auto`. A schema-1 ZIP-first handoff is not upgraded in place; prepare a new handoff so the new transport and approval hashes are explicit.
+Normal `auto|github|paste|text-file` handoffs continue to use manifest schema 2. Explicit `--transport mcp-read` uses schema 3. Explicit `--transport mcp-research` uses schema 4 and additionally binds research artifacts and the read-only context-note policy. Neither is inferred from `auto`, and neither approval may be reinterpreted as the other. A schema-1 ZIP-first handoff is not upgraded in place; prepare a new handoff so the transport and approval hashes are explicit.
 
 ## Local CLI
 
@@ -96,6 +96,33 @@ python3 scripts/gptpro.py prepare \
 ```
 
 Review `manifest.json`, `status`, and the exact maximum file/hash set before using both approval flags. Approval still does not activate a Tunnel: activation is a separate, attended command and succeeds only after the official client proves a live control-plane poll. Without the activation-generated capability and active package state, `scripts/gptpro_mcp.py serve` denies content calls.
+
+For broader read-only analysis, prepare schema 4 with explicit evidence and approve its third ledger gate:
+
+```bash
+python3 scripts/gptpro.py prepare \
+  --repo /path/to/repo \
+  --mode architecture \
+  --transport mcp-research \
+  --tunnel-id-ref env:GPTPRO_TUNNEL_ID \
+  --chatgpt-app-name "GPT Pro Repository Research" \
+  --chatgpt-workspace-label "Personal" \
+  --include "src/**" \
+  --include "tests/**" \
+  --evidence-file unit-tests=/private/path/test-output.txt \
+  --task "Analyze the approved snapshot, prepared diff, and test evidence."
+
+python3 scripts/gptpro.py approve \
+  --handoff-dir /path/to/repo/.gptpro/handoffs/<id> \
+  --approved-by user \
+  --confirm-transmission \
+  --confirm-mcp-disclosure \
+  --confirm-analysis-ledger
+```
+
+The seven static tools are `gptpro_package_info`, `gptpro_workspace_map`, `gptpro_repo_read`, `gptpro_repo_search`, `gptpro_repo_diff`, `gptpro_artifact_read`, and `gptpro_analysis_status`. Every tool advertises `readOnlyHint: true`; no MCP tool exposes repository or application-state mutation, while owner-only audit/runtime bookkeeping records governed calls. Pro findings return through the visible Chat response and the established response-import workflow. See [repository research](references/mcp-research.md) for the separately approved `analysis-note-prepare` / `analysis-note-approve` context flow.
+
+New schema-3/4 sessions use disclosure-audit schema 2 with `complete_model_visible_result_v1`, so the approved byte budget counts each complete model-visible success result rather than only its repository-text body. Audit versions are exact JSON integers. Existing schema-1 schema-3 chains remain verifiable/closable as `legacy_tool_body_estimate` but cannot accept new calls; compatibility requires the actual legacy audit and matching omitted package/global accounting bindings, not fields removed from a schema-2 chain. Schema-4 always requires the current pair. A well-formed unadvertised tool is never executed: after a durable zero-content rejection it consumes one call and returns JSON-RPC `-32602` with stable code `MCP_INVALID_ARGUMENT`. If an append may have committed, the runtime reconciles provable counters, latches that process session, and best-effort faults/closes persistent authorization; stop or recover instead of retrying automatically. Pre-publication recovery also compares the actual audit version/mode with its machine-global binding; a proven mismatch faults only that exact global authorization and does not rewrite the package/audit as a normal close, while an operational recovery failure is reported separately as unavailable rather than falsely labeled invalid. A completed package and its terminal receipt are rechecked against the actual audit footer's header/head, sequence, counters, footer flag, commit timestamp, and close reason. If the exact global authorization and audit became terminal immediately before the package commit failed, rerunning `mcp-recover` reconciles only that already-bound terminal evidence into the package receipt; it does not invent child-stop evidence or reopen authorization. `mcp-status` reports an already-closed audit with still-active global/package state as split-brain and never as effectively authorized.
 
 ## Experimental Web MCP setup
 
@@ -229,13 +256,14 @@ python3 gptpro/scripts/validate_structure.py \
   --json
 ```
 
-It checks required files, exact `name`/`description` frontmatter, local Markdown links, prompt placeholder contract, every packaged Python file's syntax, executable modes, the exact dependency-free read-only MCP schema/runtime, and optional mirror hashes.
+It checks required files, exact `name`/`description` frontmatter, local Markdown links, prompt placeholder contract, every packaged Python file's syntax, executable modes, both exact dependency-free Web MCP schema/runtime contracts, and optional mirror hashes.
 
 ## Security posture
 
 - GitHub/paste/text-file handoffs require no OpenAI API key. The experimental Web MCP path requires a user-provisioned Tunnel runtime credential kept in the official client's environment or secure reference, never in gptpro artifacts.
 - No private ChatGPT endpoints or headless session scraping are used.
-- The Web MCP path exposes only `gptpro_package_info`, `gptpro_repo_search`, and `gptpro_repo_read`; it has no repository write, shell, Git mutation, or generic local tool relay.
+- Schema-3 exposes only its original three read tools. Schema-4 exposes the seven static read-only research/analysis tools listed above. Neither exposes repository write, MCP-side local-state write, shell, build/test execution, Git mutation, network fetch, or a generic local tool relay. An owner-approved local CLI may append an exact-byte Codex context note; ChatGPT can only read it.
+- ChatGPT Desktop private renderer automation is not part of this implementation.
 - User-global runtime state is owner-only and stores bindings/hashes rather than raw Tunnel/API credentials. Package receipts and the disclosure audit remain in the handoff directory.
 - Repository content is returned only after its audit event is durably committed. An audit event proves local disclosure commitment, not network delivery or use by ChatGPT.
 - Secret values are never printed in findings; matching files are excluded.

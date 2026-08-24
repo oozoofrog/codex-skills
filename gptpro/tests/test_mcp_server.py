@@ -26,6 +26,7 @@ if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
 from runtime.gptpro_mcp.archive import VerifiedArchive, strict_posix_path
+from runtime.gptpro_mcp.audit import AuditBinding, AuditLog
 from runtime.gptpro_mcp.authorization import AuthorizationGrant, StaticAuthorizationProvider
 from runtime.gptpro_mcp.errors import CancelledError, ToolError
 from runtime.gptpro_mcp.protocol import MAX_INPUT_FRAME_CHARS, LegacyMcpServer
@@ -509,12 +510,27 @@ class ToolSemanticsTests(unittest.TestCase):
         self.assertEqual("CALL_LIMIT_EXCEEDED", raised.exception.code)
 
         limits["max_tool_calls"] = 10
-        limits["max_session_disclosure_bytes"] = len("src/a.py".encode()) + len(b"one\n") + 1
+        probe = self.fixture.runtime(manifest=self.fixture.make_manifest(limits=limits))
+        first_response = probe.call(
+            "gptpro_repo_read",
+            {"package_id": PACKAGE_ID, "path": "src/a.py", "end_line": 1},
+        )
+        first_response_bytes = len(canonical_json_bytes(first_response))
+        limits["max_session_disclosure_bytes"] = first_response_bytes + 1
         manifest = self.fixture.make_manifest(limits=limits)
         runtime = self.fixture.runtime(manifest=manifest)
         runtime.call("gptpro_repo_read", {"package_id": PACKAGE_ID, "path": "src/a.py", "end_line": 1})
         with self.assertRaises(ToolError) as raised:
             runtime.call("gptpro_repo_read", {"package_id": PACKAGE_ID, "path": "src/a.py", "end_line": 1})
+        self.assertEqual("DISCLOSURE_BUDGET_EXCEEDED", raised.exception.code)
+
+        limits["max_session_disclosure_bytes"] = 1
+        runtime = self.fixture.runtime(manifest=self.fixture.make_manifest(limits=limits))
+        with self.assertRaises(ToolError) as raised:
+            runtime.call(
+                "gptpro_package_info",
+                {"package_id": PACKAGE_ID, "include_paths": False},
+            )
         self.assertEqual("DISCLOSURE_BUDGET_EXCEEDED", raised.exception.code)
 
     def test_rejected_tool_attempt_consumes_call_budget(self) -> None:
@@ -1037,18 +1053,267 @@ class ProtocolTests(unittest.TestCase):
         self.assertIsNone(response["id"])
         self.assertEqual("", stderr.getvalue())
 
-    def test_notifications_have_no_response_and_unknown_tool_is_invalid_params(self) -> None:
+    def test_notifications_have_no_response_and_unbounded_tool_name_is_invalid_params(self) -> None:
         responses, _, _ = self.transcript(
             [
                 self.initialize(),
                 {"jsonrpc": "2.0", "method": "notifications/initialized"},
                 {"jsonrpc": "2.0", "method": "unknown/notification", "params": {"secret": "do-not-log"}},
                 {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                 "params": {"name": "write_file", "arguments": {}}},
+                 "params": {"name": "x" * 129, "arguments": {}}},
             ]
         )
         self.assertEqual([1, 2], [item["id"] for item in responses])
         self.assertEqual(-32602, responses[1]["error"]["code"])
+
+    def test_unadvertised_tool_is_durably_rejected_and_next_call_survives(self) -> None:
+        grant = self.fixture.grant()
+        binding = AuditBinding(
+            package_id=PACKAGE_ID,
+            session_id_sha256=SESSION_HASH,
+            manifest_sha256=MANIFEST_HASH,
+            approval_event_sha256=digest(b"approval"),
+            archive_sha256=grant.archive_sha256,
+            file_set_sha256=grant.manifest["hashes"]["file_set_sha256"],
+            tool_schema_sha256=tool_schema_sha256(),
+            limits_sha256=digest(canonical_json_bytes(DEFAULT_LIMITS)),
+        )
+        audit_path = self.fixture.root / "mcp-audit.jsonl"
+        audit = AuditLog(audit_path, binding)
+        audit.create_header()
+
+        class AuditCommitter:
+            def commit_before_return(self, **kwargs):
+                audit.commit_before_return(**kwargs)
+
+            def record_rejection(self, **kwargs):
+                kwargs.pop("grant")
+                audit.append_rejection(**kwargs)
+
+        runtime = ToolRuntime(
+            StaticAuthorizationProvider(grant),
+            committer=AuditCommitter(),
+        )
+
+        unknown_tool = "gptpro_analysis_post"
+        rejected_responses, _, _ = self.transcript(
+            [
+                self.initialize(),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": unknown_tool,
+                        "arguments": {"package_id": PACKAGE_ID},
+                    },
+                },
+            ],
+            runtime=runtime,
+        )
+        successful_responses, _, _ = self.transcript(
+            [
+                self.initialize(),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "gptpro_package_info",
+                        "arguments": {"package_id": PACKAGE_ID, "include_paths": False},
+                    },
+                },
+            ],
+            runtime=runtime,
+        )
+
+        self.assertEqual(-32602, rejected_responses[1]["error"]["code"])
+        self.assertEqual(
+            "MCP_INVALID_ARGUMENT", rejected_responses[1]["error"]["data"]["code"]
+        )
+        successful = successful_responses[1]["result"]
+        self.assertFalse(successful["isError"])
+        success_bytes = len(canonical_json_bytes(successful))
+        self.assertEqual(
+            success_bytes,
+            successful["structuredContent"]["result"]["disclosure"][
+                "session_disclosed_bytes"
+            ],
+        )
+
+        summary = audit.verify()
+        self.assertEqual(2, summary.tool_calls)
+        self.assertEqual(success_bytes, summary.disclosed_bytes)
+        payload = audit_path.read_text(encoding="utf-8")
+        self.assertNotIn(unknown_tool, payload)
+        records = [json.loads(line) for line in payload.splitlines()]
+        rejected_record = records[1]
+        self.assertEqual("<unadvertised>", rejected_record["tool"])
+        self.assertEqual(
+            digest(unknown_tool.encode("utf-8")),
+            rejected_record["requested_tool_sha256"],
+        )
+        self.assertEqual("rejected", rejected_record["result"])
+        self.assertEqual(0, rejected_record["disclosure_bytes"])
+        self.assertEqual(1, rejected_record["cumulative_tool_calls"])
+        self.assertEqual("committed_for_return", records[2]["result"])
+        self.assertEqual(2, records[2]["cumulative_tool_calls"])
+
+    def test_preappend_rejection_failure_does_not_wedge_call_counter(self) -> None:
+        grant = self.fixture.grant()
+        binding = AuditBinding(
+            package_id=PACKAGE_ID,
+            session_id_sha256=SESSION_HASH,
+            manifest_sha256=MANIFEST_HASH,
+            approval_event_sha256=digest(b"approval-lock-timeout"),
+            archive_sha256=grant.archive_sha256,
+            file_set_sha256=grant.manifest["hashes"]["file_set_sha256"],
+            tool_schema_sha256=tool_schema_sha256(),
+            limits_sha256=digest(canonical_json_bytes(DEFAULT_LIMITS)),
+        )
+        audit = AuditLog(self.fixture.root / "mcp-audit-lock-timeout.jsonl", binding)
+        audit.create_header()
+
+        class FailingOnceCommitter:
+            def __init__(self) -> None:
+                self.fail_once = True
+
+            def commit_before_return(self, **kwargs):
+                audit.commit_before_return(**kwargs)
+
+            def record_rejection(self, **kwargs):
+                if self.fail_once:
+                    self.fail_once = False
+                    raise ToolError(
+                        "LOCK_TIMEOUT",
+                        "The disclosure audit is busy.",
+                        retryable=True,
+                    )
+                kwargs.pop("grant")
+                audit.append_rejection(**kwargs)
+
+        runtime = ToolRuntime(
+            StaticAuthorizationProvider(grant),
+            committer=FailingOnceCommitter(),
+        )
+        failed, _, _ = self.transcript(
+            [
+                self.initialize(),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "gptpro_analysis_post",
+                        "arguments": {"package_id": PACKAGE_ID},
+                    },
+                },
+            ],
+            runtime=runtime,
+        )
+        self.assertEqual(
+            "LOCK_TIMEOUT",
+            failed[1]["result"]["structuredContent"]["error"]["code"],
+        )
+        self.assertEqual(0, audit.verify().tool_calls)
+
+        succeeded, _, _ = self.transcript(
+            [
+                self.initialize(),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "gptpro_package_info",
+                        "arguments": {"package_id": PACKAGE_ID, "include_paths": False},
+                    },
+                },
+            ],
+            runtime=runtime,
+        )
+        self.assertFalse(succeeded[1]["result"]["isError"])
+        self.assertEqual(1, audit.verify().tool_calls)
+
+    def test_postappend_ambiguity_latches_success_and_rejection_sessions(self) -> None:
+        grant = self.fixture.grant()
+        binding = AuditBinding(
+            package_id=PACKAGE_ID,
+            session_id_sha256=SESSION_HASH,
+            manifest_sha256=MANIFEST_HASH,
+            approval_event_sha256=digest(b"approval-postappend"),
+            archive_sha256=grant.archive_sha256,
+            file_set_sha256=grant.manifest["hashes"]["file_set_sha256"],
+            tool_schema_sha256=tool_schema_sha256(),
+            limits_sha256=digest(canonical_json_bytes(DEFAULT_LIMITS)),
+        )
+
+        def fail_after_write(descriptor: int) -> None:
+            os.fsync(descriptor)
+            raise OSError("simulated late audit sync error")
+
+        for label, tool_name in (
+            ("success", "gptpro_package_info"),
+            ("rejection", "gptpro_analysis_post"),
+        ):
+            with self.subTest(path=label):
+                path = self.fixture.root / f"mcp-audit-postappend-{label}.jsonl"
+                AuditLog(path, binding).create_header()
+                audit = AuditLog(path, binding, file_fsync=fail_after_write)
+
+                class AuditCommitter:
+                    def commit_before_return(self, **kwargs):
+                        audit.commit_before_return(**kwargs)
+
+                    def record_rejection(self, **kwargs):
+                        kwargs.pop("grant")
+                        audit.append_rejection(**kwargs)
+
+                runtime = ToolRuntime(
+                    StaticAuthorizationProvider(grant),
+                    committer=AuditCommitter(),
+                )
+
+                def call_request(request_id: int) -> dict:
+                    responses, _, _ = self.transcript(
+                        [
+                            self.initialize(),
+                            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                            {
+                                "jsonrpc": "2.0",
+                                "id": request_id,
+                                "method": "tools/call",
+                                "params": {
+                                    "name": tool_name,
+                                    "arguments": {
+                                        "package_id": PACKAGE_ID,
+                                        "include_paths": False,
+                                    },
+                                },
+                            },
+                        ],
+                        runtime=runtime,
+                    )
+                    return responses[1]
+
+                first = call_request(2)
+                second = call_request(3)
+                self.assertEqual(
+                    "COMMIT_OUTCOME_UNCERTAIN",
+                    first["result"]["structuredContent"]["error"]["code"],
+                )
+                self.assertEqual(
+                    "COMMIT_OUTCOME_UNCERTAIN",
+                    second["result"]["structuredContent"]["error"]["code"],
+                )
+                summary = AuditLog(path, binding).verify()
+                self.assertEqual(1, summary.tool_calls)
+                self.assertTrue(summary.footer)
+                self.assertEqual("commit_outcome_uncertain", summary.close_reason)
 
     def test_tool_call_accepts_optional_meta_without_forwarding_it(self) -> None:
         class RecordingRuntime:

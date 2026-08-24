@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the dependency-free gptpro read-only MCP stdio server."""
+"""Run the dependency-free gptpro bounded read-only MCP repository server."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ class RuntimeBootstrapError(Exception):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Serve the gptpro read-only MCP protocol on stdin/stdout. "
+            "Serve the gptpro bounded read-only MCP repository protocol on stdin/stdout. "
             "It defaults to deny-all unless the foreground governance controller "
             "injects one exact active package capability."
         )
@@ -144,6 +144,10 @@ def _runtime_from_environment() -> tuple[Any, Any | None, Any, bool]:
                 expected_session,
                 runtime_store=store,
             ),
+            analysis_factory=lambda verified, expected_session: governance.analysis_ledger_for(
+                verified,
+                expected_session,
+            ),
         )
         verified = governance.verify_package(
             Path(str(state.get("handoff_dir", ""))), recover_lifecycle=False
@@ -163,9 +167,12 @@ def _runtime_from_environment() -> tuple[Any, Any | None, Any, bool]:
         if trace_summary.closed:
             raise RuntimeBootstrapError("The active protocol trace is already closed.")
         lease = RuntimeServerLease(store, session_hash).acquire()
-        server_factory = functools.partial(LegacyMcpServer, trace=trace)
+        from runtime.gptpro_mcp.schema import contract_for_schema
+
+        contract = contract_for_schema(int(verified["schema_version"]))
+        server_factory = functools.partial(LegacyMcpServer, trace=trace, contract=contract)
         return (
-            ToolRuntime(context, committer=context),
+            ToolRuntime(context, committer=context, analysis_provider=context),
             lease,
             server_factory,
             parent_shutdown_contract_text == "1",

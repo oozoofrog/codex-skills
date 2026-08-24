@@ -18,13 +18,26 @@ from typing import Any, Callable, Iterator, Mapping
 
 from .authorization import AuthorizationGrant
 from .clock import Clock, ClockAnchor, parse_utc, utc_text
-from .errors import ToolError
+from .errors import CommitOutcomeUncertainError, ToolError
 from .runtime_state import RuntimeStateError, RuntimeStateStore
+from .schema import contract_for_schema, validate_tool_name
+from .sensitive import secret_detector_names
 
-AUDIT_SCHEMA_VERSION = 1
+LEGACY_AUDIT_SCHEMA_VERSION = 1
+AUDIT_SCHEMA_VERSION = 2
+LEGACY_ACCOUNTING_MODE = "legacy_tool_body_estimate"
+ACCOUNTING_MODE = "complete_model_visible_result_v1"
 MAX_AUDIT_BYTES = 16 * 1024 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-_RAW_SECRET = re.compile(r"(?:\bsk-[A-Za-z0-9_-]{16,}|\btunnel_[A-Za-z0-9_-]{16,128}\b)")
+UNADVERTISED_TOOL_LABEL = "<unadvertised>"
+
+
+def _catalog_tools_for_schema_hash(tool_schema_sha256: str) -> frozenset[str]:
+    for schema_version in (3, 4):
+        contract = contract_for_schema(schema_version)
+        if tool_schema_sha256 == contract["tool_schema_sha256"]:
+            return frozenset(str(name) for name in contract["tool_names"])
+    raise ValueError("tool schema hash is not an approved Web MCP catalog")
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -67,7 +80,7 @@ def _safe_path(value: Any) -> str:
         part in {"", ".", ".."} for part in candidate.parts
     ):
         raise ValueError("audit path must be a relative canonical POSIX path")
-    if _RAW_SECRET.search(value):
+    if secret_detector_names(value):
         raise ValueError("audit path contains forbidden secret-like material")
     return value
 
@@ -100,12 +113,15 @@ class AuditBinding:
 
 @dataclass(frozen=True)
 class AuditSummary:
+    schema_version: int
+    accounting_mode: str
     header_sha256: str
     head_sha256: str
     final_sequence: int
     tool_calls: int
     disclosed_bytes: int
     footer: bool
+    close_reason: str | None
     last_committed_at: datetime
 
 
@@ -152,6 +168,7 @@ class AuditLog:
             record: dict[str, Any] = {
                 "record_type": "header",
                 "audit_schema_version": AUDIT_SCHEMA_VERSION,
+                "accounting_mode": ACCOUNTING_MODE,
                 "sequence": 0,
                 "created_at": utc_text(now),
                 "package_id": self.binding.package_id,
@@ -186,6 +203,8 @@ class AuditLog:
         """Implement the Phase-2 DisclosureCommitter protocol without storing bodies."""
 
         try:
+            if tool not in _catalog_tools_for_schema_hash(self.binding.tool_schema_sha256):
+                raise ValueError("tool is not in the package-bound catalog")
             _require_hash(request_id_sha256, "request id")
             _require_hash(arguments_sha256, "arguments")
             sanitized = _sanitize_metadata(tool, audit_metadata)
@@ -200,23 +219,28 @@ class AuditLog:
                 recovery="Revoke this session and activate a new approved package session.",
             ) from exc
 
+        committed: AuditSummary | None = None
         if self.runtime_store is None:
-            self._commit_with_audit_lock(
-                grant=grant,
-                tool=tool,
-                request_id_sha256=request_id_sha256,
-                arguments_sha256=arguments_sha256,
-                metadata=sanitized,
-                calls_used=calls_used,
-                disclosed_bytes=disclosed_bytes,
-            )
+            try:
+                self._commit_with_audit_lock(
+                    grant=grant,
+                    tool=tool,
+                    request_id_sha256=request_id_sha256,
+                    arguments_sha256=arguments_sha256,
+                    metadata=sanitized,
+                    calls_used=calls_used,
+                    disclosed_bytes=disclosed_bytes,
+                )
+            except CommitOutcomeUncertainError:
+                self._terminalize_uncertain_commit()
+                raise
             return
 
         try:
             with self.runtime_store.locked() as transaction:
                 state = transaction.read()
                 activity_monotonic = self._validate_active_state(state, grant)
-                self._commit_with_audit_lock(
+                committed = self._commit_with_audit_lock(
                     grant=grant,
                     tool=tool,
                     request_id_sha256=request_id_sha256,
@@ -231,7 +255,16 @@ class AuditLog:
                 updated["last_activity_monotonic"] = activity_monotonic
                 updated["revision"] = int(state["revision"]) + 1
                 transaction.write(updated)
+        except CommitOutcomeUncertainError:
+            self._terminalize_uncertain_commit()
+            raise
         except RuntimeStateError as exc:
+            if committed is not None:
+                self._terminalize_uncertain_commit()
+                raise CommitOutcomeUncertainError(
+                    calls_used=committed.tool_calls,
+                    disclosed_bytes=committed.disclosed_bytes,
+                ) from exc
             raise ToolError(
                 exc.code,
                 "The active disclosure authorization is unavailable.",
@@ -275,6 +308,11 @@ class AuditLog:
                     "arguments_sha256": record["arguments_sha256"],
                     "disclosure_bytes": record["disclosure_bytes"],
                     "result": record["result"],
+                    **(
+                        {"requested_tool_sha256": record["requested_tool_sha256"]}
+                        if "requested_tool_sha256" in record
+                        else {}
+                    ),
                 }
                 for record in verified.records
                 if record.get("record_type") == "tool_call"
@@ -292,45 +330,58 @@ class AuditLog:
         """Durably record a rejected/cancelled call without repository disclosure."""
 
         try:
-            if tool not in {"gptpro_package_info", "gptpro_repo_read", "gptpro_repo_search"}:
-                raise ValueError("tool is not in the read-only catalog")
+            raw_tool = validate_tool_name(tool)
+            allowed_tools = _catalog_tools_for_schema_hash(self.binding.tool_schema_sha256)
+            audited_tool = raw_tool
+            requested_tool_sha256: str | None = None
+            if raw_tool not in allowed_tools:
+                audited_tool = UNADVERTISED_TOOL_LABEL
+                requested_tool_sha256 = hashlib.sha256(raw_tool.encode("utf-8")).hexdigest()
             _require_hash(request_id_sha256, "request id")
             _require_hash(arguments_sha256, "arguments")
             if not isinstance(error_code, str) or re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", error_code) is None:
                 raise ValueError("error_code is invalid")
+            if requested_tool_sha256 is not None and error_code != "MCP_INVALID_ARGUMENT":
+                raise ValueError("unadvertised tool rejection code is invalid")
         except ValueError as exc:
             raise ToolError("AUDIT_WRITE_FAILED", "Rejected-call audit metadata is invalid.") from exc
-        with self._locked():
-            verified = self._verify_locked()
-            if verified.summary.footer:
-                raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit is already closed.")
-            if (
-                isinstance(calls_used, bool)
-                or not isinstance(calls_used, int)
-                or calls_used != verified.summary.tool_calls + 1
-            ):
-                raise ToolError("AUDIT_WRITE_FAILED", "Rejected-call audit counter is invalid.")
-            now = self.anchor.effective_now(persisted_floor=verified.summary.last_committed_at)
-            record: dict[str, Any] = {
-                "record_type": "tool_call",
-                "sequence": verified.summary.final_sequence + 1,
-                "timestamp": utc_text(now),
-                "package_id": self.binding.package_id,
-                "session_id_sha256": self.binding.session_id_sha256,
-                "jsonrpc_request_id_sha256": request_id_sha256,
-                "tool": tool,
-                "arguments_sha256": arguments_sha256,
-                "audit_metadata": {},
-                "error_code": error_code,
-                "disclosure_bytes": 0,
-                "cumulative_disclosed_bytes": verified.summary.disclosed_bytes,
-                "cumulative_tool_calls": calls_used,
-                "result": "rejected",
-                "previous_event_sha256": verified.summary.head_sha256,
-            }
-            record["event_sha256"] = _event_hash(record)
-            self._append_record(record)
-            return self._verify_locked().summary
+        try:
+            with self._locked():
+                verified = self._verify_locked()
+                self._require_current_accounting(verified.summary)
+                if verified.summary.footer:
+                    raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit is already closed.")
+                if (
+                    isinstance(calls_used, bool)
+                    or not isinstance(calls_used, int)
+                    or calls_used != verified.summary.tool_calls + 1
+                ):
+                    raise ToolError("AUDIT_WRITE_FAILED", "Rejected-call audit counter is invalid.")
+                now = self.anchor.effective_now(persisted_floor=verified.summary.last_committed_at)
+                record: dict[str, Any] = {
+                    "record_type": "tool_call",
+                    "sequence": verified.summary.final_sequence + 1,
+                    "timestamp": utc_text(now),
+                    "package_id": self.binding.package_id,
+                    "session_id_sha256": self.binding.session_id_sha256,
+                    "jsonrpc_request_id_sha256": request_id_sha256,
+                    "tool": audited_tool,
+                    "arguments_sha256": arguments_sha256,
+                    "audit_metadata": {},
+                    "error_code": error_code,
+                    "disclosure_bytes": 0,
+                    "cumulative_disclosed_bytes": verified.summary.disclosed_bytes,
+                    "cumulative_tool_calls": calls_used,
+                    "result": "rejected",
+                    "previous_event_sha256": verified.summary.head_sha256,
+                }
+                if requested_tool_sha256 is not None:
+                    record["requested_tool_sha256"] = requested_tool_sha256
+                record["event_sha256"] = _event_hash(record)
+                return self._append_record_verified(record, verified.summary)
+        except CommitOutcomeUncertainError:
+            self._terminalize_uncertain_commit()
+            raise
 
     def _commit_with_audit_lock(
         self,
@@ -342,9 +393,10 @@ class AuditLog:
         metadata: dict[str, Any],
         calls_used: int,
         disclosed_bytes: int,
-    ) -> None:
+    ) -> AuditSummary:
         with self._locked():
             verified = self._verify_locked()
+            self._require_current_accounting(verified.summary)
             if verified.summary.footer:
                 raise ToolError(
                     "AUDIT_CHAIN_INVALID",
@@ -387,16 +439,110 @@ class AuditLog:
                 "previous_event_sha256": verified.summary.head_sha256,
             }
             record["event_sha256"] = _event_hash(record)
-            try:
-                self._append_record(record)
-            except ToolError:
-                raise
-            except Exception as exc:
+            return self._append_record_verified(record, verified.summary)
+
+    def _append_record_verified(
+        self,
+        record: dict[str, Any],
+        before: AuditSummary,
+    ) -> AuditSummary:
+        """Append one exact record and classify failures without guessing.
+
+        This runs while the audit lock is held.  If an exception occurs after
+        bytes may have reached the file, the exact expected record is compared
+        with a newly verified final chain.  An unchanged chain is a pre-append
+        failure; an exact or indeterminate change is fail-closed ambiguity.
+        """
+
+        try:
+            self._append_record(record)
+        except Exception as exc:
+            disposition, observed = self._classify_failed_append(record, before)
+            if disposition == "absent":
+                if isinstance(exc, ToolError):
+                    raise
                 raise ToolError(
                     "AUDIT_WRITE_FAILED",
                     "The disclosure audit could not be durably committed.",
                     recovery="Revoke this session and activate a new approved package session.",
                 ) from exc
+            raise CommitOutcomeUncertainError(
+                calls_used=observed.tool_calls if observed is not None else None,
+                disclosed_bytes=observed.disclosed_bytes if observed is not None else None,
+            ) from exc
+        try:
+            observed = self._verify_locked().summary
+        except ToolError as exc:
+            raise CommitOutcomeUncertainError(
+                calls_used=None,
+                disclosed_bytes=None,
+            ) from exc
+        if (
+            observed.head_sha256 != record["event_sha256"]
+            or observed.final_sequence != record["sequence"]
+            or observed.tool_calls != record["cumulative_tool_calls"]
+            or observed.disclosed_bytes != record["cumulative_disclosed_bytes"]
+        ):
+            raise CommitOutcomeUncertainError(
+                calls_used=observed.tool_calls,
+                disclosed_bytes=observed.disclosed_bytes,
+            )
+        return observed
+
+    def _classify_failed_append(
+        self,
+        record: Mapping[str, Any],
+        before: AuditSummary,
+    ) -> tuple[str, AuditSummary | None]:
+        try:
+            observed = self._verify_locked().summary
+        except ToolError:
+            return "indeterminate", None
+        if (
+            observed.head_sha256 == record.get("event_sha256")
+            and observed.final_sequence == record.get("sequence")
+            and observed.tool_calls == record.get("cumulative_tool_calls")
+            and observed.disclosed_bytes == record.get("cumulative_disclosed_bytes")
+        ):
+            return "committed", observed
+        if (
+            observed.head_sha256 == before.head_sha256
+            and observed.final_sequence == before.final_sequence
+            and observed.tool_calls == before.tool_calls
+            and observed.disclosed_bytes == before.disclosed_bytes
+        ):
+            return "absent", observed
+        return "indeterminate", observed
+
+    def _terminalize_uncertain_commit(self) -> None:
+        """Best-effort persistent denial after a possibly committed call.
+
+        Either the machine-global authorization becomes faulted or the audit is
+        closed (normally both).  The caller also latches the in-process runtime,
+        so no ambiguous call is automatically retried.
+        """
+
+        if self.runtime_store is not None:
+            try:
+                with self.runtime_store.locked() as transaction:
+                    state = transaction.read()
+                    if (
+                        state is not None
+                        and state.get("package_id") == self.binding.package_id
+                        and state.get("session_id_sha256") == self.binding.session_id_sha256
+                        and state.get("status") in {"activating", "active", "revoking"}
+                    ):
+                        updated = dict(state)
+                        updated["status"] = "faulted"
+                        updated["revision"] = int(state["revision"]) + 1
+                        updated["updated_at"] = utc_text(datetime.now(timezone.utc))
+                        transaction.write(updated)
+            except (RuntimeStateError, ToolError, OSError, ValueError):
+                pass
+        try:
+            self.append_footer("commit_outcome_uncertain")
+        except (ToolError, OSError, ValueError):
+            pass
 
     def _validate_active_state(
         self, state: dict[str, Any] | None, grant: AuthorizationGrant
@@ -631,6 +777,9 @@ class AuditLog:
         disclosed_bytes = 0
         last_at: datetime | None = None
         footer = False
+        close_reason: str | None = None
+        audit_schema_version: int | None = None
+        accounting_mode: str | None = None
         for sequence, raw_line in enumerate(payload.splitlines()):
             try:
                 record = json.loads(raw_line.decode("utf-8"))
@@ -657,7 +806,7 @@ class AuditLog:
             if record.get("event_sha256") != actual:
                 raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit hash chain is invalid.")
             if sequence == 0:
-                self._verify_header(record)
+                audit_schema_version, accounting_mode = self._verify_header(record)
                 last_at = parse_utc(record["created_at"])
             else:
                 record_type = record.get("record_type")
@@ -667,7 +816,12 @@ class AuditLog:
                     tool_calls = self._positive_counter(record.get("cumulative_tool_calls"), tool_calls)
                     previous_disclosed = disclosed_bytes
                     disclosed_bytes = self._nondecreasing_counter(record.get("cumulative_disclosed_bytes"), disclosed_bytes)
-                    self._verify_tool_record(record, previous_disclosed)
+                    assert accounting_mode is not None
+                    self._verify_tool_record(
+                        record,
+                        previous_disclosed,
+                        accounting_mode=accounting_mode,
+                    )
                     last_at = self._verified_timestamp(record.get("timestamp"), last_at)
                 elif record_type == "footer":
                     expected_footer_keys = {
@@ -684,28 +838,59 @@ class AuditLog:
                         raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit footer shape is invalid.")
                     if record.get("tool_calls") != tool_calls or record.get("disclosed_bytes") != disclosed_bytes:
                         raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit footer totals are invalid.")
+                    if not isinstance(record.get("reason"), str) or re.fullmatch(
+                        r"[a-z][a-z0-9_-]{0,63}", record["reason"]
+                    ) is None:
+                        raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit footer reason is invalid.")
                     last_at = self._verified_timestamp(record.get("timestamp"), last_at)
                     footer = True
+                    close_reason = record["reason"]
                 else:
                     raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit record type is invalid.")
             records.append(record)
             previous = actual
-        assert last_at is not None and previous is not None
+        assert (
+            last_at is not None
+            and previous is not None
+            and audit_schema_version is not None
+            and accounting_mode is not None
+        )
         summary = AuditSummary(
+            schema_version=audit_schema_version,
+            accounting_mode=accounting_mode,
             header_sha256=records[0]["event_sha256"],
             head_sha256=previous,
             final_sequence=len(records) - 1,
             tool_calls=tool_calls,
             disclosed_bytes=disclosed_bytes,
             footer=footer,
+            close_reason=close_reason,
             last_committed_at=last_at,
         )
         return _VerifiedAudit(tuple(records), summary)
 
-    def _verify_header(self, record: dict[str, Any]) -> None:
+    def _verify_header(self, record: dict[str, Any]) -> tuple[int, str]:
+        schema_version = record.get("audit_schema_version")
+        if type(schema_version) is not int:
+            raise ToolError(
+                "AUDIT_CHAIN_INVALID",
+                "The disclosure audit schema version must be an exact integer.",
+            )
+        if schema_version == LEGACY_AUDIT_SCHEMA_VERSION:
+            accounting_mode = LEGACY_ACCOUNTING_MODE
+        elif (
+            schema_version == AUDIT_SCHEMA_VERSION
+            and record.get("accounting_mode") == ACCOUNTING_MODE
+        ):
+            accounting_mode = ACCOUNTING_MODE
+        else:
+            raise ToolError(
+                "AUDIT_CHAIN_INVALID",
+                "The disclosure audit schema or accounting mode is unsupported.",
+            )
         expected = {
             "record_type": "header",
-            "audit_schema_version": AUDIT_SCHEMA_VERSION,
+            "audit_schema_version": schema_version,
             "sequence": 0,
             "package_id": self.binding.package_id,
             "session_id_sha256": self.binding.session_id_sha256,
@@ -717,6 +902,8 @@ class AuditLog:
             "limits_sha256": self.binding.limits_sha256,
             "previous_event_sha256": None,
         }
+        if schema_version == AUDIT_SCHEMA_VERSION:
+            expected["accounting_mode"] = ACCOUNTING_MODE
         for key, value in expected.items():
             if record.get(key) != value:
                 raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit header binding is invalid.")
@@ -726,8 +913,15 @@ class AuditLog:
             parse_utc(str(record.get("created_at", "")))
         except ValueError as exc:
             raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit header time is invalid.") from exc
+        return schema_version, accounting_mode
 
-    def _verify_tool_record(self, record: dict[str, Any], previous_disclosed: int) -> None:
+    def _verify_tool_record(
+        self,
+        record: dict[str, Any],
+        previous_disclosed: int,
+        *,
+        accounting_mode: str,
+    ) -> None:
         common = {
             "record_type",
             "sequence",
@@ -747,8 +941,12 @@ class AuditLog:
         }
         if record.get("package_id") != self.binding.package_id or record.get("session_id_sha256") != self.binding.session_id_sha256:
             raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit tool binding is invalid.")
-        if record.get("tool") not in {"gptpro_package_info", "gptpro_repo_read", "gptpro_repo_search"}:
-            raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit tool name is invalid.")
+        try:
+            allowed_tools = _catalog_tools_for_schema_hash(self.binding.tool_schema_sha256)
+        except ValueError as exc:
+            raise ToolError(
+                "AUDIT_CHAIN_INVALID", "The disclosure audit tool schema is invalid."
+            ) from exc
         try:
             _require_hash(record.get("jsonrpc_request_id_sha256"), "request id")
             _require_hash(record.get("arguments_sha256"), "arguments")
@@ -764,7 +962,7 @@ class AuditLog:
             raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit call byte count is invalid.")
         result = record.get("result")
         if result == "committed_for_return":
-            if set(record) != common:
+            if record.get("tool") not in allowed_tools or set(record) != common:
                 raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit tool-call shape is invalid.")
             try:
                 if _sanitize_metadata(str(record.get("tool")), record.get("audit_metadata", {})) != record.get("audit_metadata"):
@@ -772,12 +970,51 @@ class AuditLog:
             except ValueError as exc:
                 raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit metadata is invalid.") from exc
         elif result == "rejected":
-            if set(record) != common | {"error_code"} or call_bytes != 0 or record.get("audit_metadata") != {}:
+            unadvertised = record.get("tool") == UNADVERTISED_TOOL_LABEL
+            expected = common | {"error_code"}
+            if unadvertised:
+                expected.add("requested_tool_sha256")
+            if (
+                set(record) != expected
+                or call_bytes != 0
+                or record.get("audit_metadata") != {}
+                or (not unadvertised and record.get("tool") not in allowed_tools)
+            ):
                 raise ToolError("AUDIT_CHAIN_INVALID", "The rejected audit-call shape is invalid.")
             if not isinstance(record.get("error_code"), str) or re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", record["error_code"]) is None:
                 raise ToolError("AUDIT_CHAIN_INVALID", "The rejected audit error code is invalid.")
+            if unadvertised:
+                if accounting_mode != ACCOUNTING_MODE:
+                    raise ToolError(
+                        "AUDIT_CHAIN_INVALID",
+                        "Legacy disclosure audits cannot contain unadvertised-tool records.",
+                    )
+                try:
+                    _require_hash(record.get("requested_tool_sha256"), "requested tool")
+                except ValueError as exc:
+                    raise ToolError(
+                        "AUDIT_CHAIN_INVALID",
+                        "The rejected audit tool binding is invalid.",
+                    ) from exc
+                if record["error_code"] != "MCP_INVALID_ARGUMENT":
+                    raise ToolError(
+                        "AUDIT_CHAIN_INVALID",
+                        "The unadvertised-tool rejection code is invalid.",
+                    )
         else:
             raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit result marker is invalid.")
+
+    @staticmethod
+    def _require_current_accounting(summary: AuditSummary) -> None:
+        if (
+            summary.schema_version != AUDIT_SCHEMA_VERSION
+            or summary.accounting_mode != ACCOUNTING_MODE
+        ):
+            raise ToolError(
+                "AUDIT_SCHEMA_UNSUPPORTED",
+                "Legacy disclosure evidence is verification-only and cannot accept new calls.",
+                recovery="Close the legacy session and activate a new approved package session.",
+            )
 
     @staticmethod
     def _positive_counter(value: Any, previous: int) -> int:
@@ -803,8 +1040,12 @@ class AuditLog:
 
 
 def _sanitize_metadata(tool: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
-    if tool not in {"gptpro_package_info", "gptpro_repo_read", "gptpro_repo_search"}:
-        raise ValueError("tool is not in the read-only catalog")
+    known_tools = set().union(
+        *(_catalog_tools_for_schema_hash(contract_for_schema(version)["tool_schema_sha256"])
+          for version in (3, 4))
+    )
+    if tool not in known_tools:
+        raise ValueError("tool is not in an approved Web MCP catalog")
     if not isinstance(metadata, Mapping):
         raise ValueError("audit metadata must be an object")
     result_sha = _require_hash(metadata.get("result_sha256"), "result")
@@ -824,6 +1065,38 @@ def _sanitize_metadata(tool: str, metadata: Mapping[str, Any]) -> dict[str, Any]
             )
         return {"result_sha256": result_sha, "paths": paths}
     if tool == "gptpro_repo_read":
+        if "fragments" in metadata:
+            raw_fragments = metadata.get("fragments")
+            if not isinstance(raw_fragments, list) or len(raw_fragments) > 16:
+                raise ValueError("read fragment metadata is invalid")
+            fragments: list[dict[str, Any]] = []
+            for item in raw_fragments:
+                if not isinstance(item, Mapping):
+                    raise ValueError("read fragment metadata is invalid")
+                range_index = _nonnegative_integer(item.get("range_index"), "range index")
+                start_line = _positive_integer(item.get("start_line"), "fragment start")
+                end_line = _positive_integer(item.get("end_line"), "fragment end")
+                if end_line < start_line:
+                    raise ValueError("read fragment range is invalid")
+                fragments.append(
+                    {
+                        "range_index": range_index,
+                        "start_line": start_line,
+                        "end_line": end_line,
+                        "fragment_sha256": _require_hash(
+                            item.get("fragment_sha256"), "fragment"
+                        ),
+                    }
+                )
+            return {
+                "result_sha256": result_sha,
+                "path": _safe_path(metadata.get("path")),
+                "file_sha256": _require_hash(metadata.get("file_sha256"), "file"),
+                "fragments": fragments,
+                "content_bytes": _nonnegative_integer(
+                    metadata.get("content_bytes"), "content bytes"
+                ),
+            }
         returned = metadata.get("returned")
         requested = metadata.get("requested")
         if not isinstance(requested, Mapping) or not isinstance(returned, Mapping):
@@ -837,9 +1110,7 @@ def _sanitize_metadata(tool: str, metadata: Mapping[str, Any]) -> dict[str, Any]
         for key in ("start_line", "end_line"):
             if isinstance(returned.get(key), bool) or not isinstance(returned.get(key), int):
                 raise ValueError("returned line range is invalid")
-        content_bytes = metadata.get("content_bytes")
-        if isinstance(content_bytes, bool) or not isinstance(content_bytes, int) or content_bytes < 0:
-            raise ValueError("content byte metadata is invalid")
+        content_bytes = _nonnegative_integer(metadata.get("content_bytes"), "content bytes")
         return {
             "result_sha256": result_sha,
             "path": _safe_path(metadata.get("path")),
@@ -849,7 +1120,125 @@ def _sanitize_metadata(tool: str, metadata: Mapping[str, Any]) -> dict[str, Any]
             "fragment_sha256": _require_hash(metadata.get("fragment_sha256"), "fragment"),
             "content_bytes": content_bytes,
         }
-    query_hash = _require_hash(metadata.get("query_sha256"), "query")
+    if tool == "gptpro_workspace_map":
+        entries = []
+        raw_entries = metadata.get("entries", [])
+        if not isinstance(raw_entries, list) or len(raw_entries) > 200:
+            raise ValueError("workspace-map metadata is invalid")
+        for item in raw_entries:
+            if not isinstance(item, Mapping) or item.get("kind") not in {"file", "directory"}:
+                raise ValueError("workspace-map entry is invalid")
+            cleaned = {"path": _safe_path(item.get("path")), "kind": item["kind"]}
+            if item["kind"] == "file":
+                cleaned.update(
+                    {
+                        "size": _nonnegative_integer(item.get("size"), "workspace file size"),
+                        "sha256": _require_hash(item.get("sha256"), "workspace file"),
+                    }
+                )
+            else:
+                if item.get("size") is not None or item.get("sha256") is not None:
+                    raise ValueError("workspace directory metadata is invalid")
+                cleaned.update({"size": None, "sha256": None})
+            entries.append(cleaned)
+        return {
+            "result_sha256": result_sha,
+            "entries": entries,
+            "result_bytes": _nonnegative_integer(metadata.get("result_bytes"), "result bytes"),
+        }
+    if tool == "gptpro_repo_diff":
+        entries = []
+        raw_entries = metadata.get("entries", [])
+        if not isinstance(raw_entries, list) or len(raw_entries) > 100:
+            raise ValueError("diff metadata is invalid")
+        for item in raw_entries:
+            if not isinstance(item, Mapping) or item.get("status") not in {
+                "added", "modified", "deleted"
+            }:
+                raise ValueError("diff entry metadata is invalid")
+            old_hash = item.get("old_sha256")
+            if item["status"] == "added":
+                if old_hash is not None:
+                    raise ValueError("added diff metadata has an old hash")
+            else:
+                old_hash = _require_hash(old_hash, "old diff file")
+            new_hash = item.get("new_sha256")
+            if item["status"] == "deleted":
+                if new_hash is not None:
+                    raise ValueError("deleted diff metadata has a new hash")
+            else:
+                new_hash = _require_hash(new_hash, "new diff file")
+            diff_hash = item.get("diff_sha256")
+            if diff_hash is not None:
+                diff_hash = _require_hash(diff_hash, "diff")
+            entries.append(
+                {
+                    "path": _safe_path(item.get("path")),
+                    "status": item["status"],
+                    "old_sha256": old_hash,
+                    "new_sha256": new_hash,
+                    "diff_sha256": diff_hash,
+                }
+            )
+        return {
+            "result_sha256": result_sha,
+            "entries": entries,
+            "result_bytes": _nonnegative_integer(metadata.get("result_bytes"), "result bytes"),
+        }
+    if tool == "gptpro_artifact_read":
+        artifact_id = metadata.get("artifact_id")
+        if not isinstance(artifact_id, str) or re.fullmatch(
+            r"[a-z0-9][a-z0-9._-]{0,63}", artifact_id
+        ) is None:
+            raise ValueError("artifact identity is invalid")
+        returned = metadata.get("returned")
+        if not isinstance(returned, Mapping):
+            raise ValueError("artifact line range is invalid")
+        start_line = _positive_integer(returned.get("start_line"), "artifact start")
+        end_line = _nonnegative_integer(returned.get("end_line"), "artifact end")
+        if end_line and end_line < start_line:
+            raise ValueError("artifact line range is invalid")
+        return {
+            "result_sha256": result_sha,
+            "artifact_id": artifact_id,
+            "sha256": _require_hash(metadata.get("sha256"), "artifact"),
+            "returned": {"start_line": start_line, "end_line": end_line},
+            "fragment_sha256": _require_hash(metadata.get("fragment_sha256"), "fragment"),
+            "content_bytes": _nonnegative_integer(
+                metadata.get("content_bytes"), "content bytes"
+            ),
+        }
+    if tool == "gptpro_analysis_status":
+        events = []
+        raw_events = metadata.get("events", [])
+        if not isinstance(raw_events, list) or len(raw_events) > 50:
+            raise ValueError("analysis status metadata is invalid")
+        for item in raw_events:
+            if not isinstance(item, Mapping):
+                raise ValueError("analysis event metadata is invalid")
+            events.append(
+                {
+                    "sequence": _positive_integer(item.get("sequence"), "analysis sequence"),
+                    "event_id_sha256": _require_hash(
+                        item.get("event_id_sha256"), "analysis event id"
+                    ),
+                    "event_sha256": _require_hash(item.get("event_sha256"), "analysis event"),
+                }
+            )
+        return {
+            "result_sha256": result_sha,
+            "head_sha256": _require_hash(metadata.get("head_sha256"), "analysis head"),
+            "events": events,
+            "result_bytes": _nonnegative_integer(metadata.get("result_bytes"), "result bytes"),
+        }
+    query_hashes_raw = metadata.get("query_sha256s")
+    if query_hashes_raw is not None:
+        if not isinstance(query_hashes_raw, list) or not 1 <= len(query_hashes_raw) <= 8:
+            raise ValueError("search query hash metadata is invalid")
+        query_hashes = [_require_hash(value, "query") for value in query_hashes_raw]
+        query_metadata: dict[str, Any] = {"query_sha256s": query_hashes}
+    else:
+        query_metadata = {"query_sha256": _require_hash(metadata.get("query_sha256"), "query")}
     matches = []
     raw_matches = metadata.get("matches", [])
     if not isinstance(raw_matches, list) or len(raw_matches) > 100:
@@ -866,12 +1255,23 @@ def _sanitize_metadata(tool: str, metadata: Mapping[str, Any]) -> dict[str, Any]
         cleaned["file_sha256"] = _require_hash(item.get("file_sha256"), "file")
         cleaned["excerpt_sha256"] = _require_hash(item.get("excerpt_sha256"), "excerpt")
         matches.append(cleaned)
-    result_bytes = metadata.get("result_bytes")
-    if isinstance(result_bytes, bool) or not isinstance(result_bytes, int) or result_bytes < 0:
-        raise ValueError("search result byte metadata is invalid")
+    result_bytes = _nonnegative_integer(metadata.get("result_bytes"), "search result bytes")
     return {
         "result_sha256": result_sha,
-        "query_sha256": query_hash,
+        **query_metadata,
         "matches": matches,
         "result_bytes": result_bytes,
     }
+
+
+def _nonnegative_integer(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{label} is invalid")
+    return value
+
+
+def _positive_integer(value: Any, label: str) -> int:
+    result = _nonnegative_integer(value, label)
+    if result < 1:
+        raise ValueError(f"{label} is invalid")
+    return result

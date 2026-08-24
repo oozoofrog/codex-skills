@@ -9,7 +9,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TextIO
 
-from .errors import CancelledError, ToolError
+from .errors import CancelledError, ToolError, UnknownToolError
 from .protocol_trace import (
     ProtocolTrace,
     ProtocolTraceError,
@@ -17,7 +17,7 @@ from .protocol_trace import (
     classify_requested_version,
     safe_requested_version,
 )
-from .schema import SERVER_INSTRUCTIONS, SERVER_NAME, SERVER_VERSION, TOOL_CATALOG, TOOL_NAMES
+from .schema import contract_for_schema, validate_tool_name
 from .tools import ToolRuntime, error_result
 
 JSONRPC_VERSION = "2.0"
@@ -69,9 +69,16 @@ class LegacyMcpServer:
         *,
         max_workers: int = 1,
         trace: ProtocolTrace | None = None,
+        contract: dict[str, Any] | None = None,
     ) -> None:
         self._tools = tools
         self._trace = trace
+        selected = dict(contract or contract_for_schema(3))
+        self._tool_catalog = tuple(copy.deepcopy(selected["tool_catalog"]))
+        self._tool_names = frozenset(selected["tool_names"])
+        self._server_name = str(selected["server_name"])
+        self._server_version = str(selected["server_version"])
+        self._server_instructions = str(selected["server_instructions"])
         self._state_lock = threading.Lock()
         self._writer_lock = threading.Lock()
         self._initialize_seen = False
@@ -361,7 +368,9 @@ class LegacyMcpServer:
             return
         with self._state_lock:
             ready = self._initialized
-        if method == "tools/call" and not ready and self._valid_tool_call_params(params):
+        if method == "tools/call" and not ready and self._valid_tool_call_params(
+            params, require_advertised=True
+        ):
             with self._state_lock:
                 before = self._readiness_locked()
                 request_scoped_compat = (
@@ -434,7 +443,7 @@ class LegacyMcpServer:
             ):
                 return
             self._write_traced(
-                _rpc_result(request_id, {"tools": copy.deepcopy(list(TOOL_CATALOG))}),
+                _rpc_result(request_id, {"tools": copy.deepcopy(list(self._tool_catalog))}),
                 "tools_list",
             )
             return
@@ -653,21 +662,28 @@ class LegacyMcpServer:
             "initialize",
         )
 
-    @staticmethod
-    def _initialize_result(negotiated: str) -> dict[str, Any]:
+    def _initialize_result(self, negotiated: str) -> dict[str, Any]:
         return {
             "protocolVersion": negotiated,
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-            "instructions": SERVER_INSTRUCTIONS,
+            "serverInfo": {"name": self._server_name, "version": self._server_version},
+            "instructions": self._server_instructions,
         }
 
-    @staticmethod
-    def _valid_tool_call_params(params: dict[str, Any]) -> bool:
+    def _valid_tool_call_params(
+        self,
+        params: dict[str, Any],
+        *,
+        require_advertised: bool = False,
+    ) -> bool:
         allowed_keys = {"name", "arguments", "_meta"}
+        try:
+            name = validate_tool_name(params.get("name"))
+        except ValueError:
+            return False
         return (
             set(params).issubset(allowed_keys)
-            and params.get("name") in TOOL_NAMES
+            and (not require_advertised or name in self._tool_names)
             and isinstance(params.get("arguments", {}), dict)
             and ("_meta" not in params or isinstance(params.get("_meta"), dict))
         )
@@ -689,6 +705,19 @@ class LegacyMcpServer:
                     request_id=request_id,
                 )
             except CancelledError:
+                return
+            except UnknownToolError as exc:
+                if cancel.is_set():
+                    return
+                self._write_traced(
+                    _rpc_error(
+                        request_id,
+                        -32602,
+                        "Invalid params",
+                        stable_code=exc.code,
+                    ),
+                    "tools_call",
+                )
                 return
             except ToolError as exc:
                 if cancel.is_set():
