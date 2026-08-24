@@ -30,7 +30,7 @@
 
 | Skill | Best for |
 |---|---|
-| `gptpro` | 검증된 GitHub SHA handoff와 명시적 opt-in schema-3 `mcp-read`/schema-4 `mcp-research` read-only Web MCP로 로그인된 ChatGPT Pro와 승인된 repo 상담 수행. Web MCP 계정 E2E는 별도 검증 gate |
+| `gptpro` | 로그인된 ChatGPT Pro와 코드 리뷰·설계·디버깅을 협업합니다. 일반 상담은 GitHub-first로 시작하고, 필요한 경우에만 승인된 로컬 snapshot을 읽는 schema-4 `mcp-research`를 명시적으로 선택합니다. |
 | `goal-research-loop` | 새 목표 지향 반복 연구 루프 설계·운영 |
 | `codex-research` | 기존 `.codex-research/` runner 상태 재개·점검 |
 | `hey-codex` | 명시 요청 시 별도 Codex CLI 인스턴스 실행 |
@@ -82,12 +82,15 @@
 $codex-skill-audit ~/.codex/skills를 감사해주세요.
 $agent-context-init 이 저장소에 Codex용 AGENTS.md 구조를 만들어주세요.
 $gptpro review 모드로 현재 변경을 Pro와 협업 검토해주세요.
+$gptpro review 모드로 src와 tests를 Pro가 읽어가며 분석하도록 mcp-research로 진행해주세요. 실제 수정은 검증 뒤에 해주세요.
 $goal-research-loop 이 성능 개선 목표를 5라운드 반복 연구 루프로 설계해주세요.
 $swift-master 이 SwiftUI 상태 관리와 동시성 위험을 리뷰해주세요.
 $ios-swift-orchestrator 이 iOS 작업을 어떤 하위 스킬로 진행할지 결정해주세요.
 $app-automation 실행 중인 macOS 앱 UI를 분석하고 스크린샷 증거를 남겨주세요.
 $macos-release 이번 macOS CLI 릴리스를 dry-run부터 Homebrew 반영까지 점검해주세요.
 ```
+
+첫 번째 `gptpro` 예시는 GitHub-first 일반 상담입니다. 두 번째 예시는 macOS, ChatGPT Developer Mode, 공식 Secure MCP Tunnel이 준비된 경우에만 사용하는 실험적 읽기 전용 분석 협업입니다. 어느 경로든 Codex가 공개 범위와 package ID를 먼저 보여주며, 사용자가 그 패키지를 승인하기 전에는 전송하거나 저장소 내용을 공개하지 않습니다.
 
 ## 릴리즈 운영 파일
 
