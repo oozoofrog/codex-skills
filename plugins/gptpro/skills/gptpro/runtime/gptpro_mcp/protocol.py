@@ -17,7 +17,7 @@ from .protocol_trace import (
     classify_requested_version,
     safe_requested_version,
 )
-from .schema import SERVER_INSTRUCTIONS, SERVER_NAME, SERVER_VERSION, TOOL_CATALOG, TOOL_NAMES
+from .schema import contract_for_schema
 from .tools import ToolRuntime, error_result
 
 JSONRPC_VERSION = "2.0"
@@ -69,9 +69,16 @@ class LegacyMcpServer:
         *,
         max_workers: int = 1,
         trace: ProtocolTrace | None = None,
+        contract: dict[str, Any] | None = None,
     ) -> None:
         self._tools = tools
         self._trace = trace
+        selected = dict(contract or contract_for_schema(3))
+        self._tool_catalog = tuple(copy.deepcopy(selected["tool_catalog"]))
+        self._tool_names = frozenset(selected["tool_names"])
+        self._server_name = str(selected["server_name"])
+        self._server_version = str(selected["server_version"])
+        self._server_instructions = str(selected["server_instructions"])
         self._state_lock = threading.Lock()
         self._writer_lock = threading.Lock()
         self._initialize_seen = False
@@ -434,7 +441,7 @@ class LegacyMcpServer:
             ):
                 return
             self._write_traced(
-                _rpc_result(request_id, {"tools": copy.deepcopy(list(TOOL_CATALOG))}),
+                _rpc_result(request_id, {"tools": copy.deepcopy(list(self._tool_catalog))}),
                 "tools_list",
             )
             return
@@ -653,21 +660,19 @@ class LegacyMcpServer:
             "initialize",
         )
 
-    @staticmethod
-    def _initialize_result(negotiated: str) -> dict[str, Any]:
+    def _initialize_result(self, negotiated: str) -> dict[str, Any]:
         return {
             "protocolVersion": negotiated,
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-            "instructions": SERVER_INSTRUCTIONS,
+            "serverInfo": {"name": self._server_name, "version": self._server_version},
+            "instructions": self._server_instructions,
         }
 
-    @staticmethod
-    def _valid_tool_call_params(params: dict[str, Any]) -> bool:
+    def _valid_tool_call_params(self, params: dict[str, Any]) -> bool:
         allowed_keys = {"name", "arguments", "_meta"}
         return (
             set(params).issubset(allowed_keys)
-            and params.get("name") in TOOL_NAMES
+            and params.get("name") in self._tool_names
             and isinstance(params.get("arguments", {}), dict)
             and ("_meta" not in params or isinstance(params.get("_meta"), dict))
         )

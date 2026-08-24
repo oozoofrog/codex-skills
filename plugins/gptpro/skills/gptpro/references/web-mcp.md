@@ -2,13 +2,13 @@
 
 The phase-3 runtime currently supports macOS with Python 3.11 or newer. Other platforms and older Python versions remain outside this runtime's tested contract; the existing attended browser/manual transports are separate.
 
-This path lets a logged-in ChatGPT Web conversation inspect one explicitly approved immutable repository package through OpenAI Secure MCP Tunnel. It is experimental and attended. Codex still owns repository edits, commands, tests, Git operations, and the final decision.
+This path lets a logged-in ChatGPT Web conversation inspect one explicitly approved immutable repository package through OpenAI Secure MCP Tunnel. It is experimental and attended. Schema 3 `mcp-read` is the original three-tool reader described below. Schema 4 `mcp-research` reuses the same Tunnel/lifecycle boundary with a broader seven-tool read-only research catalog and an owner-approved Codex context-note ledger; read [mcp-research.md](mcp-research.md) for its additive contract. Codex still owns repository edits, commands, tests, Git operations, and the final decision.
 
 ## Evidence levels
 
 Keep these claims separate:
 
-- **Package/governance:** schema 3 can prepare, verify, approve, receipt, import, and evaluate an `mcp-read` handoff.
+- **Package/governance:** schema 3/4 can prepare, verify, approve, receipt, import, and evaluate an explicit Web MCP handoff.
 - **Local runtime:** the dependency-free stdio server can verify the immutable ZIP, authorize one active package, durably audit disclosure, and expose the exact read-only tools under deterministic tests.
 - **Official client compatibility:** the installed `tunnel-client` can pass the documented profile preflight and foreground lifecycle checks.
 - **Logged-in account E2E:** ChatGPT Developer Mode discovers the tools, performs bounded calls, returns the marked answer, and that answer is imported and evaluated.
@@ -19,11 +19,11 @@ Passing a lower level does not prove a higher one. In particular, `doctor`, `/he
 
 | Axis | Phase-1 value | Meaning |
 |---|---|---|
-| Context transport | `mcp-read` | Repository bytes are disclosed on demand from the approved package. |
+| Context transport | `mcp-read` or `mcp-research` | Repository bytes are disclosed on demand from the approved package under one exact schema catalog. |
 | Delivery channel | `browser` | A person visibly sends the prompt and receives the answer in ChatGPT Web. |
 | Connector | `secure-mcp-tunnel` | The official Tunnel connects ChatGPT to the local stdio server. |
 
-Changing any axis after approval requires revoking/stopping the current session, preparing a new package, and obtaining a new package-specific approval. Never silently fall back to GitHub, paste, text-file, manual, ZIP upload, or Desktop CDP.
+Changing any axis or switching between the two Web MCP schemas after approval requires revoking/stopping the current session, preparing a new package, and obtaining a new package-specific approval. Never silently fall back to GitHub, paste, text-file, manual, ZIP upload, or desktop-renderer automation.
 
 ## Approved immutable source
 
@@ -43,7 +43,7 @@ Before approval, show the exact maximum file/hash set and potential bytes, exclu
 
 ## Exact read-only tools
 
-Phase 1 exposes only:
+Schema 3 exposes only:
 
 - `gptpro_package_info`: approved package/snapshot metadata, allowlisted paths, limits, and expiry;
 - `gptpro_repo_search`: bounded literal UTF-8 search within approved files;

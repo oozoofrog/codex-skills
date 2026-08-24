@@ -20,11 +20,20 @@ from .authorization import AuthorizationGrant
 from .clock import Clock, ClockAnchor, parse_utc, utc_text
 from .errors import ToolError
 from .runtime_state import RuntimeStateError, RuntimeStateStore
+from .schema import contract_for_schema
+from .sensitive import secret_detector_names
 
 AUDIT_SCHEMA_VERSION = 1
 MAX_AUDIT_BYTES = 16 * 1024 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-_RAW_SECRET = re.compile(r"(?:\bsk-[A-Za-z0-9_-]{16,}|\btunnel_[A-Za-z0-9_-]{16,128}\b)")
+
+
+def _catalog_tools_for_schema_hash(tool_schema_sha256: str) -> frozenset[str]:
+    for schema_version in (3, 4):
+        contract = contract_for_schema(schema_version)
+        if tool_schema_sha256 == contract["tool_schema_sha256"]:
+            return frozenset(str(name) for name in contract["tool_names"])
+    raise ValueError("tool schema hash is not an approved Web MCP catalog")
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -67,7 +76,7 @@ def _safe_path(value: Any) -> str:
         part in {"", ".", ".."} for part in candidate.parts
     ):
         raise ValueError("audit path must be a relative canonical POSIX path")
-    if _RAW_SECRET.search(value):
+    if secret_detector_names(value):
         raise ValueError("audit path contains forbidden secret-like material")
     return value
 
@@ -106,6 +115,7 @@ class AuditSummary:
     tool_calls: int
     disclosed_bytes: int
     footer: bool
+    close_reason: str | None
     last_committed_at: datetime
 
 
@@ -186,6 +196,8 @@ class AuditLog:
         """Implement the Phase-2 DisclosureCommitter protocol without storing bodies."""
 
         try:
+            if tool not in _catalog_tools_for_schema_hash(self.binding.tool_schema_sha256):
+                raise ValueError("tool is not in the package-bound catalog")
             _require_hash(request_id_sha256, "request id")
             _require_hash(arguments_sha256, "arguments")
             sanitized = _sanitize_metadata(tool, audit_metadata)
@@ -292,8 +304,8 @@ class AuditLog:
         """Durably record a rejected/cancelled call without repository disclosure."""
 
         try:
-            if tool not in {"gptpro_package_info", "gptpro_repo_read", "gptpro_repo_search"}:
-                raise ValueError("tool is not in the read-only catalog")
+            if tool not in _catalog_tools_for_schema_hash(self.binding.tool_schema_sha256):
+                raise ValueError("tool is not in the package-bound catalog")
             _require_hash(request_id_sha256, "request id")
             _require_hash(arguments_sha256, "arguments")
             if not isinstance(error_code, str) or re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", error_code) is None:
@@ -631,6 +643,7 @@ class AuditLog:
         disclosed_bytes = 0
         last_at: datetime | None = None
         footer = False
+        close_reason: str | None = None
         for sequence, raw_line in enumerate(payload.splitlines()):
             try:
                 record = json.loads(raw_line.decode("utf-8"))
@@ -684,8 +697,13 @@ class AuditLog:
                         raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit footer shape is invalid.")
                     if record.get("tool_calls") != tool_calls or record.get("disclosed_bytes") != disclosed_bytes:
                         raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit footer totals are invalid.")
+                    if not isinstance(record.get("reason"), str) or re.fullmatch(
+                        r"[a-z][a-z0-9_-]{0,63}", record["reason"]
+                    ) is None:
+                        raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit footer reason is invalid.")
                     last_at = self._verified_timestamp(record.get("timestamp"), last_at)
                     footer = True
+                    close_reason = record["reason"]
                 else:
                     raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit record type is invalid.")
             records.append(record)
@@ -698,6 +716,7 @@ class AuditLog:
             tool_calls=tool_calls,
             disclosed_bytes=disclosed_bytes,
             footer=footer,
+            close_reason=close_reason,
             last_committed_at=last_at,
         )
         return _VerifiedAudit(tuple(records), summary)
@@ -747,7 +766,13 @@ class AuditLog:
         }
         if record.get("package_id") != self.binding.package_id or record.get("session_id_sha256") != self.binding.session_id_sha256:
             raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit tool binding is invalid.")
-        if record.get("tool") not in {"gptpro_package_info", "gptpro_repo_read", "gptpro_repo_search"}:
+        try:
+            allowed_tools = _catalog_tools_for_schema_hash(self.binding.tool_schema_sha256)
+        except ValueError as exc:
+            raise ToolError(
+                "AUDIT_CHAIN_INVALID", "The disclosure audit tool schema is invalid."
+            ) from exc
+        if record.get("tool") not in allowed_tools:
             raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit tool name is invalid.")
         try:
             _require_hash(record.get("jsonrpc_request_id_sha256"), "request id")
@@ -803,8 +828,12 @@ class AuditLog:
 
 
 def _sanitize_metadata(tool: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
-    if tool not in {"gptpro_package_info", "gptpro_repo_read", "gptpro_repo_search"}:
-        raise ValueError("tool is not in the read-only catalog")
+    known_tools = set().union(
+        *(_catalog_tools_for_schema_hash(contract_for_schema(version)["tool_schema_sha256"])
+          for version in (3, 4))
+    )
+    if tool not in known_tools:
+        raise ValueError("tool is not in an approved Web MCP catalog")
     if not isinstance(metadata, Mapping):
         raise ValueError("audit metadata must be an object")
     result_sha = _require_hash(metadata.get("result_sha256"), "result")
@@ -824,6 +853,38 @@ def _sanitize_metadata(tool: str, metadata: Mapping[str, Any]) -> dict[str, Any]
             )
         return {"result_sha256": result_sha, "paths": paths}
     if tool == "gptpro_repo_read":
+        if "fragments" in metadata:
+            raw_fragments = metadata.get("fragments")
+            if not isinstance(raw_fragments, list) or len(raw_fragments) > 16:
+                raise ValueError("read fragment metadata is invalid")
+            fragments: list[dict[str, Any]] = []
+            for item in raw_fragments:
+                if not isinstance(item, Mapping):
+                    raise ValueError("read fragment metadata is invalid")
+                range_index = _nonnegative_integer(item.get("range_index"), "range index")
+                start_line = _positive_integer(item.get("start_line"), "fragment start")
+                end_line = _positive_integer(item.get("end_line"), "fragment end")
+                if end_line < start_line:
+                    raise ValueError("read fragment range is invalid")
+                fragments.append(
+                    {
+                        "range_index": range_index,
+                        "start_line": start_line,
+                        "end_line": end_line,
+                        "fragment_sha256": _require_hash(
+                            item.get("fragment_sha256"), "fragment"
+                        ),
+                    }
+                )
+            return {
+                "result_sha256": result_sha,
+                "path": _safe_path(metadata.get("path")),
+                "file_sha256": _require_hash(metadata.get("file_sha256"), "file"),
+                "fragments": fragments,
+                "content_bytes": _nonnegative_integer(
+                    metadata.get("content_bytes"), "content bytes"
+                ),
+            }
         returned = metadata.get("returned")
         requested = metadata.get("requested")
         if not isinstance(requested, Mapping) or not isinstance(returned, Mapping):
@@ -837,9 +898,7 @@ def _sanitize_metadata(tool: str, metadata: Mapping[str, Any]) -> dict[str, Any]
         for key in ("start_line", "end_line"):
             if isinstance(returned.get(key), bool) or not isinstance(returned.get(key), int):
                 raise ValueError("returned line range is invalid")
-        content_bytes = metadata.get("content_bytes")
-        if isinstance(content_bytes, bool) or not isinstance(content_bytes, int) or content_bytes < 0:
-            raise ValueError("content byte metadata is invalid")
+        content_bytes = _nonnegative_integer(metadata.get("content_bytes"), "content bytes")
         return {
             "result_sha256": result_sha,
             "path": _safe_path(metadata.get("path")),
@@ -849,7 +908,125 @@ def _sanitize_metadata(tool: str, metadata: Mapping[str, Any]) -> dict[str, Any]
             "fragment_sha256": _require_hash(metadata.get("fragment_sha256"), "fragment"),
             "content_bytes": content_bytes,
         }
-    query_hash = _require_hash(metadata.get("query_sha256"), "query")
+    if tool == "gptpro_workspace_map":
+        entries = []
+        raw_entries = metadata.get("entries", [])
+        if not isinstance(raw_entries, list) or len(raw_entries) > 200:
+            raise ValueError("workspace-map metadata is invalid")
+        for item in raw_entries:
+            if not isinstance(item, Mapping) or item.get("kind") not in {"file", "directory"}:
+                raise ValueError("workspace-map entry is invalid")
+            cleaned = {"path": _safe_path(item.get("path")), "kind": item["kind"]}
+            if item["kind"] == "file":
+                cleaned.update(
+                    {
+                        "size": _nonnegative_integer(item.get("size"), "workspace file size"),
+                        "sha256": _require_hash(item.get("sha256"), "workspace file"),
+                    }
+                )
+            else:
+                if item.get("size") is not None or item.get("sha256") is not None:
+                    raise ValueError("workspace directory metadata is invalid")
+                cleaned.update({"size": None, "sha256": None})
+            entries.append(cleaned)
+        return {
+            "result_sha256": result_sha,
+            "entries": entries,
+            "result_bytes": _nonnegative_integer(metadata.get("result_bytes"), "result bytes"),
+        }
+    if tool == "gptpro_repo_diff":
+        entries = []
+        raw_entries = metadata.get("entries", [])
+        if not isinstance(raw_entries, list) or len(raw_entries) > 100:
+            raise ValueError("diff metadata is invalid")
+        for item in raw_entries:
+            if not isinstance(item, Mapping) or item.get("status") not in {
+                "added", "modified", "deleted"
+            }:
+                raise ValueError("diff entry metadata is invalid")
+            old_hash = item.get("old_sha256")
+            if item["status"] == "added":
+                if old_hash is not None:
+                    raise ValueError("added diff metadata has an old hash")
+            else:
+                old_hash = _require_hash(old_hash, "old diff file")
+            new_hash = item.get("new_sha256")
+            if item["status"] == "deleted":
+                if new_hash is not None:
+                    raise ValueError("deleted diff metadata has a new hash")
+            else:
+                new_hash = _require_hash(new_hash, "new diff file")
+            diff_hash = item.get("diff_sha256")
+            if diff_hash is not None:
+                diff_hash = _require_hash(diff_hash, "diff")
+            entries.append(
+                {
+                    "path": _safe_path(item.get("path")),
+                    "status": item["status"],
+                    "old_sha256": old_hash,
+                    "new_sha256": new_hash,
+                    "diff_sha256": diff_hash,
+                }
+            )
+        return {
+            "result_sha256": result_sha,
+            "entries": entries,
+            "result_bytes": _nonnegative_integer(metadata.get("result_bytes"), "result bytes"),
+        }
+    if tool == "gptpro_artifact_read":
+        artifact_id = metadata.get("artifact_id")
+        if not isinstance(artifact_id, str) or re.fullmatch(
+            r"[a-z0-9][a-z0-9._-]{0,63}", artifact_id
+        ) is None:
+            raise ValueError("artifact identity is invalid")
+        returned = metadata.get("returned")
+        if not isinstance(returned, Mapping):
+            raise ValueError("artifact line range is invalid")
+        start_line = _positive_integer(returned.get("start_line"), "artifact start")
+        end_line = _nonnegative_integer(returned.get("end_line"), "artifact end")
+        if end_line and end_line < start_line:
+            raise ValueError("artifact line range is invalid")
+        return {
+            "result_sha256": result_sha,
+            "artifact_id": artifact_id,
+            "sha256": _require_hash(metadata.get("sha256"), "artifact"),
+            "returned": {"start_line": start_line, "end_line": end_line},
+            "fragment_sha256": _require_hash(metadata.get("fragment_sha256"), "fragment"),
+            "content_bytes": _nonnegative_integer(
+                metadata.get("content_bytes"), "content bytes"
+            ),
+        }
+    if tool == "gptpro_analysis_status":
+        events = []
+        raw_events = metadata.get("events", [])
+        if not isinstance(raw_events, list) or len(raw_events) > 50:
+            raise ValueError("analysis status metadata is invalid")
+        for item in raw_events:
+            if not isinstance(item, Mapping):
+                raise ValueError("analysis event metadata is invalid")
+            events.append(
+                {
+                    "sequence": _positive_integer(item.get("sequence"), "analysis sequence"),
+                    "event_id_sha256": _require_hash(
+                        item.get("event_id_sha256"), "analysis event id"
+                    ),
+                    "event_sha256": _require_hash(item.get("event_sha256"), "analysis event"),
+                }
+            )
+        return {
+            "result_sha256": result_sha,
+            "head_sha256": _require_hash(metadata.get("head_sha256"), "analysis head"),
+            "events": events,
+            "result_bytes": _nonnegative_integer(metadata.get("result_bytes"), "result bytes"),
+        }
+    query_hashes_raw = metadata.get("query_sha256s")
+    if query_hashes_raw is not None:
+        if not isinstance(query_hashes_raw, list) or not 1 <= len(query_hashes_raw) <= 8:
+            raise ValueError("search query hash metadata is invalid")
+        query_hashes = [_require_hash(value, "query") for value in query_hashes_raw]
+        query_metadata: dict[str, Any] = {"query_sha256s": query_hashes}
+    else:
+        query_metadata = {"query_sha256": _require_hash(metadata.get("query_sha256"), "query")}
     matches = []
     raw_matches = metadata.get("matches", [])
     if not isinstance(raw_matches, list) or len(raw_matches) > 100:
@@ -866,12 +1043,23 @@ def _sanitize_metadata(tool: str, metadata: Mapping[str, Any]) -> dict[str, Any]
         cleaned["file_sha256"] = _require_hash(item.get("file_sha256"), "file")
         cleaned["excerpt_sha256"] = _require_hash(item.get("excerpt_sha256"), "excerpt")
         matches.append(cleaned)
-    result_bytes = metadata.get("result_bytes")
-    if isinstance(result_bytes, bool) or not isinstance(result_bytes, int) or result_bytes < 0:
-        raise ValueError("search result byte metadata is invalid")
+    result_bytes = _nonnegative_integer(metadata.get("result_bytes"), "search result bytes")
     return {
         "result_sha256": result_sha,
-        "query_sha256": query_hash,
+        **query_metadata,
         "matches": matches,
         "result_bytes": result_bytes,
     }
+
+
+def _nonnegative_integer(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{label} is invalid")
+    return value
+
+
+def _positive_integer(value: Any, label: str) -> int:
+    result = _nonnegative_integer(value, label)
+    if result < 1:
+        raise ValueError(f"{label} is invalid")
+    return result

@@ -60,6 +60,12 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertIn("Web MCP", combined_prompts)
         self.assertIn("validate", combined_prompts.lower())
         self.assertIn("$gptpro", ui_metadata)
+        long_description = manifest["interface"]["longDescription"].lower()
+        self.assertIn("schema 4", long_description)
+        self.assertIn("seven", long_description)
+        self.assertIn("read-only", long_description)
+        self.assertIn("context notes", long_description)
+        self.assertIn("visible chat", long_description)
 
     def test_plugin_skill_mirrors_standalone_package(self) -> None:
         self.assertEqual(tree_files(STANDALONE_SKILL), tree_files(PLUGIN_SKILL))

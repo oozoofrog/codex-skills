@@ -24,6 +24,7 @@ REQUIRED_FILES = (
     "references/github-transport.md",
     "references/human-takeover.md",
     "references/manifest-schema.md",
+    "references/mcp-research.md",
     "references/request-correlation.md",
     "references/security.md",
     "references/user-manual.md",
@@ -31,6 +32,7 @@ REQUIRED_FILES = (
     "references/workflow.md",
     "runtime/__init__.py",
     "runtime/gptpro_mcp/__init__.py",
+    "runtime/gptpro_mcp/analysis.py",
     "runtime/gptpro_mcp/archive.py",
     "runtime/gptpro_mcp/audit.py",
     "runtime/gptpro_mcp/authorization.py",
@@ -46,6 +48,7 @@ REQUIRED_FILES = (
     "runtime/gptpro_mcp/request_correlation.py",
     "runtime/gptpro_mcp/runtime_state.py",
     "runtime/gptpro_mcp/schema.py",
+    "runtime/gptpro_mcp/sensitive.py",
     "runtime/gptpro_mcp/server.py",
     "runtime/gptpro_mcp/supervisor.py",
     "runtime/gptpro_mcp/tools.py",
@@ -59,6 +62,7 @@ REQUIRED_FILES = (
     "tests/test_gptpro.py",
     "tests/test_mcp_lifecycle.py",
     "tests/test_mcp_live.py",
+    "tests/test_mcp_research.py",
     "tests/test_mcp_package_lock.py",
     "tests/test_mcp_package_tx.py",
     "tests/test_mcp_controller.py",
@@ -88,7 +92,7 @@ EXPECTED_BASE_PLACEHOLDERS = {
     "TREE_SHA",
 }
 IGNORED_NAMES = {"__pycache__", ".DS_Store"}
-EXPECTED_MCP_SCHEMA_SHA256 = "f8a33d728e32df946d72106a3db3369dcf051ebc110312d054a3d380b784c723"
+EXPECTED_MCP_SCHEMA_SHA256 = "2e35562d02bfbb71d08bef11cd0273fe067de1b87b96c484a3e5148acae5f723"
 
 
 class ValidationError(Exception):
@@ -262,11 +266,19 @@ def validate_mcp_foundation(skill_root: Path, errors: list[str]) -> None:
         "SERVER_NAME",
         "SERVER_VERSION",
         "SERVER_INSTRUCTIONS",
+        "RESEARCH_PROTOCOL_PROFILE",
+        "RESEARCH_SERVER_NAME",
+        "RESEARCH_SERVER_VERSION",
+        "RESEARCH_SERVER_INSTRUCTIONS",
         "DEFAULT_LIMITS",
         "HARD_LIMITS",
+        "RESEARCH_DEFAULT_LIMITS",
+        "RESEARCH_HARD_LIMITS",
         "COMMON_ANNOTATIONS",
         "TOOL_CATALOG",
         "TOOL_NAMES",
+        "RESEARCH_TOOL_CATALOG",
+        "RESEARCH_TOOL_NAMES",
     }
     allowed_functions = {
         "_string_property",
@@ -274,7 +286,12 @@ def validate_mcp_foundation(skill_root: Path, errors: list[str]) -> None:
         "canonical_json_bytes",
         "tool_schema_payload",
         "tool_schema_sha256",
+        "research_tool_schema_payload",
+        "research_tool_schema_sha256",
+        "contract_for_schema",
         "validate_limits",
+        "validate_research_limits",
+        "validate_limits_for_schema",
     }
     assignments: dict[str, ast.expr] = {}
     top_level_errors: list[str] = []
@@ -327,17 +344,31 @@ def validate_mcp_foundation(skill_root: Path, errors: list[str]) -> None:
         return
 
     for name, value in assignments.items():
-        if name in {"TOOL_CATALOG", "TOOL_NAMES"}:
+        if name in {
+            "TOOL_CATALOG",
+            "TOOL_NAMES",
+            "RESEARCH_TOOL_CATALOG",
+            "RESEARCH_TOOL_NAMES",
+        }:
             continue
         if any(isinstance(node, ast.Call) for node in ast.walk(value)):
             errors.append(f"Web MCP schema fixture assignment {name!r} contains a call")
             return
 
     try:
-        expected_names = (
+        expected_legacy_names = (
             "gptpro_package_info",
             "gptpro_repo_read",
             "gptpro_repo_search",
+        )
+        expected_research_names = (
+            "gptpro_analysis_status",
+            "gptpro_artifact_read",
+            "gptpro_package_info",
+            "gptpro_repo_diff",
+            "gptpro_repo_read",
+            "gptpro_repo_search",
+            "gptpro_workspace_map",
         )
         expected_annotations = {
             "readOnlyHint": True,
@@ -349,61 +380,112 @@ def validate_mcp_foundation(skill_root: Path, errors: list[str]) -> None:
         if annotations != expected_annotations:
             errors.append("Web MCP common tool annotations are unsafe")
 
-        catalog = assignments["TOOL_CATALOG"]
-        if not isinstance(catalog, (ast.Tuple, ast.List)):
-            raise ValidationError("TOOL_CATALOG must be a static tuple or list")
-        found_names: list[str] = []
-        for entry in catalog.elts:
-            if not isinstance(entry, ast.Dict):
-                raise ValidationError("TOOL_CATALOG entries must be static dictionaries")
-            fields: dict[str, ast.expr] = {}
-            for key, value in zip(entry.keys, entry.values, strict=True):
-                if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
-                    raise ValidationError("TOOL_CATALOG keys must be string literals")
-                fields[key.value] = value
-            name_node = fields.get("name")
-            if not isinstance(name_node, ast.Constant) or not isinstance(name_node.value, str):
-                raise ValidationError("Each Web MCP tool must have one static name")
-            found_names.append(name_node.value)
-            annotation_node = fields.get("annotations")
-            if not isinstance(annotation_node, ast.Name) or annotation_node.id != "COMMON_ANNOTATIONS":
-                raise ValidationError(f"Web MCP tool {name_node.value!r} has unsafe annotations")
-            for call in (node for node in ast.walk(entry) if isinstance(node, ast.Call)):
-                function_name = call.func.id if isinstance(call.func, ast.Name) else None
-                safe_string_property = (
-                    function_name == "_string_property"
-                    and not call.args
-                    and len(call.keywords) == 1
-                    and call.keywords[0].arg == "maximum"
-                    and isinstance(call.keywords[0].value, ast.Constant)
-                    and not isinstance(call.keywords[0].value.value, bool)
-                    and isinstance(call.keywords[0].value.value, int)
+        def validate_catalog(
+            assignment_name: str,
+            *,
+            expected_names: tuple[str, ...],
+            allow_legacy_spread: bool,
+        ) -> None:
+            catalog = assignments[assignment_name]
+            if not isinstance(catalog, (ast.Tuple, ast.List)):
+                raise ValidationError(f"{assignment_name} must be a static tuple or list")
+            found_names: list[str] = []
+            for index, entry in enumerate(catalog.elts):
+                if not isinstance(entry, ast.Dict):
+                    raise ValidationError(f"{assignment_name} entries must be static dictionaries")
+                fields: dict[str, ast.expr] = {}
+                spread_values: list[ast.expr] = []
+                for key, value in zip(entry.keys, entry.values, strict=True):
+                    if key is None:
+                        spread_values.append(value)
+                        continue
+                    if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                        raise ValidationError(f"{assignment_name} keys must be string literals")
+                    fields[key.value] = value
+
+                inherited_legacy_info = False
+                if spread_values:
+                    expected_spread = ast.parse("TOOL_CATALOG[0]", mode="eval").body
+                    inherited_legacy_info = (
+                        allow_legacy_spread
+                        and index == 0
+                        and len(spread_values) == 1
+                        and ast.dump(spread_values[0], include_attributes=False)
+                        == ast.dump(expected_spread, include_attributes=False)
+                    )
+                    if not inherited_legacy_info:
+                        raise ValidationError(f"{assignment_name} contains an unsafe dictionary spread")
+
+                if inherited_legacy_info:
+                    tool_name = "gptpro_package_info"
+                    if set(fields) != {"description"}:
+                        raise ValidationError("Research package-info override may change only description")
+                else:
+                    name_node = fields.get("name")
+                    if not isinstance(name_node, ast.Constant) or not isinstance(name_node.value, str):
+                        raise ValidationError("Each Web MCP tool must have one static name")
+                    tool_name = name_node.value
+                    annotation_node = fields.get("annotations")
+                    if not (
+                        isinstance(annotation_node, ast.Name)
+                        and annotation_node.id == "COMMON_ANNOTATIONS"
+                    ):
+                        raise ValidationError(f"Web MCP tool {tool_name!r} has unsafe annotations")
+                found_names.append(tool_name)
+
+                for call in (node for node in ast.walk(entry) if isinstance(node, ast.Call)):
+                    function_name = call.func.id if isinstance(call.func, ast.Name) else None
+                    safe_string_property = (
+                        function_name == "_string_property"
+                        and not call.args
+                        and len(call.keywords) == 1
+                        and call.keywords[0].arg == "maximum"
+                        and isinstance(call.keywords[0].value, ast.Constant)
+                        and not isinstance(call.keywords[0].value.value, bool)
+                        and isinstance(call.keywords[0].value.value, int)
+                    )
+                    safe_output_schema = (
+                        function_name == "_output_schema"
+                        and len(call.args) == 2
+                        and not call.keywords
+                        and isinstance(call.args[0], ast.Constant)
+                        and call.args[0].value == tool_name
+                        and isinstance(call.args[1], ast.Dict)
+                        and not any(isinstance(node, ast.Call) for node in ast.walk(call.args[1]))
+                    )
+                    if not safe_string_property and not safe_output_schema:
+                        raise ValidationError(f"{assignment_name} contains an unsafe call expression")
+            found_names_tuple = tuple(sorted(found_names))
+            if found_names_tuple != expected_names:
+                raise ValidationError(
+                    f"{assignment_name} names differ from the approved catalog; "
+                    f"found={found_names_tuple!r}"
                 )
-                safe_output_schema = (
-                    function_name == "_output_schema"
-                    and len(call.args) == 2
-                    and not call.keywords
-                    and isinstance(call.args[0], ast.Constant)
-                    and call.args[0].value == name_node.value
-                    and isinstance(call.args[1], ast.Dict)
-                    and not any(isinstance(node, ast.Call) for node in ast.walk(call.args[1]))
-                )
-                if not safe_string_property and not safe_output_schema:
-                    raise ValidationError("TOOL_CATALOG contains an unsafe call expression")
-        found_names_tuple = tuple(sorted(found_names))
-        if found_names_tuple != expected_names:
-            errors.append(
-                "Web MCP phase-1 tool names must be the exact read-only catalog; "
-                f"found={found_names_tuple!r}"
-            )
-        expected_tool_names_expression = ast.parse(
-            'tuple(sorted(tool["name"] for tool in TOOL_CATALOG))', mode="eval"
-        ).body
-        if ast.dump(assignments["TOOL_NAMES"], include_attributes=False) != ast.dump(
-            expected_tool_names_expression,
-            include_attributes=False,
+
+        validate_catalog(
+            "TOOL_CATALOG",
+            expected_names=expected_legacy_names,
+            allow_legacy_spread=False,
+        )
+        validate_catalog(
+            "RESEARCH_TOOL_CATALOG",
+            expected_names=expected_research_names,
+            allow_legacy_spread=True,
+        )
+        for names_assignment, catalog_assignment in (
+            ("TOOL_NAMES", "TOOL_CATALOG"),
+            ("RESEARCH_TOOL_NAMES", "RESEARCH_TOOL_CATALOG"),
         ):
-            errors.append("Web MCP TOOL_NAMES must derive only from the static catalog")
+            expected_expression = ast.parse(
+                f'tuple(sorted(tool["name"] for tool in {catalog_assignment}))', mode="eval"
+            ).body
+            if ast.dump(assignments[names_assignment], include_attributes=False) != ast.dump(
+                expected_expression,
+                include_attributes=False,
+            ):
+                errors.append(
+                    f"Web MCP {names_assignment} must derive only from {catalog_assignment}"
+                )
     except (TypeError, ValueError, ValidationError) as exc:
         errors.append(f"Web MCP schema fixture validation failed: {exc}")
 
@@ -457,6 +539,56 @@ def validate_canonical_runtime_slot(skill_root: Path, errors: list[str]) -> None
         )
 
 
+def validate_research_documentation(skill_root: Path, errors: list[str]) -> None:
+    """Keep operator instructions aligned with the static read-only schema-4 contract."""
+
+    documentation = [
+        skill_root / "SKILL.md",
+        skill_root / "README.md",
+        skill_root / "agents/openai.yaml",
+        *sorted((skill_root / "references").glob("*.md")),
+    ]
+    forbidden = {
+        "gptpro_analysis_post": "removed schema-4 MCP write tool",
+        "analysis-reply-": "removed analysis reply CLI",
+        "append-only-advisory-v1": "removed advisory-ledger contract",
+        "eight-tool": "obsolete schema-4 tool count",
+        "8개 도구": "obsolete schema-4 tool count",
+    }
+    for path in documentation:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            errors.append(f"Unable to inspect research documentation in {path.name}: {exc}")
+            continue
+        for token, label in forbidden.items():
+            if token in text:
+                errors.append(
+                    f"Research documentation retains {label} in "
+                    f"{path.relative_to(skill_root).as_posix()}"
+                )
+    reference = skill_root / "references/mcp-research.md"
+    try:
+        reference_text = reference.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return
+    required = {
+        "gptpro_package_info",
+        "gptpro_workspace_map",
+        "gptpro_repo_read",
+        "gptpro_repo_search",
+        "gptpro_repo_diff",
+        "gptpro_artifact_read",
+        "gptpro_analysis_status",
+        "--confirm-publication",
+        "visible Chat",
+        "readOnlyHint",
+    }
+    missing = sorted(token for token in required if token not in reference_text)
+    if missing:
+        errors.append(f"Research documentation is missing required contract terms: {missing}")
+
+
 def package_files(skill_root: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     for path in sorted(skill_root.rglob("*")):
@@ -507,6 +639,7 @@ def validate(skill_root: Path, mirror: Path | None) -> dict[str, object]:
             validate_mcp_foundation(root, errors)
             validate_mcp_runtime_dependencies(root, errors)
             validate_canonical_runtime_slot(root, errors)
+            validate_research_documentation(root, errors)
     if mirror is not None and root.is_dir():
         validate_mirror(root, mirror.expanduser().resolve(), errors)
     return {
@@ -519,9 +652,10 @@ def validate(skill_root: Path, mirror: Path | None) -> dict[str, object]:
             "local-links",
             "prompt-placeholders",
             "python-syntax-and-mode",
-            "web-mcp-read-only-schema",
+            "web-mcp-bounded-schema",
             "web-mcp-stdlib-runtime",
             "web-mcp-canonical-runtime-slot",
+            "web-mcp-research-documentation",
             *(("standalone-plugin-mirror",) if mirror else ()),
         ],
         "errors": errors,

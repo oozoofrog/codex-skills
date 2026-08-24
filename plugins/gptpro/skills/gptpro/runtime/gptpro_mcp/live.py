@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .analysis import AnalysisLedger
 from .audit import AuditLog
 from .authorization import AuthorizationGrant
 from .clock import parse_utc
@@ -34,6 +35,7 @@ _CAPABILITY_BYTES = 32
 PackageLoader = Callable[[Path], dict[str, Any]]
 BindingValidator = Callable[[dict[str, Any], dict[str, Any], str], None]
 AuditFactory = Callable[[dict[str, Any], str], AuditLog]
+AnalysisFactory = Callable[[dict[str, Any], str], AnalysisLedger]
 Now = Callable[[], datetime]
 Monotonic = Callable[[], float]
 ControllerLiveness = Callable[[RuntimeStateStore, str], bool]
@@ -74,6 +76,7 @@ def new_session_capability() -> tuple[bytes, str, str]:
 class _ResolvedContext:
     grant: AuthorizationGrant
     audit: AuditLog
+    analysis: AnalysisLedger | None
 
 
 class ActiveRuntimeContext:
@@ -87,6 +90,7 @@ class ActiveRuntimeContext:
         package_loader: PackageLoader,
         binding_validator: BindingValidator,
         audit_factory: AuditFactory,
+        analysis_factory: AnalysisFactory | None = None,
         now: Now | None = None,
         monotonic: Monotonic | None = None,
         controller_liveness: ControllerLiveness | None = None,
@@ -99,12 +103,24 @@ class ActiveRuntimeContext:
         self._package_loader = package_loader
         self._binding_validator = binding_validator
         self._audit_factory = audit_factory
+        self._analysis_factory = analysis_factory
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic or time.monotonic
         self._controller_liveness = controller_liveness or controller_lease_is_live
 
     def resolve(self, package_id: str) -> AuthorizationGrant:
         return self._resolve_context(package_id).grant
+
+    def resolve_analysis_ledger(self, grant: AuthorizationGrant) -> AnalysisLedger:
+        current = self._resolve_context(grant.package_id)
+        if self._grant_identity(current.grant) != self._grant_identity(grant):
+            raise ToolError("CONTENT_DRIFT", "The active analysis authorization changed.")
+        if current.analysis is None:
+            raise ToolError(
+                "ANALYSIS_LEDGER_UNAVAILABLE",
+                "The active package has no approved analysis ledger.",
+            )
+        return current.analysis
 
     def commit_before_return(
         self,
@@ -207,6 +223,23 @@ class ActiveRuntimeContext:
                         "The disclosure audit does not match the active authorization.",
                         recovery="Revoke this session and inspect its audit evidence.",
                     )
+                analysis: AnalysisLedger | None = None
+                if int(verified.get("schema_version", 0)) == 4:
+                    if self._analysis_factory is None:
+                        raise ToolError(
+                            "ANALYSIS_LEDGER_UNAVAILABLE",
+                            "The schema-4 analysis provider is unavailable.",
+                        )
+                    analysis = self._analysis_factory(verified, self._session_id_sha256)
+                    analysis_summary = analysis.verify()
+                    if (
+                        analysis_summary.closed
+                        or analysis_summary.header_sha256 != state.get("analysis_header_sha256")
+                    ):
+                        raise ToolError(
+                            "ANALYSIS_LEDGER_INVALID",
+                            "The analysis ledger does not match the active authorization.",
+                        )
                 monotonic_now = self._monotonic_now()
                 activated_monotonic = self._state_monotonic(state, "activated_monotonic")
                 expires_monotonic = self._state_monotonic(state, "expires_monotonic")
@@ -271,7 +304,8 @@ class ActiveRuntimeContext:
                     idle_expires_at=idle_expires_at,
                 )
                 grant.validate(package_id, now=effective_now)
-                return _ResolvedContext(grant=grant, audit=audit)
+                current = _ResolvedContext(grant=grant, audit=audit, analysis=analysis)
+                return current
         except ToolError:
             raise
         except RuntimeStateError as exc:

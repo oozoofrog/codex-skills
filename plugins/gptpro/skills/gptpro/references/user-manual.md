@@ -85,8 +85,9 @@ Skill이 발견되지 않으면 먼저 새 작업을 열었는지 확인합니�
 | 공개 범위를 특정 Git commit으로 고정 | `github` | 연결된 GitHub 저장소의 검증된 commit과 선택 경로만 요청합니다. |
 | GitHub App에 저장소 접근을 주고 싶지 않음 | `paste` 또는 `text-file` | 승인된 텍스트만 붙여넣거나 Markdown 파일 하나로 전달합니다. |
 | Pro가 승인된 로컬 스냅샷을 필요한 만큼 읽게 함 | `mcp-read` | 실험적 고급 경로입니다. 별도 Tunnel, Developer Mode, 이중 승인이 필요합니다. |
+| Pro가 저장소 구조·여러 범위·검색·diff·테스트 증거를 오가며 분석하게 함 | `mcp-research` | 실험적 읽기 전용 협업 경로입니다. Pro 결과는 Chat으로 받고, Codex context note만 별도 승인 후 ledger에 게시할 수 있습니다. |
 
-잘 모르겠다면 `auto`를 사용하세요. `mcp-read`는 자동으로 선택되지 않으며, 사용자가 명시적으로 요청해야 합니다.
+잘 모르겠다면 `auto`를 사용하세요. `mcp-read`와 `mcp-research`는 자동으로 선택되지 않으며, 사용자가 명시적으로 요청해야 합니다.
 
 ## 처음 상담하는 전체 흐름
 
@@ -123,7 +124,7 @@ Codex가 정확한 대상과 변경 내용을 보여준 뒤 사용자가 승인�
 - 승인, 전송, 응답 가져오기, 평가 상태
 - 로컬 감사용 ZIP
 
-ZIP은 기본 업로드 파일이 아닙니다. `github`, `paste`, `text-file`, `mcp-read` 모두 ZIP을 로컬 무결성·감사 자료로 사용합니다.
+ZIP은 기본 업로드 파일이 아닙니다. `github`, `paste`, `text-file`, `mcp-read`, `mcp-research` 모두 ZIP을 로컬 무결성·감사 자료로 사용합니다.
 
 ### 4. 공개 범위를 검토합니다
 
@@ -136,7 +137,8 @@ Codex가 최소한 다음 내용을 보여줘야 합니다.
 - 포함 파일 수와 총 바이트 수
 - 외부로 나갈 정확한 경로와 해시
 - 제외·보안 경고
-- `mcp-read`라면 최대 공개 가능 파일/해시, 도구 제한, 만료 시간, 앱·워크스페이스
+- Web MCP라면 최대 공개 가능 파일/해시, 정확한 도구 목록, 호출·바이트 제한, 만료 시간, 앱·워크스페이스
+- `mcp-research`라면 추가 evidence/diff 해시, 읽기 전용 context-note ledger 정책, Codex note의 별도 승인 정책
 
 모르는 경로나 예상보다 넓은 범위가 있으면 승인하지 말고 범위를 줄여 새 패키지를 만들도록 요청하세요.
 
@@ -219,6 +221,12 @@ ZIP 자체를 업로드하지 않습니다. ChatGPT가 Secure MCP Tunnel을 통�
 
 이 경로는 설정과 운영 책임이 더 크므로 아래 전용 절을 먼저 읽으세요.
 
+### `mcp-research`: 읽기 범위를 넓힌 분석 협업
+
+ZIP은 여전히 업로드하지 않습니다. Pro는 승인된 snapshot의 workspace map, 여러 줄 범위, 여러 검색어, manifest에 고정된 준비 시점 Git SHA와 snapshot 사이의 diff, 명시적으로 포함한 테스트·빌드·진단 텍스트를 읽을 수 있습니다. 일곱 MCP 도구는 모두 읽기 전용이며, Pro의 finding·hypothesis·question은 보이는 Chat 응답으로 돌아옵니다.
+
+Codex가 추가 context를 ledger에 게시하려면 note 원문, bytes, SHA-256, note ID와 현재 head를 새로 보여주고 별도 승인을 받아야 합니다. 처음 package 승인은 이후의 모든 Codex note를 미리 승인하지 않습니다. 게시 결과는 로컬 ledger 상태이며, Pro 전송·열람 증거와 구분합니다.
+
 ## 승인은 무엇을 의미하나요?
 
 ### 일반 전송 승인
@@ -241,6 +249,16 @@ ZIP 자체를 업로드하지 않습니다. ChatGPT가 Secure MCP Tunnel을 통�
 
 Tunnel을 활성화하는 것과 prompt를 보내는 것은 별도 단계입니다. 활성화 성공만으로 전송 승인이 되지 않습니다.
 
+### `mcp-research` 삼중 승인과 context note별 승인
+
+`mcp-research` package는 다음 세 항목을 함께 확인합니다.
+
+1. 정확한 prompt 전송
+2. 최대 파일·evidence·diff 공개 범위와 7개 읽기 전용 도구·예산·만료 시간
+3. Pro의 결과는 visible Chat으로 받고, ledger에는 별도 승인된 Codex context note만 게시한다는 정책
+
+그 뒤 Codex가 ledger에 게시하는 각 context note는 다시 exact-byte 승인을 받습니다. package 승인이나 “계속 진행”이라는 일반 지시는 새 note 게시 승인으로 재사용하지 않습니다. Ledger 게시 자체는 네트워크 전송이나 Pro의 실제 열람을 뜻하지 않습니다.
+
 ### 안전한 승인 문장 예시
 
 ```text
@@ -251,6 +269,12 @@ Tunnel을 활성화하는 것과 prompt를 보내는 것은 별도 단계입니�
 
 ```text
 새 패키지 <package-id>의 prompt 전송과 표시된 MCP 최대 공개 범위를 승인합니다.
+```
+
+`mcp-research`라면 다음처럼 ledger 정책까지 명시합니다.
+
+```text
+새 패키지 <package-id>의 prompt 전송, 표시된 MCP 최대 공개 범위, 읽기 전용 context-note ledger 정책을 승인합니다.
 ```
 
 패키지 ID와 공개 범위가 표시되지 않은 상태에서 포괄적으로 “모두 승인”하는 방식은 피하는 편이 안전합니다.
@@ -295,6 +319,7 @@ ChatGPT → Settings → Security and login → Developer mode
 
 공식 문서:
 
+- [Developer mode and MCP connectors in ChatGPT](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt)
 - [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
 - [Connect and test your plugin](https://developers.openai.com/plugins/deploy/connect-chatgpt)
 
@@ -305,6 +330,19 @@ ChatGPT는 승인된 immutable ZIP snapshot에 대해 정확히 세 도구만 �
 - `gptpro_package_info`: 승인된 패키지, 경로와 제한 확인
 - `gptpro_repo_search`: 승인된 UTF-8 파일 안에서 제한된 literal 검색
 - `gptpro_repo_read`: 승인된 파일의 제한된 줄 범위 읽기
+
+이 세 도구는 `mcp-read` 계약입니다. `mcp-research`를 명시적으로 선택하면 다음 기능이 추가된 정확히 7개 읽기 전용 도구 계약으로 바뀝니다.
+
+- 준비 시점 workspace map 탐색
+- 한 파일의 여러 줄 범위 읽기
+- 여러 literal 검색어와 안전한 include/exclude 필터
+- manifest에 고정된 준비 시점 Git SHA와 snapshot 사이의 diff 읽기
+- 명시적으로 포함한 테스트·빌드·진단 artifact 읽기
+- 별도 승인된 Codex context note ledger 조회
+
+Pro의 분석·질문·제안은 MCP write가 아니라 보이는 Chat 응답으로 돌아옵니다. Codex가 추가 context를 제공해야 하면 exact-byte 승인 후 로컬 ledger에 note를 게시하고, Pro가 `gptpro_analysis_status`로 읽도록 요청합니다. 이 도구의 audit는 bytes 반환만 증명하며 모델 소비는 증명하지 않습니다.
+
+두 계약은 한 세션에서 섞이지 않으며, 다른 계약으로 바꾸려면 새 package와 새 승인이 필요합니다.
 
 다음 기능은 제공하지 않습니다.
 
@@ -318,15 +356,16 @@ ChatGPT는 승인된 immutable ZIP snapshot에 대해 정확히 세 도구만 �
 
 1. 사용자가 OpenAI에서 사용할 Tunnel과 runtime key를 준비합니다.
 2. ChatGPT에서 Developer Mode를 켜고 Tunnel 방식의 MCP 연결을 만듭니다.
-3. Codex가 `mcp-read` 패키지를 최소 파일 범위로 준비합니다.
-4. 사용자가 prompt와 최대 MCP 공개 범위를 함께 승인합니다.
+3. Codex가 `mcp-read` 또는 `mcp-research` 패키지를 최소 파일 범위로 준비합니다.
+4. 사용자가 prompt와 최대 MCP 공개 범위를 함께 승인합니다. Research라면 evidence/diff와 읽기 전용 context-note 정책도 확인합니다.
 5. Codex가 secretless probe와 profile 검사를 실행합니다.
 6. 사용자가 표시된 앱·workspace가 맞는지 확인합니다.
 7. Codex가 `mcp-activate`를 foreground에서 실행하고 control-plane 연결을 확인합니다.
 8. ChatGPT의 새 일반 Chat에서 해당 MCP 연결을 도구 메뉴에 추가합니다.
 9. 승인된 prompt를 한 번 보냅니다.
-10. 답변이 끝나면 Codex가 먼저 공개 권한을 deny/revoke하고 정확한 Tunnel child를 종료합니다.
-11. 답변을 가져와 독립 검증하고 평가를 기록합니다.
+10. Research 중 추가 context가 필요하면 Codex note는 exact-byte 별도 승인 후에만 ledger에 게시합니다.
+11. 답변이 끝나면 Codex가 먼저 공개 권한을 deny/revoke하고 정확한 Tunnel child를 종료합니다.
+12. 답변을 가져와 독립 검증하고 평가를 기록합니다.
 
 활성화 terminal은 상담이 끝날 때까지 닫지 마세요. 다른 terminal이나 Codex controller에서 상태 확인과 종료를 수행합니다.
 
@@ -350,7 +389,7 @@ ChatGPT는 승인된 immutable ZIP snapshot에 대해 정확히 세 도구만 �
 
 `faulted`는 안전하게 접근을 막은 상태일 수 있지만 정상 revoke 성공과 같지 않습니다. control socket 응답만으로 child가 종료됐다고 판단하지도 않습니다.
 
-더 상세한 계약과 고급 명령은 [Web MCP repository consultation](web-mcp.md)과 [Workflow reference](workflow.md)를 따르세요. 이 매뉴얼의 요약을 근거로 승인 gate를 생략하거나 명령을 축약하면 안 됩니다.
+더 상세한 계약과 고급 명령은 [Web MCP repository consultation](web-mcp.md), [repository research](mcp-research.md), [Workflow reference](workflow.md)를 따르세요. 이 매뉴얼의 요약을 근거로 승인 gate를 생략하거나 명령을 축약하면 안 됩니다.
 
 ## 응답을 받은 뒤
 
@@ -406,7 +445,7 @@ Pro의 답변은 테스트 성공, 실제 기기 검증, release 승인 또는 �
 
 - 기본 설정에서는 `.git/info/exclude`로 현재 clone에서만 Git 추적을 피합니다.
 - `.gptpro/`를 commit하지 마세요. 사용자가 특정 receipt 보존을 명시적으로 요청한 경우만 별도 검토합니다.
-- 활성 `mcp-read` 세션이 있는 동안 package 폴더를 이동, 수정, 삭제하지 마세요.
+- 활성 Web MCP 세션이 있는 동안 package 폴더를 이동, 수정, 삭제하지 마세요.
 - 완료된 package를 삭제하면 manifest, hash, receipt, 응답, 평가와 감사 근거를 잃습니다.
 - 정리가 필요하면 먼저 `status` 또는 `mcp-status`로 완료·종료 상태를 확인하고, 지울 정확한 package ID를 Codex에 검토하게 하세요.
 - repository 전체나 `.gptpro` 전체를 포괄적으로 삭제하는 명령보다, 검증된 완료 package 하나씩 정리하는 방식이 안전합니다.
@@ -442,7 +481,7 @@ Developer Mode는 ChatGPT 설정 기능이며 브라우저 설정이 아닙니�
 1. 올바른 ChatGPT account와 workspace인가
 2. Developer Mode가 켜져 있는가
 3. Plugins 화면에서 올바른 Tunnel 연결을 만들었는가
-4. 연결에 세 read-only 도구가 표시되는가
+4. 연결에 선택한 계약의 정확한 도구가 표시되는가 (`mcp-read` 3개, `mcp-research` 7개)
 5. 새 일반 Chat의 도구 메뉴에 그 연결을 추가했는가
 6. foreground `mcp-activate`가 아직 실행 중이고 control-plane poll이 성공했는가
 
@@ -467,7 +506,8 @@ Developer Mode는 ChatGPT 설정 기능이며 브라우저 설정이 아닙니�
 - [ ] Git SHA와 dirty 상태가 기대와 같은가
 - [ ] 전송 방식과 외부로 나갈 path/hash를 확인했는가
 - [ ] 승인 문장에 정확한 package ID가 있는가
-- [ ] `mcp-read`라면 최대 파일/바이트/호출/시간 범위를 확인했는가
+- [ ] Web MCP라면 최대 파일/바이트/호출/시간 범위와 정확한 도구 목록을 확인했는가
+- [ ] `mcp-research`라면 evidence/diff와 읽기 전용 context-note ledger 정책을 확인했는가
 
 상담 중:
 
@@ -475,11 +515,12 @@ Developer Mode는 ChatGPT 설정 기능이며 브라우저 설정이 아닙니�
 - [ ] 원하는 Pro 모델과 설정이 보이는가
 - [ ] prompt를 한 번만 보냈는가
 - [ ] 로그인 정보, MFA, key, cookie를 Codex나 prompt에 복사하지 않았는가
-- [ ] `mcp-read` foreground controller가 계속 실행 중인가
+- [ ] Web MCP foreground controller가 계속 실행 중인가
+- [ ] Research의 Codex context note마다 exact-byte 승인을 따로 받았는가
 
 상담 후:
 
-- [ ] `mcp-read` 권한을 deny/revoke하고 exact child 종료를 확인했는가
+- [ ] Web MCP 권한을 deny/revoke하고 exact child 종료를 확인했는가
 - [ ] package marker가 있는 정확한 응답을 가져왔는가
 - [ ] Codex가 코드와 테스트로 독립 검증했는가
 - [ ] 수용·부분 수용·기각 평가와 실제 증거를 기록했는가
@@ -520,4 +561,4 @@ python3 <skill-dir>/scripts/gptpro.py import-response \
   --response-file /path/to/chatgpt-response.md
 ```
 
-`mcp-read`의 profile, activation, stop, recovery 명령은 수명주기와 승인 경계를 축약하면 안 되므로 [Workflow reference](workflow.md)의 authoritative sequence를 그대로 사용하세요.
+Web MCP의 profile, activation, stop, recovery 명령과 `mcp-research` context-note 명령은 수명주기와 승인 경계를 축약하면 안 되므로 [Workflow reference](workflow.md)와 [repository research](mcp-research.md)의 authoritative sequence를 그대로 사용하세요.

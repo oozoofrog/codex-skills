@@ -12,7 +12,7 @@ from typing import Any
 
 from .authorization import AuthorizationGrant
 from .errors import ToolError
-from .schema import canonical_json_bytes, tool_schema_sha256
+from .schema import canonical_json_bytes, contract_for_schema
 
 CURSOR_VERSION = 1
 MAX_CURSOR_BYTES = 4096
@@ -47,6 +47,10 @@ class CursorCodec:
         arguments_hash: str,
         next_position: dict[str, Any],
     ) -> str:
+        schema_version = self._grant.manifest.get("schema_version")
+        if schema_version not in {3, 4}:
+            raise ToolError("CURSOR_INVALID", "The pagination cursor schema is unsupported.")
+        schema_hash = contract_for_schema(int(schema_version))["tool_schema_sha256"]
         payload = {
             "v": CURSOR_VERSION,
             "session_id_sha256": self._grant.session_id_sha256,
@@ -54,7 +58,7 @@ class CursorCodec:
             "tool": tool,
             "arguments_sha256": arguments_hash,
             "next_position": next_position,
-            "tool_schema_sha256": tool_schema_sha256(),
+            "tool_schema_sha256": schema_hash,
             "expires_at": _utc_text(self._grant.expires_at),
         }
         body = canonical_json_bytes(payload)
@@ -95,13 +99,17 @@ class CursorCodec:
             current = now or datetime.now(timezone.utc)
             if expiry > self._grant.expires_at or current >= expiry:
                 raise ValueError
+            schema_version = self._grant.manifest.get("schema_version")
+            if schema_version not in {3, 4}:
+                raise ValueError
+            schema_hash = contract_for_schema(int(schema_version))["tool_schema_sha256"]
             if (
                 payload.get("v") != CURSOR_VERSION
                 or payload.get("session_id_sha256") != self._grant.session_id_sha256
                 or payload.get("package_id") != self._grant.package_id
                 or payload.get("tool") != tool
                 or payload.get("arguments_sha256") != arguments_hash
-                or payload.get("tool_schema_sha256") != tool_schema_sha256()
+                or payload.get("tool_schema_sha256") != schema_hash
                 or not isinstance(payload.get("next_position"), dict)
             ):
                 raise ValueError

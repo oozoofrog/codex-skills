@@ -10,7 +10,7 @@ prepared -> approved -> submitted -> response_imported -> evaluated
 
 `verify` is read-only and may run at any phase. Every mutating transition first verifies the existing manifest, prompt, context, optional paste payload, local archive, state identity, and receipt hash chain.
 
-Schema-1 ZIP-first handoffs are immutable legacy receipts. Do not silently reinterpret their approval as text-transmission approval; prepare and approve a schema-2 handoff instead. Schema 3 is reserved for explicit `mcp-read` maximum-disclosure approval and is never selected by `auto`; see [web-mcp.md](web-mcp.md).
+Schema-1 ZIP-first handoffs are immutable legacy receipts. Do not silently reinterpret their approval as text-transmission approval; prepare and approve a schema-2 handoff instead. Schema 3 is reserved for explicit `mcp-read`. Schema 4 is reserved for explicit `mcp-research`. Both use maximum-disclosure approval, neither is selected by `auto`, and approval never crosses schemas. See [web-mcp.md](web-mcp.md) and [mcp-research.md](mcp-research.md).
 
 ## First-use environment
 
@@ -51,7 +51,8 @@ Useful safeguards:
 - `--max-file-bytes`: exclude oversized individual files.
 - `--dry-run`: scan and summarize without writing a package.
 - `--requested-model`: record a user-approved alternative when the default visible ChatGPT Pro selection is not appropriate.
-- `--transport auto|github|paste|text-file`: choose the browser handoff. `auto` is the GitHub-first default.
+- `--transport auto|github|paste|text-file`: choose the normal browser handoff. `auto` is the GitHub-first default.
+- `--transport mcp-read|mcp-research`: explicitly choose one experimental Web MCP contract; neither is an automatic fallback.
 - `--github-remote`: choose the GitHub remote verified by `auto` or `github`; default `origin`.
 - `--github-pr-url`: pin an optional GitHub PR whose remote head ref must equal current HEAD. A mismatch fails even under `auto`.
 - `--max-paste-bytes`: set the conservative fallback threshold when GitHub-first `auto` is unavailable; the default 128 KiB is Skill policy, not a published ChatGPT limit.
@@ -60,7 +61,7 @@ Preparation records both `git.head_sha` and a hash of the actual packaged file s
 
 When an in-repository output root is not ignored, `prepare` adds a warning pointing to `init`; it does not change Git configuration automatically.
 
-For a deliberate Web MCP package, use `--transport mcp-read` plus `--tunnel-id-ref env:NAME` or an absolute owner-only mode-0600 `file:` reference, the intended app/workspace labels, and the smallest directed file set. It creates schema 3, a prompt-only outbound list, and a local immutable ZIP. It never uploads the ZIP and never makes MCP an `auto` fallback. The raw Tunnel ID/reference is not written to gptpro package/runtime/receipt/audit artifacts; the official attended initializer does store the ID in its owner-only user profile. Approval and activation remain separate actions.
+For a deliberate Web MCP package, use `--transport mcp-read` or `--transport mcp-research` plus `--tunnel-id-ref env:NAME` or an absolute owner-only mode-0600 `file:` reference, the intended app/workspace labels, and the smallest directed file set. Both create a prompt-only outbound list and a local immutable ZIP. Schema 4 may add repeated `--evidence-file safe-id=/absolute/private/artifact.txt` entries and research-specific bounds. It never uploads the ZIP and never makes MCP an `auto` fallback. The raw Tunnel ID/reference and evidence source paths are not written to package/runtime/receipt/audit artifacts. Approval and activation remain separate actions.
 
 ## Verify and inspect
 
@@ -95,6 +96,17 @@ python3 <skill-dir>/scripts/gptpro.py approve \
 ```
 
 That approval does not authorize a manually fabricated active session. Continue only through the runtime lifecycle below, and do not paste the prompt or record submission until the exact approved session is active.
+
+For schema-4 `mcp-research`, also show the workspace-index/diff/evidence hashes, all seven read-only tools, context-note limits, visible-Chat response policy, and separately approved Codex note policy. Require the additional gate:
+
+```bash
+python3 <skill-dir>/scripts/gptpro.py approve \
+  --handoff-dir <dir> \
+  --approved-by user \
+  --confirm-transmission \
+  --confirm-mcp-disclosure \
+  --confirm-analysis-ledger
+```
 
 ## Activate an experimental Web MCP session
 
@@ -186,6 +198,41 @@ The protocol trace is package-local, owner-only, and bounded to 64 sanitized eve
 Advanced `--tunnel-client`, `--profile-dir`, `--ready-timeout`, and `--diagnose-request-correlation` options exist for explicit installation and attended diagnostics. The authorization lifecycle always uses the canonical owner-only per-user runtime slot; there is no CLI runtime-root override because a second namespace would violate the one-active-package invariant. Request-correlation output appears only in the terminal controller JSON (`mcp_stopped` when the package stop receipt exists, otherwise `mcp_exact_child_stopped`); the Skill does not add it to package state, receipts, the disclosure audit, or the protocol trace. Redirecting terminal output is therefore an operator-controlled retention decision.
 
 Activation and stop append auxiliary receipt events without advancing the consultation phase. A successful activation is not submission evidence, and an audit record is not response-import or evaluation evidence. Do not switch to another transport after activation failure without preparing and approving a new package.
+
+## Schema-4 analysis context
+
+While the exact `mcp-research` session is active, inspect the owner-only Codex context-note ledger without changing it:
+
+```bash
+python3 <skill-dir>/scripts/gptpro.py analysis-status --handoff-dir <dir> --json
+python3 <skill-dir>/scripts/gptpro.py analysis-export \
+  --handoff-dir <dir> \
+  --format markdown \
+  --output /absolute/private/path/analysis.md
+```
+
+Pro cannot append through MCP; all seven tools are read-only, and Pro findings return in visible Chat. To add bounded context for a later `gptpro_analysis_status` read, create an owner-only UTF-8 note, stage it locally, and show its exact text, bytes, SHA-256, note ID, and expected head:
+
+```bash
+python3 <skill-dir>/scripts/gptpro.py analysis-note-prepare \
+  --handoff-dir <dir> \
+  --message-file /absolute/private/path/note.txt
+```
+
+Only after a new note-specific user approval, pass every exact value reported by prepare:
+
+```bash
+python3 <skill-dir>/scripts/gptpro.py analysis-note-approve \
+  --handoff-dir <dir> \
+  --note-id <codex-note-id> \
+  --message-sha256 <reviewed-message-sha256> \
+  --message-bytes <reviewed-byte-count> \
+  --expected-head-sha256 <reviewed-ledger-head> \
+  --approved-by user \
+  --confirm-publication
+```
+
+Preparation does not publish or transmit the note. Approval commits a receipt before appending the exact bytes to the local ledger. `ledger_published` is not network-delivery evidence; only a later audited tool result proves runtime disclosure. If the ledger head changes, prepare a new note. Stop/revoke closes the ledger with the first durable audit reason and binds its final head/count/reason separately from exact-child stop evidence. See [mcp-research.md](mcp-research.md).
 
 ## Human checkpoint
 

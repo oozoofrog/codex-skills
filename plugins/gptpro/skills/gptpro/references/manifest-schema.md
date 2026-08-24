@@ -1,6 +1,6 @@
 # Artifact schema
 
-The verifier dispatches explicit schema versions. Existing GitHub, paste, and text-file packages use schema 2. Only an explicitly requested `mcp-read` package uses schema 3; `auto` never resolves to it.
+The verifier dispatches explicit schema versions. Existing GitHub, paste, and text-file packages use schema 2. Explicit `mcp-read` uses schema 3. Explicit `mcp-research` uses schema 4. `auto` never resolves to either Web MCP schema, and approval from one schema is never reinterpreted as another.
 
 ## `manifest.json`
 
@@ -57,12 +57,29 @@ Additional manifest fields bind:
 
 The raw Tunnel ID, its `env:` or `file:` reference, API keys, credentials, and absolute repository/file-list paths are not persisted in the manifest, package state, receipt, audit, or prompt. Schema-3 approval requires both `--confirm-transmission` and `--confirm-mcp-disclosure` and copies the approval basis into state and receipt.
 
-## Schema-3 session and audit records
+## Schema 4 `mcp-research`
+
+Schema 4 is additive to schema 3. It retains prompt-only browser delivery, immutable ZIP verification, package-specific Tunnel binding, maximum-disclosure approval, one-active-package runtime state, disclosure audit, protocol trace and existing receipt semantics. It replaces the three-tool catalog with the exact seven-tool, fully read-only research catalog documented in [mcp-research.md](mcp-research.md).
+
+Additional archive members and manifest bindings are:
+
+- `_gptpro/research/workspace-index.json`: canonical prepare-time directory/file metadata derived exactly from approved members;
+- `_gptpro/research/diff.json`: canonical prepare-time pinned-HEAD-SHA-to-snapshot entries, including the exact `research.diff.base_sha`, file hashes, and either bounded diff text/hash or a stable content-withheld reason;
+- `_gptpro/evidence/<artifact-id>.txt`: explicit strict-UTF-8 evidence members named only by safe IDs;
+- `research.workspace_index`, `research.diff`, `research.evidence`, `research.evidence_set_sha256` and matching artifact hashes;
+- schema-4 limits for workspace depth, search-query/range counts, evidence members/bytes, diff bytes, analysis events/event bytes/ledger bytes;
+- `analysis_collaboration`: `read-only-context-notes-v1`, ledger filename, `mcp_write_tools: false`, visible-Chat Pro response channel, and the exact-byte Codex context-note approval requirement.
+
+The manifest never persists source evidence absolute paths. Approval requires `--confirm-transmission`, `--confirm-mcp-disclosure`, and `--confirm-analysis-ledger`. The research session's default disclosure budget is an explicit fixed approved maximum rather than the selected source byte count because workspace metadata, diff/evidence, ledger pages and repeated physical calls are independently budgeted.
+
+## Schema-3/4 session and audit records
 
 Activation does not change the consultation phase. Instead, `state.mcp_session` binds the package to the active session hash, activation time, expiry, approved Tunnel alias/identity, the exact doctor-observed profile hash, the explicitly selected official `tunnel-client` binary SHA-256, the bundled MCP runtime-tree SHA-256, the exact MCP target hash, audit filename/header hash, and activation receipt event. The matching `mcp_activated` receipt repeats these non-secret hashes, and the user-global record keeps the same bindings immutable for the session. The user-global state may contain the local absolute handoff directory so the stdio server can locate the package; repository-facing artifacts do not expose that path to ChatGPT.
 
-`receipt.json` may append schema-3 auxiliary events such as activation, activation failure, failed-activation exact-child stop, expiry, revocation, normal runtime stop, or explicit recovery. Each auxiliary event must preserve `phase_before == phase_after`, bind the applicable session evidence, and continue the same receipt chain. It never substitutes for `submitted`, `response_imported`, or `evaluated`. `mcp_activation_stopped` is additive: it follows exactly one matching `mcp_activation_failed`, records the observed child return code and forced-termination flag, and binds the final trace artifact hash/length without creating `mcp_stopped` or a disclosure-audit footer. Older completed failure receipts without this new event remain valid but intentionally lack exact-child-stop proof.
+`receipt.json` may append Web MCP auxiliary events such as activation, activation failure, failed-activation exact-child stop, expiry, revocation, normal runtime stop, or explicit recovery. Each auxiliary event must preserve `phase_before == phase_after`, bind the applicable session evidence, and continue the same receipt chain. It never substitutes for `submitted`, `response_imported`, or `evaluated`. `mcp_activation_stopped` is additive: it follows exactly one matching `mcp_activation_failed`, records the observed child return code and forced-termination flag, and binds the final trace artifact hash/length without creating `mcp_stopped` or a disclosure-audit footer. Older completed schema-3 receipts remain verifiable.
 
 `mcp-audit.jsonl` is a separate high-frequency hash chain. Its header binds the package, approved manifest/archive/file set/tool schema, session hash, limits, and approval receipt. Tool records bind the tool, approved relative paths/ranges, file hashes, returned bytes, and cumulative counters without storing full bodies, raw search queries, or credentials. A footer/terminal summary binds final counters and audit head. Content is released only after its disclosure record has been durably committed.
+
+Schema 4 also creates owner-only `mcp-analysis.jsonl`. Its header binds the package/session/manifest/approval/tool schema/limits. The chain contains only separately approved Codex `context_note` events; Pro can read them through `gptpro_analysis_status` but cannot append through MCP. `analysis_note_approved` receipts bind the note ID, exact UTF-8 byte count/hash and expected ledger head before the unchanged note is appended. A receipt-only crash is replayable, while an event without exactly one matching receipt is invalid. Revocation or expiry closes the ledger with the same first durable audit reason, and terminal package/runtime evidence binds `analysis_head_sha256`, final sequence, event count, closed state, and `analysis_close_reason`. Analysis closure is not exact-child stop evidence or proof of network/model consumption.
 
 The user-global authorization record stores one active package at a time and contains only local control bindings and hashes. Activation failure first changes this exact binding to `faulted` and may retain a stable `activation_failure_code` before package evidence is read or written. It may also record a positive exact-child return code/forced-termination observation. When package integrity or the handoff directory itself is unavailable, this machine-global record is the only stop evidence and explicitly says that no package receipt was written. If the same exact package is later restored and verifies, a retry may monotonically change the matching stop's receipt flag from false to true and bind that one receipt hash; it cannot change the child result, reason, forced flag, or replace an existing hash. A terminal record is not archived/replaced while its exact controller lease remains live or while child-stop status is unproven. The only non-receipt clearance is additive `orphan_tunnel_termination_manually_confirmed: true` plus its timestamp, written after an explicit attended process review; it never sets either exact-child field or creates a package receipt. The raw per-session capability is environment-only, while Tunnel/API credentials stay in the official client's user-controlled environment or profile mechanism. See [web-mcp.md](web-mcp.md).

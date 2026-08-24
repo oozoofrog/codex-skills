@@ -75,6 +75,8 @@ _IMMUTABLE_BINDING_KEYS = frozenset(
         "archive_sha256",
         "file_set_sha256",
         "tool_schema_sha256",
+        "analysis_header_sha256",
+        "analysis_file",
         "protocol_profile",
         "transport",
         "delivery_channel",
@@ -387,6 +389,7 @@ def validate_active_state(state: Mapping[str, Any]) -> dict[str, Any]:
         "mcp_target_sha256",
         "mcp_runtime_tree_sha256",
         "protocol_trace_header_sha256",
+        "analysis_header_sha256",
         "runtime_stop_receipt_event_sha256",
         "runtime_protocol_trace_artifact_sha256",
         "activation_stop_receipt_event_sha256",
@@ -427,6 +430,49 @@ def validate_active_state(state: Mapping[str, Any]) -> dict[str, Any]:
         "expires_monotonic",
         "last_activity_monotonic",
     }
+    if "analysis_file" in value and value.get("analysis_file") != "mcp-analysis.jsonl":
+        raise RuntimeStateError("RUNTIME_STATE_UNSAFE", "Runtime analysis filename is invalid.")
+    analysis_final_fields = {
+        "analysis_head_sha256",
+        "analysis_final_sequence",
+        "analysis_event_count",
+        "analysis_closed",
+        "analysis_close_reason",
+    }
+    present_analysis_final = analysis_final_fields & set(value)
+    if present_analysis_final and present_analysis_final != analysis_final_fields:
+        raise RuntimeStateError(
+            "RUNTIME_STATE_UNSAFE", "Runtime final analysis evidence is incomplete."
+        )
+    if present_analysis_final:
+        if (
+            value.get("status") not in TERMINAL_STATUSES
+            or _SHA256.fullmatch(str(value.get("analysis_head_sha256", ""))) is None
+            or isinstance(value.get("analysis_final_sequence"), bool)
+            or not isinstance(value.get("analysis_final_sequence"), int)
+            or value["analysis_final_sequence"] < 1
+            or isinstance(value.get("analysis_event_count"), bool)
+            or not isinstance(value.get("analysis_event_count"), int)
+            or value["analysis_event_count"] < 0
+            or value.get("analysis_closed") is not True
+            or re.fullmatch(
+                r"[a-z][a-z0-9_-]{0,63}", str(value.get("analysis_close_reason", ""))
+            )
+            is None
+        ):
+            raise RuntimeStateError(
+                "RUNTIME_STATE_UNSAFE", "Runtime final analysis evidence is invalid."
+            )
+        terminal_reason_key = (
+            "revoked_reason" if value.get("status") == "revoked" else "expired_reason"
+        )
+        if value.get("status") in {"revoked", "expired"} and (
+            value.get(terminal_reason_key) != value.get("analysis_close_reason")
+        ):
+            raise RuntimeStateError(
+                "RUNTIME_STATE_UNSAFE",
+                "Runtime terminal reason conflicts with final analysis evidence.",
+            )
     if not required.issubset(value):
         raise RuntimeStateError("RUNTIME_STATE_UNSAFE", "Runtime state is missing a required binding.")
     idle_ttl = value["idle_ttl_seconds"]

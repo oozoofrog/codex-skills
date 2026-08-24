@@ -1,4 +1,4 @@
-"""Stable, non-sensitive errors for the read-only MCP runtime."""
+"""Stable, non-sensitive errors for the bounded repository MCP runtime."""
 
 from __future__ import annotations
 
