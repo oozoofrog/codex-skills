@@ -75,6 +75,8 @@ _IMMUTABLE_BINDING_KEYS = frozenset(
         "archive_sha256",
         "file_set_sha256",
         "tool_schema_sha256",
+        "audit_schema_version",
+        "disclosure_accounting",
         "analysis_header_sha256",
         "analysis_file",
         "protocol_profile",
@@ -432,6 +434,17 @@ def validate_active_state(state: Mapping[str, Any]) -> dict[str, Any]:
     }
     if "analysis_file" in value and value.get("analysis_file") != "mcp-analysis.jsonl":
         raise RuntimeStateError("RUNTIME_STATE_UNSAFE", "Runtime analysis filename is invalid.")
+    audit_contract_fields = {"audit_schema_version", "disclosure_accounting"}
+    present_audit_contract = audit_contract_fields & set(value)
+    if present_audit_contract and (
+        present_audit_contract != audit_contract_fields
+        or type(value.get("audit_schema_version")) is not int
+        or value.get("audit_schema_version") != 2
+        or value.get("disclosure_accounting") != "complete_model_visible_result_v1"
+    ):
+        raise RuntimeStateError(
+            "RUNTIME_STATE_UNSAFE", "Runtime disclosure accounting contract is invalid."
+        )
     analysis_final_fields = {
         "analysis_head_sha256",
         "analysis_final_sequence",

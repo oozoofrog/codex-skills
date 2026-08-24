@@ -26,7 +26,7 @@ if str(SKILL_ROOT) not in sys.path:
 from runtime.gptpro_mcp.authorization import AuthorizationGrant, StaticAuthorizationProvider
 from runtime.gptpro_mcp.errors import ToolError
 from runtime.gptpro_mcp.protocol import LegacyMcpServer
-from runtime.gptpro_mcp.schema import RESEARCH_TOOL_NAMES, contract_for_schema
+from runtime.gptpro_mcp.schema import RESEARCH_TOOL_NAMES, canonical_json_bytes, contract_for_schema
 from runtime.gptpro_mcp.tools import ToolRuntime
 
 TUNNEL_ENV_NAME = "GPTPRO_RESEARCH_TEST_TUNNEL_ID"
@@ -800,7 +800,7 @@ class McpResearchTests(unittest.TestCase):
 
     def test_research_catalog_is_read_only_and_rejects_write_tool(self) -> None:
         handoff = self.prepare()
-        runtime, ledger, _ = self.fixture_runtime(handoff)
+        runtime, ledger, committer = self.fixture_runtime(handoff)
         verified = self.module.verify_package(handoff)
         package_id = verified["manifest"]["package_id"]
         self.assertNotIn("gptpro_analysis_post", RESEARCH_TOOL_NAMES)
@@ -816,11 +816,45 @@ class McpResearchTests(unittest.TestCase):
                 {"package_id": package_id},
             )
         self.assertEqual("MCP_INVALID_ARGUMENT", rejected.exception.code)
+        self.assertEqual(1, len(committer.rejections))
+        self.assertEqual("gptpro_analysis_post", committer.rejections[0]["tool"])
+        self.assertEqual("MCP_INVALID_ARGUMENT", committer.rejections[0]["error_code"])
+        self.assertEqual(1, committer.rejections[0]["calls_used"])
         status = self.result(runtime.call(
             "gptpro_analysis_status", {"package_id": package_id, "page_size": 10}
         ))
+        self.assertEqual(2, committer.commits[-1]["calls_used"])
         self.assertEqual([], status["events"])
         self.assertEqual(0, ledger.verify().event_count)
+
+    def test_complete_model_visible_response_consumes_disclosure_budget(self) -> None:
+        handoff = self.prepare()
+        runtime, _, committer = self.fixture_runtime(handoff)
+        package_id = self.module.verify_package(handoff)["manifest"]["package_id"]
+
+        package_response = runtime.call(
+            "gptpro_package_info",
+            {"package_id": package_id, "include_paths": False},
+        )
+        package_bytes = len(canonical_json_bytes(package_response))
+        package_result = self.result(package_response)
+        self.assertEqual(
+            package_bytes,
+            package_result["disclosure"]["session_disclosed_bytes"],
+        )
+        self.assertEqual(package_bytes, package_result["session"]["disclosed_bytes"])
+        self.assertEqual(package_bytes, committer.commits[-1]["disclosed_bytes"])
+
+        map_response = runtime.call(
+            "gptpro_workspace_map",
+            {"package_id": package_id, "root": "", "page_size": 1, "max_depth": 1},
+        )
+        map_bytes = len(canonical_json_bytes(map_response))
+        self.assertEqual(
+            package_bytes + map_bytes,
+            self.result(map_response)["disclosure"]["session_disclosed_bytes"],
+        )
+        self.assertEqual(package_bytes + map_bytes, committer.commits[-1]["disclosed_bytes"])
 
     def test_glob_matching_is_bounded_and_duplicate_patterns_are_rejected(self) -> None:
         tools_module = sys.modules[ToolRuntime.__module__]
@@ -1195,6 +1229,38 @@ class McpResearchTests(unittest.TestCase):
             event for event in final["receipt"]["events"] if event["type"] == "mcp_revoked"
         ]
         self.assertEqual("controller_lost", revocations[-1]["data"]["reason"])
+
+    def test_schema4_activation_cannot_strip_current_accounting_binding(self) -> None:
+        handoff = self.prepare()
+        self.activate(handoff)
+        state = json.loads((handoff / "state.json").read_text(encoding="utf-8"))
+        receipt = json.loads((handoff / "receipt.json").read_text(encoding="utf-8"))
+        state["mcp_session"].pop("audit_schema_version")
+        state["mcp_session"].pop("disclosure_accounting")
+        for event in receipt["events"]:
+            if event["type"] == "mcp_activated":
+                event["data"].pop("audit_schema_version")
+                event["data"].pop("disclosure_accounting")
+        previous = None
+        for sequence, event in enumerate(receipt["events"], start=1):
+            event["sequence"] = sequence
+            event["previous_event_hash"] = previous
+            event["event_hash"] = self.module.event_hash(event)
+            previous = event["event_hash"]
+        (handoff / "state.json").write_text(
+            json.dumps(state, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        (handoff / "receipt.json").write_text(
+            json.dumps(receipt, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            self.module.HandoffError,
+            "runtime sessions are not supported|accounting binding",
+        ):
+            self.module.verify_package(handoff)
 
     def test_expiry_recovery_uses_persisted_reason_and_finishes_terminal_evidence(self) -> None:
         handoff = self.prepare()

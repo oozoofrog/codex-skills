@@ -13,8 +13,14 @@ from .analysis import AnalysisLedger
 from .archive import VerifiedArchive, strict_posix_path
 from .authorization import AuthorizationGrant, AuthorizationProvider
 from .cursor import CursorCodec, arguments_sha256
-from .errors import CancelledError, ToolError, invalid_argument
-from .schema import canonical_json_bytes, contract_for_schema
+from .errors import (
+    CancelledError,
+    CommitOutcomeUncertainError,
+    ToolError,
+    invalid_argument,
+    unknown_tool,
+)
+from .schema import canonical_json_bytes, contract_for_schema, validate_tool_name
 
 
 def _utc_text(value: datetime) -> str:
@@ -138,6 +144,7 @@ class ToolRuntime:
         self._session_key: tuple[str, str] | None = None
         self._calls_used = 0
         self._disclosed_bytes = 0
+        self._commit_outcome_uncertain = False
 
     def call(
         self,
@@ -147,6 +154,10 @@ class ToolRuntime:
         cancelled: threading.Event | None = None,
         request_id: Any = None,
     ) -> dict[str, Any]:
+        try:
+            name = validate_tool_name(name)
+        except ValueError as exc:
+            raise invalid_argument("tool name must be bounded canonical UTF-8 text") from exc
         cancel = cancelled or threading.Event()
         if not isinstance(arguments, dict):
             raise invalid_argument()
@@ -159,8 +170,6 @@ class ToolRuntime:
         if schema_version not in {3, 4}:
             raise invalid_argument("The active package schema is unsupported.")
         contract = contract_for_schema(int(schema_version))
-        if name not in contract["tool_names"]:
-            raise invalid_argument("The requested tool name is not in the approved static catalog.")
         limits = grant.limits
         started = self._monotonic()
 
@@ -178,6 +187,12 @@ class ToolRuntime:
         with self._execute_lock:
             checkpoint()
             self._select_session(grant)
+            if self._commit_outcome_uncertain:
+                raise ToolError(
+                    "COMMIT_OUTCOME_UNCERTAIN",
+                    "This session is closed after an indeterminate durable commit outcome.",
+                    recovery="Verify the audit, stop this session, and activate a new approved package.",
+                )
             if self._calls_used >= limits["max_tool_calls"]:
                 raise ToolError(
                     "CALL_LIMIT_EXCEEDED",
@@ -191,46 +206,47 @@ class ToolRuntime:
                 raise invalid_argument(
                     "The request id and arguments must be bounded canonical UTF-8 JSON values."
                 ) from exc
-            self._calls_used += 1
-            projected_calls = self._calls_used
+            projected_calls = self._calls_used + 1
             try:
+                if name not in contract["tool_names"]:
+                    raise unknown_tool()
                 snapshot = VerifiedArchive.open(grant, checkpoint=checkpoint)
                 checkpoint()
                 if name == "gptpro_package_info":
-                    result, disclosure = self._package_info(
+                    result, _ = self._package_info(
                         snapshot, arguments, projected_calls=projected_calls, checkpoint=checkpoint
                     )
                 elif schema_version == 3 and name == "gptpro_repo_read":
-                    result, disclosure = self._read(snapshot, arguments, checkpoint=checkpoint)
+                    result, _ = self._read(snapshot, arguments, checkpoint=checkpoint)
                 elif schema_version == 3:
-                    result, disclosure = self._search(snapshot, arguments, checkpoint=checkpoint)
+                    result, _ = self._search(snapshot, arguments, checkpoint=checkpoint)
                 elif name == "gptpro_workspace_map":
-                    result, disclosure = self._workspace_map(snapshot, arguments, checkpoint=checkpoint)
+                    result, _ = self._workspace_map(snapshot, arguments, checkpoint=checkpoint)
                 elif name == "gptpro_repo_read":
-                    result, disclosure = self._research_read(snapshot, arguments, checkpoint=checkpoint)
+                    result, _ = self._research_read(snapshot, arguments, checkpoint=checkpoint)
                 elif name == "gptpro_repo_search":
-                    result, disclosure = self._research_search(snapshot, arguments, checkpoint=checkpoint)
+                    result, _ = self._research_search(snapshot, arguments, checkpoint=checkpoint)
                 elif name == "gptpro_repo_diff":
-                    result, disclosure = self._repo_diff(snapshot, arguments, checkpoint=checkpoint)
+                    result, _ = self._repo_diff(snapshot, arguments, checkpoint=checkpoint)
                 elif name == "gptpro_artifact_read":
-                    result, disclosure = self._artifact_read(snapshot, arguments, checkpoint=checkpoint)
+                    result, _ = self._artifact_read(snapshot, arguments, checkpoint=checkpoint)
                 elif name == "gptpro_analysis_status":
-                    result, disclosure = self._analysis_status(snapshot, arguments, checkpoint=checkpoint)
+                    result, _ = self._analysis_status(snapshot, arguments, checkpoint=checkpoint)
                 else:
                     raise invalid_argument("The requested tool name is not in the approved static catalog.")
-                projected_disclosure = self._disclosed_bytes + disclosure
+                response, projected_disclosure, response_bytes = self._finalize_success_response(
+                    name=name,
+                    package_id=package_id,
+                    result=result,
+                    projected_calls=projected_calls,
+                )
                 if projected_disclosure > limits["max_session_disclosure_bytes"]:
                     raise ToolError(
                         "DISCLOSURE_BUDGET_EXCEEDED",
                         "The approved session disclosure budget would be exceeded.",
                         recovery="Stop this session and obtain approval for a new bounded session.",
                     )
-                result.setdefault("disclosure", {})["session_disclosed_bytes"] = projected_disclosure
-                if name == "gptpro_package_info":
-                    result["session"]["calls_used"] = projected_calls
-                    result["session"]["disclosed_bytes"] = projected_disclosure
-                response = success_result(name, package_id, result)
-                if len(canonical_json_bytes(response)) > limits["max_result_bytes"]:
+                if response_bytes > limits["max_result_bytes"]:
                     raise ToolError(
                         "RESULT_LIMIT_EXCEEDED",
                         "The model-visible tool result exceeds the approved per-call byte limit.",
@@ -258,40 +274,85 @@ class ToolRuntime:
                     )
             except (ToolError, CancelledError) as exc:
                 error_code = exc.code if isinstance(exc, ToolError) else "CANCELLED"
-                self._committer.record_rejection(
-                    grant=grant,
-                    tool=name,
-                    request_id_sha256=request_hash,
-                    arguments_sha256=argument_hash,
-                    error_code=error_code,
-                    calls_used=projected_calls,
-                )
+                try:
+                    self._committer.record_rejection(
+                        grant=grant,
+                        tool=name,
+                        request_id_sha256=request_hash,
+                        arguments_sha256=argument_hash,
+                        error_code=error_code,
+                        calls_used=projected_calls,
+                    )
+                except CommitOutcomeUncertainError as commit_error:
+                    self._latch_uncertain_commit(commit_error)
+                    raise
+                self._calls_used = projected_calls
                 raise
             except Exception as exc:
-                self._committer.record_rejection(
-                    grant=grant,
-                    tool=name,
-                    request_id_sha256=request_hash,
-                    arguments_sha256=argument_hash,
-                    error_code="TOOL_EXECUTION_FAILED",
-                    calls_used=projected_calls,
-                )
+                try:
+                    self._committer.record_rejection(
+                        grant=grant,
+                        tool=name,
+                        request_id_sha256=request_hash,
+                        arguments_sha256=argument_hash,
+                        error_code="TOOL_EXECUTION_FAILED",
+                        calls_used=projected_calls,
+                    )
+                except CommitOutcomeUncertainError as commit_error:
+                    self._latch_uncertain_commit(commit_error)
+                    raise
+                self._calls_used = projected_calls
                 raise ToolError(
                     "TOOL_EXECUTION_FAILED",
                     "The bounded package operation failed before returning content.",
                     recovery="Stop this session if the failure repeats.",
                 ) from exc
-            self._committer.commit_before_return(
-                grant=current,
-                tool=name,
-                request_id_sha256=request_hash,
-                arguments_sha256=argument_hash,
-                audit_metadata=_audit_metadata(name, result),
-                calls_used=projected_calls,
-                disclosed_bytes=projected_disclosure,
-            )
+            try:
+                self._committer.commit_before_return(
+                    grant=current,
+                    tool=name,
+                    request_id_sha256=request_hash,
+                    arguments_sha256=argument_hash,
+                    audit_metadata=_audit_metadata(name, result),
+                    calls_used=projected_calls,
+                    disclosed_bytes=projected_disclosure,
+                )
+            except CommitOutcomeUncertainError as commit_error:
+                self._latch_uncertain_commit(commit_error)
+                raise
+            self._calls_used = projected_calls
             self._disclosed_bytes = projected_disclosure
             return response
+
+    def _finalize_success_response(
+        self,
+        *,
+        name: str,
+        package_id: str,
+        result: dict[str, Any],
+        projected_calls: int,
+    ) -> tuple[dict[str, Any], int, int]:
+        """Bind the exact complete model-visible response size into cumulative disclosure."""
+
+        projected_disclosure = self._disclosed_bytes
+        for _ in range(16):
+            result.setdefault("disclosure", {})[
+                "session_disclosed_bytes"
+            ] = projected_disclosure
+            if name == "gptpro_package_info":
+                result["session"]["calls_used"] = projected_calls
+                result["session"]["disclosed_bytes"] = projected_disclosure
+            response = success_result(name, package_id, result)
+            response_bytes = len(canonical_json_bytes(response))
+            stabilized_disclosure = self._disclosed_bytes + response_bytes
+            if stabilized_disclosure == projected_disclosure:
+                return response, projected_disclosure, response_bytes
+            projected_disclosure = stabilized_disclosure
+        raise ToolError(
+            "TOOL_EXECUTION_FAILED",
+            "The model-visible response size could not be stabilized.",
+            recovery="Stop this session and activate a new approved package.",
+        )
 
     def _select_session(self, grant: AuthorizationGrant) -> None:
         key = (grant.package_id, grant.session_id_sha256)
@@ -299,6 +360,20 @@ class ToolRuntime:
             self._session_key = key
             self._calls_used = 0
             self._disclosed_bytes = 0
+            self._commit_outcome_uncertain = False
+
+    def _latch_uncertain_commit(self, error: CommitOutcomeUncertainError) -> None:
+        calls = error.committed_calls_used
+        disclosed = error.committed_disclosed_bytes
+        if isinstance(calls, int) and not isinstance(calls, bool) and calls >= self._calls_used:
+            self._calls_used = calls
+        if (
+            isinstance(disclosed, int)
+            and not isinstance(disclosed, bool)
+            and disclosed >= self._disclosed_bytes
+        ):
+            self._disclosed_bytes = disclosed
+        self._commit_outcome_uncertain = True
 
     def _package_info(
         self,

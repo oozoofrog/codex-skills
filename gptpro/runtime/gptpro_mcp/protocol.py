@@ -9,7 +9,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TextIO
 
-from .errors import CancelledError, ToolError
+from .errors import CancelledError, ToolError, UnknownToolError
 from .protocol_trace import (
     ProtocolTrace,
     ProtocolTraceError,
@@ -17,7 +17,7 @@ from .protocol_trace import (
     classify_requested_version,
     safe_requested_version,
 )
-from .schema import contract_for_schema
+from .schema import contract_for_schema, validate_tool_name
 from .tools import ToolRuntime, error_result
 
 JSONRPC_VERSION = "2.0"
@@ -368,7 +368,9 @@ class LegacyMcpServer:
             return
         with self._state_lock:
             ready = self._initialized
-        if method == "tools/call" and not ready and self._valid_tool_call_params(params):
+        if method == "tools/call" and not ready and self._valid_tool_call_params(
+            params, require_advertised=True
+        ):
             with self._state_lock:
                 before = self._readiness_locked()
                 request_scoped_compat = (
@@ -668,11 +670,20 @@ class LegacyMcpServer:
             "instructions": self._server_instructions,
         }
 
-    def _valid_tool_call_params(self, params: dict[str, Any]) -> bool:
+    def _valid_tool_call_params(
+        self,
+        params: dict[str, Any],
+        *,
+        require_advertised: bool = False,
+    ) -> bool:
         allowed_keys = {"name", "arguments", "_meta"}
+        try:
+            name = validate_tool_name(params.get("name"))
+        except ValueError:
+            return False
         return (
             set(params).issubset(allowed_keys)
-            and params.get("name") in self._tool_names
+            and (not require_advertised or name in self._tool_names)
             and isinstance(params.get("arguments", {}), dict)
             and ("_meta" not in params or isinstance(params.get("_meta"), dict))
         )
@@ -694,6 +705,19 @@ class LegacyMcpServer:
                     request_id=request_id,
                 )
             except CancelledError:
+                return
+            except UnknownToolError as exc:
+                if cancel.is_set():
+                    return
+                self._write_traced(
+                    _rpc_error(
+                        request_id,
+                        -32602,
+                        "Invalid params",
+                        stable_code=exc.code,
+                    ),
+                    "tools_call",
+                )
                 return
             except ToolError as exc:
                 if cancel.is_set():

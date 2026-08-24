@@ -18,14 +18,18 @@ from typing import Any, Callable, Iterator, Mapping
 
 from .authorization import AuthorizationGrant
 from .clock import Clock, ClockAnchor, parse_utc, utc_text
-from .errors import ToolError
+from .errors import CommitOutcomeUncertainError, ToolError
 from .runtime_state import RuntimeStateError, RuntimeStateStore
-from .schema import contract_for_schema
+from .schema import contract_for_schema, validate_tool_name
 from .sensitive import secret_detector_names
 
-AUDIT_SCHEMA_VERSION = 1
+LEGACY_AUDIT_SCHEMA_VERSION = 1
+AUDIT_SCHEMA_VERSION = 2
+LEGACY_ACCOUNTING_MODE = "legacy_tool_body_estimate"
+ACCOUNTING_MODE = "complete_model_visible_result_v1"
 MAX_AUDIT_BYTES = 16 * 1024 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+UNADVERTISED_TOOL_LABEL = "<unadvertised>"
 
 
 def _catalog_tools_for_schema_hash(tool_schema_sha256: str) -> frozenset[str]:
@@ -109,6 +113,8 @@ class AuditBinding:
 
 @dataclass(frozen=True)
 class AuditSummary:
+    schema_version: int
+    accounting_mode: str
     header_sha256: str
     head_sha256: str
     final_sequence: int
@@ -162,6 +168,7 @@ class AuditLog:
             record: dict[str, Any] = {
                 "record_type": "header",
                 "audit_schema_version": AUDIT_SCHEMA_VERSION,
+                "accounting_mode": ACCOUNTING_MODE,
                 "sequence": 0,
                 "created_at": utc_text(now),
                 "package_id": self.binding.package_id,
@@ -212,23 +219,28 @@ class AuditLog:
                 recovery="Revoke this session and activate a new approved package session.",
             ) from exc
 
+        committed: AuditSummary | None = None
         if self.runtime_store is None:
-            self._commit_with_audit_lock(
-                grant=grant,
-                tool=tool,
-                request_id_sha256=request_id_sha256,
-                arguments_sha256=arguments_sha256,
-                metadata=sanitized,
-                calls_used=calls_used,
-                disclosed_bytes=disclosed_bytes,
-            )
+            try:
+                self._commit_with_audit_lock(
+                    grant=grant,
+                    tool=tool,
+                    request_id_sha256=request_id_sha256,
+                    arguments_sha256=arguments_sha256,
+                    metadata=sanitized,
+                    calls_used=calls_used,
+                    disclosed_bytes=disclosed_bytes,
+                )
+            except CommitOutcomeUncertainError:
+                self._terminalize_uncertain_commit()
+                raise
             return
 
         try:
             with self.runtime_store.locked() as transaction:
                 state = transaction.read()
                 activity_monotonic = self._validate_active_state(state, grant)
-                self._commit_with_audit_lock(
+                committed = self._commit_with_audit_lock(
                     grant=grant,
                     tool=tool,
                     request_id_sha256=request_id_sha256,
@@ -243,7 +255,16 @@ class AuditLog:
                 updated["last_activity_monotonic"] = activity_monotonic
                 updated["revision"] = int(state["revision"]) + 1
                 transaction.write(updated)
+        except CommitOutcomeUncertainError:
+            self._terminalize_uncertain_commit()
+            raise
         except RuntimeStateError as exc:
+            if committed is not None:
+                self._terminalize_uncertain_commit()
+                raise CommitOutcomeUncertainError(
+                    calls_used=committed.tool_calls,
+                    disclosed_bytes=committed.disclosed_bytes,
+                ) from exc
             raise ToolError(
                 exc.code,
                 "The active disclosure authorization is unavailable.",
@@ -287,6 +308,11 @@ class AuditLog:
                     "arguments_sha256": record["arguments_sha256"],
                     "disclosure_bytes": record["disclosure_bytes"],
                     "result": record["result"],
+                    **(
+                        {"requested_tool_sha256": record["requested_tool_sha256"]}
+                        if "requested_tool_sha256" in record
+                        else {}
+                    ),
                 }
                 for record in verified.records
                 if record.get("record_type") == "tool_call"
@@ -304,45 +330,58 @@ class AuditLog:
         """Durably record a rejected/cancelled call without repository disclosure."""
 
         try:
-            if tool not in _catalog_tools_for_schema_hash(self.binding.tool_schema_sha256):
-                raise ValueError("tool is not in the package-bound catalog")
+            raw_tool = validate_tool_name(tool)
+            allowed_tools = _catalog_tools_for_schema_hash(self.binding.tool_schema_sha256)
+            audited_tool = raw_tool
+            requested_tool_sha256: str | None = None
+            if raw_tool not in allowed_tools:
+                audited_tool = UNADVERTISED_TOOL_LABEL
+                requested_tool_sha256 = hashlib.sha256(raw_tool.encode("utf-8")).hexdigest()
             _require_hash(request_id_sha256, "request id")
             _require_hash(arguments_sha256, "arguments")
             if not isinstance(error_code, str) or re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", error_code) is None:
                 raise ValueError("error_code is invalid")
+            if requested_tool_sha256 is not None and error_code != "MCP_INVALID_ARGUMENT":
+                raise ValueError("unadvertised tool rejection code is invalid")
         except ValueError as exc:
             raise ToolError("AUDIT_WRITE_FAILED", "Rejected-call audit metadata is invalid.") from exc
-        with self._locked():
-            verified = self._verify_locked()
-            if verified.summary.footer:
-                raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit is already closed.")
-            if (
-                isinstance(calls_used, bool)
-                or not isinstance(calls_used, int)
-                or calls_used != verified.summary.tool_calls + 1
-            ):
-                raise ToolError("AUDIT_WRITE_FAILED", "Rejected-call audit counter is invalid.")
-            now = self.anchor.effective_now(persisted_floor=verified.summary.last_committed_at)
-            record: dict[str, Any] = {
-                "record_type": "tool_call",
-                "sequence": verified.summary.final_sequence + 1,
-                "timestamp": utc_text(now),
-                "package_id": self.binding.package_id,
-                "session_id_sha256": self.binding.session_id_sha256,
-                "jsonrpc_request_id_sha256": request_id_sha256,
-                "tool": tool,
-                "arguments_sha256": arguments_sha256,
-                "audit_metadata": {},
-                "error_code": error_code,
-                "disclosure_bytes": 0,
-                "cumulative_disclosed_bytes": verified.summary.disclosed_bytes,
-                "cumulative_tool_calls": calls_used,
-                "result": "rejected",
-                "previous_event_sha256": verified.summary.head_sha256,
-            }
-            record["event_sha256"] = _event_hash(record)
-            self._append_record(record)
-            return self._verify_locked().summary
+        try:
+            with self._locked():
+                verified = self._verify_locked()
+                self._require_current_accounting(verified.summary)
+                if verified.summary.footer:
+                    raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit is already closed.")
+                if (
+                    isinstance(calls_used, bool)
+                    or not isinstance(calls_used, int)
+                    or calls_used != verified.summary.tool_calls + 1
+                ):
+                    raise ToolError("AUDIT_WRITE_FAILED", "Rejected-call audit counter is invalid.")
+                now = self.anchor.effective_now(persisted_floor=verified.summary.last_committed_at)
+                record: dict[str, Any] = {
+                    "record_type": "tool_call",
+                    "sequence": verified.summary.final_sequence + 1,
+                    "timestamp": utc_text(now),
+                    "package_id": self.binding.package_id,
+                    "session_id_sha256": self.binding.session_id_sha256,
+                    "jsonrpc_request_id_sha256": request_id_sha256,
+                    "tool": audited_tool,
+                    "arguments_sha256": arguments_sha256,
+                    "audit_metadata": {},
+                    "error_code": error_code,
+                    "disclosure_bytes": 0,
+                    "cumulative_disclosed_bytes": verified.summary.disclosed_bytes,
+                    "cumulative_tool_calls": calls_used,
+                    "result": "rejected",
+                    "previous_event_sha256": verified.summary.head_sha256,
+                }
+                if requested_tool_sha256 is not None:
+                    record["requested_tool_sha256"] = requested_tool_sha256
+                record["event_sha256"] = _event_hash(record)
+                return self._append_record_verified(record, verified.summary)
+        except CommitOutcomeUncertainError:
+            self._terminalize_uncertain_commit()
+            raise
 
     def _commit_with_audit_lock(
         self,
@@ -354,9 +393,10 @@ class AuditLog:
         metadata: dict[str, Any],
         calls_used: int,
         disclosed_bytes: int,
-    ) -> None:
+    ) -> AuditSummary:
         with self._locked():
             verified = self._verify_locked()
+            self._require_current_accounting(verified.summary)
             if verified.summary.footer:
                 raise ToolError(
                     "AUDIT_CHAIN_INVALID",
@@ -399,16 +439,110 @@ class AuditLog:
                 "previous_event_sha256": verified.summary.head_sha256,
             }
             record["event_sha256"] = _event_hash(record)
-            try:
-                self._append_record(record)
-            except ToolError:
-                raise
-            except Exception as exc:
+            return self._append_record_verified(record, verified.summary)
+
+    def _append_record_verified(
+        self,
+        record: dict[str, Any],
+        before: AuditSummary,
+    ) -> AuditSummary:
+        """Append one exact record and classify failures without guessing.
+
+        This runs while the audit lock is held.  If an exception occurs after
+        bytes may have reached the file, the exact expected record is compared
+        with a newly verified final chain.  An unchanged chain is a pre-append
+        failure; an exact or indeterminate change is fail-closed ambiguity.
+        """
+
+        try:
+            self._append_record(record)
+        except Exception as exc:
+            disposition, observed = self._classify_failed_append(record, before)
+            if disposition == "absent":
+                if isinstance(exc, ToolError):
+                    raise
                 raise ToolError(
                     "AUDIT_WRITE_FAILED",
                     "The disclosure audit could not be durably committed.",
                     recovery="Revoke this session and activate a new approved package session.",
                 ) from exc
+            raise CommitOutcomeUncertainError(
+                calls_used=observed.tool_calls if observed is not None else None,
+                disclosed_bytes=observed.disclosed_bytes if observed is not None else None,
+            ) from exc
+        try:
+            observed = self._verify_locked().summary
+        except ToolError as exc:
+            raise CommitOutcomeUncertainError(
+                calls_used=None,
+                disclosed_bytes=None,
+            ) from exc
+        if (
+            observed.head_sha256 != record["event_sha256"]
+            or observed.final_sequence != record["sequence"]
+            or observed.tool_calls != record["cumulative_tool_calls"]
+            or observed.disclosed_bytes != record["cumulative_disclosed_bytes"]
+        ):
+            raise CommitOutcomeUncertainError(
+                calls_used=observed.tool_calls,
+                disclosed_bytes=observed.disclosed_bytes,
+            )
+        return observed
+
+    def _classify_failed_append(
+        self,
+        record: Mapping[str, Any],
+        before: AuditSummary,
+    ) -> tuple[str, AuditSummary | None]:
+        try:
+            observed = self._verify_locked().summary
+        except ToolError:
+            return "indeterminate", None
+        if (
+            observed.head_sha256 == record.get("event_sha256")
+            and observed.final_sequence == record.get("sequence")
+            and observed.tool_calls == record.get("cumulative_tool_calls")
+            and observed.disclosed_bytes == record.get("cumulative_disclosed_bytes")
+        ):
+            return "committed", observed
+        if (
+            observed.head_sha256 == before.head_sha256
+            and observed.final_sequence == before.final_sequence
+            and observed.tool_calls == before.tool_calls
+            and observed.disclosed_bytes == before.disclosed_bytes
+        ):
+            return "absent", observed
+        return "indeterminate", observed
+
+    def _terminalize_uncertain_commit(self) -> None:
+        """Best-effort persistent denial after a possibly committed call.
+
+        Either the machine-global authorization becomes faulted or the audit is
+        closed (normally both).  The caller also latches the in-process runtime,
+        so no ambiguous call is automatically retried.
+        """
+
+        if self.runtime_store is not None:
+            try:
+                with self.runtime_store.locked() as transaction:
+                    state = transaction.read()
+                    if (
+                        state is not None
+                        and state.get("package_id") == self.binding.package_id
+                        and state.get("session_id_sha256") == self.binding.session_id_sha256
+                        and state.get("status") in {"activating", "active", "revoking"}
+                    ):
+                        updated = dict(state)
+                        updated["status"] = "faulted"
+                        updated["revision"] = int(state["revision"]) + 1
+                        updated["updated_at"] = utc_text(datetime.now(timezone.utc))
+                        transaction.write(updated)
+            except (RuntimeStateError, ToolError, OSError, ValueError):
+                pass
+        try:
+            self.append_footer("commit_outcome_uncertain")
+        except (ToolError, OSError, ValueError):
+            pass
 
     def _validate_active_state(
         self, state: dict[str, Any] | None, grant: AuthorizationGrant
@@ -644,6 +778,8 @@ class AuditLog:
         last_at: datetime | None = None
         footer = False
         close_reason: str | None = None
+        audit_schema_version: int | None = None
+        accounting_mode: str | None = None
         for sequence, raw_line in enumerate(payload.splitlines()):
             try:
                 record = json.loads(raw_line.decode("utf-8"))
@@ -670,7 +806,7 @@ class AuditLog:
             if record.get("event_sha256") != actual:
                 raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit hash chain is invalid.")
             if sequence == 0:
-                self._verify_header(record)
+                audit_schema_version, accounting_mode = self._verify_header(record)
                 last_at = parse_utc(record["created_at"])
             else:
                 record_type = record.get("record_type")
@@ -680,7 +816,12 @@ class AuditLog:
                     tool_calls = self._positive_counter(record.get("cumulative_tool_calls"), tool_calls)
                     previous_disclosed = disclosed_bytes
                     disclosed_bytes = self._nondecreasing_counter(record.get("cumulative_disclosed_bytes"), disclosed_bytes)
-                    self._verify_tool_record(record, previous_disclosed)
+                    assert accounting_mode is not None
+                    self._verify_tool_record(
+                        record,
+                        previous_disclosed,
+                        accounting_mode=accounting_mode,
+                    )
                     last_at = self._verified_timestamp(record.get("timestamp"), last_at)
                 elif record_type == "footer":
                     expected_footer_keys = {
@@ -708,8 +849,15 @@ class AuditLog:
                     raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit record type is invalid.")
             records.append(record)
             previous = actual
-        assert last_at is not None and previous is not None
+        assert (
+            last_at is not None
+            and previous is not None
+            and audit_schema_version is not None
+            and accounting_mode is not None
+        )
         summary = AuditSummary(
+            schema_version=audit_schema_version,
+            accounting_mode=accounting_mode,
             header_sha256=records[0]["event_sha256"],
             head_sha256=previous,
             final_sequence=len(records) - 1,
@@ -721,10 +869,28 @@ class AuditLog:
         )
         return _VerifiedAudit(tuple(records), summary)
 
-    def _verify_header(self, record: dict[str, Any]) -> None:
+    def _verify_header(self, record: dict[str, Any]) -> tuple[int, str]:
+        schema_version = record.get("audit_schema_version")
+        if type(schema_version) is not int:
+            raise ToolError(
+                "AUDIT_CHAIN_INVALID",
+                "The disclosure audit schema version must be an exact integer.",
+            )
+        if schema_version == LEGACY_AUDIT_SCHEMA_VERSION:
+            accounting_mode = LEGACY_ACCOUNTING_MODE
+        elif (
+            schema_version == AUDIT_SCHEMA_VERSION
+            and record.get("accounting_mode") == ACCOUNTING_MODE
+        ):
+            accounting_mode = ACCOUNTING_MODE
+        else:
+            raise ToolError(
+                "AUDIT_CHAIN_INVALID",
+                "The disclosure audit schema or accounting mode is unsupported.",
+            )
         expected = {
             "record_type": "header",
-            "audit_schema_version": AUDIT_SCHEMA_VERSION,
+            "audit_schema_version": schema_version,
             "sequence": 0,
             "package_id": self.binding.package_id,
             "session_id_sha256": self.binding.session_id_sha256,
@@ -736,6 +902,8 @@ class AuditLog:
             "limits_sha256": self.binding.limits_sha256,
             "previous_event_sha256": None,
         }
+        if schema_version == AUDIT_SCHEMA_VERSION:
+            expected["accounting_mode"] = ACCOUNTING_MODE
         for key, value in expected.items():
             if record.get(key) != value:
                 raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit header binding is invalid.")
@@ -745,8 +913,15 @@ class AuditLog:
             parse_utc(str(record.get("created_at", "")))
         except ValueError as exc:
             raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit header time is invalid.") from exc
+        return schema_version, accounting_mode
 
-    def _verify_tool_record(self, record: dict[str, Any], previous_disclosed: int) -> None:
+    def _verify_tool_record(
+        self,
+        record: dict[str, Any],
+        previous_disclosed: int,
+        *,
+        accounting_mode: str,
+    ) -> None:
         common = {
             "record_type",
             "sequence",
@@ -772,8 +947,6 @@ class AuditLog:
             raise ToolError(
                 "AUDIT_CHAIN_INVALID", "The disclosure audit tool schema is invalid."
             ) from exc
-        if record.get("tool") not in allowed_tools:
-            raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit tool name is invalid.")
         try:
             _require_hash(record.get("jsonrpc_request_id_sha256"), "request id")
             _require_hash(record.get("arguments_sha256"), "arguments")
@@ -789,7 +962,7 @@ class AuditLog:
             raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit call byte count is invalid.")
         result = record.get("result")
         if result == "committed_for_return":
-            if set(record) != common:
+            if record.get("tool") not in allowed_tools or set(record) != common:
                 raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit tool-call shape is invalid.")
             try:
                 if _sanitize_metadata(str(record.get("tool")), record.get("audit_metadata", {})) != record.get("audit_metadata"):
@@ -797,12 +970,51 @@ class AuditLog:
             except ValueError as exc:
                 raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit metadata is invalid.") from exc
         elif result == "rejected":
-            if set(record) != common | {"error_code"} or call_bytes != 0 or record.get("audit_metadata") != {}:
+            unadvertised = record.get("tool") == UNADVERTISED_TOOL_LABEL
+            expected = common | {"error_code"}
+            if unadvertised:
+                expected.add("requested_tool_sha256")
+            if (
+                set(record) != expected
+                or call_bytes != 0
+                or record.get("audit_metadata") != {}
+                or (not unadvertised and record.get("tool") not in allowed_tools)
+            ):
                 raise ToolError("AUDIT_CHAIN_INVALID", "The rejected audit-call shape is invalid.")
             if not isinstance(record.get("error_code"), str) or re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", record["error_code"]) is None:
                 raise ToolError("AUDIT_CHAIN_INVALID", "The rejected audit error code is invalid.")
+            if unadvertised:
+                if accounting_mode != ACCOUNTING_MODE:
+                    raise ToolError(
+                        "AUDIT_CHAIN_INVALID",
+                        "Legacy disclosure audits cannot contain unadvertised-tool records.",
+                    )
+                try:
+                    _require_hash(record.get("requested_tool_sha256"), "requested tool")
+                except ValueError as exc:
+                    raise ToolError(
+                        "AUDIT_CHAIN_INVALID",
+                        "The rejected audit tool binding is invalid.",
+                    ) from exc
+                if record["error_code"] != "MCP_INVALID_ARGUMENT":
+                    raise ToolError(
+                        "AUDIT_CHAIN_INVALID",
+                        "The unadvertised-tool rejection code is invalid.",
+                    )
         else:
             raise ToolError("AUDIT_CHAIN_INVALID", "The disclosure audit result marker is invalid.")
+
+    @staticmethod
+    def _require_current_accounting(summary: AuditSummary) -> None:
+        if (
+            summary.schema_version != AUDIT_SCHEMA_VERSION
+            or summary.accounting_mode != ACCOUNTING_MODE
+        ):
+            raise ToolError(
+                "AUDIT_SCHEMA_UNSUPPORTED",
+                "Legacy disclosure evidence is verification-only and cannot accept new calls.",
+                recovery="Close the legacy session and activate a new approved package session.",
+            )
 
     @staticmethod
     def _positive_counter(value: Any, previous: int) -> int:

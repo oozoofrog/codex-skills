@@ -1406,6 +1406,12 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertEqual(trace_header, store.read()["protocol_trace_header_sha256"])
         self.assertEqual(trace_header, activation[0]["data"]["protocol_trace_header_sha256"])
         self.assertEqual("mcp-protocol-trace.jsonl", activation[0]["data"]["protocol_trace_file"])
+        for source in (store.read(), state["mcp_session"], activation[0]["data"]):
+            self.assertEqual(2, source["audit_schema_version"])
+            self.assertEqual(
+                "complete_model_visible_result_v1",
+                source["disclosure_accounting"],
+            )
         trace_path = handoff / "mcp-protocol-trace.jsonl"
         self.assertEqual(0o600, trace_path.stat().st_mode & 0o777)
         trace_status = json.loads(
@@ -1416,7 +1422,145 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertEqual(trace_header, trace_status["protocol_trace"]["header_sha256"])
         self.assertFalse(trace_status["protocol_trace"]["closed"])
         self.assertFalse(completed["audit"]["footer"])
+        self.assertEqual(2, completed["audit"]["audit_schema_version"])
+        self.assertEqual(
+            "complete_model_visible_result_v1",
+            completed["audit"]["disclosure_accounting"],
+        )
         self.run_cli("verify", "--handoff-dir", str(handoff))
+
+    def test_actual_legacy_schema3_session_remains_closable_and_verifiable(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, session_hash, _ = self.activate(handoff)
+
+        audit_path = handoff / "mcp-audit.jsonl"
+        records = [
+            json.loads(line)
+            for line in audit_path.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(1, len(records))
+        header = records[0]
+        header["audit_schema_version"] = 1
+        header.pop("accounting_mode")
+        header.pop("event_sha256")
+        header["event_sha256"] = self.module.sha256_bytes(
+            self.module.canonical_json_bytes(header)
+        )
+        legacy_header = header["event_sha256"]
+        audit_path.write_text(
+            json.dumps(
+                header,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        audit_path.chmod(0o600)
+
+        state = self.load(handoff / "state.json")
+        receipt = self.load(handoff / "receipt.json")
+        state["mcp_session"].pop("audit_schema_version")
+        state["mcp_session"].pop("disclosure_accounting")
+        state["mcp_session"]["audit_header_sha256"] = legacy_header
+        for event in receipt["events"]:
+            if event["type"] == "mcp_activated":
+                event["data"].pop("audit_schema_version")
+                event["data"].pop("disclosure_accounting")
+                event["data"]["audit_header_sha256"] = legacy_header
+
+        previous = None
+        for sequence, event in enumerate(receipt["events"], start=1):
+            event["sequence"] = sequence
+            event["previous_event_hash"] = previous
+            event["event_hash"] = self.module.event_hash(event)
+            previous = event["event_hash"]
+        (handoff / "state.json").write_text(
+            json.dumps(state, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        (handoff / "receipt.json").write_text(
+            json.dumps(receipt, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        with store.locked() as transaction:
+            runtime = transaction.read()
+            runtime.pop("audit_schema_version")
+            runtime.pop("disclosure_accounting")
+            runtime["audit_header_sha256"] = legacy_header
+            runtime["revision"] += 1
+            runtime["updated_at"] = self.module.utc_now()
+            transaction.write(runtime)
+
+        verified = self.module.verify_package(handoff)
+        self.assertEqual("active", verified["state"]["mcp_session"]["status"])
+        status_output = io.StringIO()
+        with (
+            mock.patch.object(self.module, "runtime_store_for", return_value=store),
+            mock.patch.object(
+                self.module,
+                "controller_lease_is_live",
+                return_value=True,
+            ),
+            redirect_stdout(status_output),
+        ):
+            self.module.command_mcp_status(SimpleNamespace(handoff_dir=str(handoff)))
+        status_payload = json.loads(status_output.getvalue())
+        self.assertFalse(status_payload["effective_authorized"])
+        self.assertEqual(1, status_payload["audit"]["audit_schema_version"])
+        stopped = self.module.stop_mcp_authorization(handoff, store)
+        self.assertEqual("revoked", stopped["authorization"]["status"])
+        self.assertEqual(1, stopped["audit"]["audit_schema_version"])
+        self.assertEqual(
+            "legacy_tool_body_estimate",
+            stopped["audit"]["disclosure_accounting"],
+        )
+
+        verified = self.module.verify_package(handoff)
+        self.assertEqual("revoked", verified["state"]["mcp_session"]["status"])
+        self.assertNotIn(
+            "disclosure_accounting", verified["state"]["mcp_session"]
+        )
+        self.assertEqual(legacy_header, verified["state"]["mcp_session"]["audit_header_sha256"])
+        audit_status = self.module.mcp_audit_status(verified)
+        self.assertEqual(1, audit_status["audit_schema_version"])
+        self.assertEqual("legacy_tool_body_estimate", audit_status["disclosure_accounting"])
+        self.assertTrue(audit_status["footer"])
+        self.assertEqual(session_hash, store.read()["session_id_sha256"])
+
+    def test_current_audit_cannot_be_downgraded_by_stripping_receipt_fields(self) -> None:
+        handoff = self.prepare_and_approve()
+        self.activate(handoff)
+        state = self.load(handoff / "state.json")
+        receipt = self.load(handoff / "receipt.json")
+        state["mcp_session"].pop("audit_schema_version")
+        state["mcp_session"].pop("disclosure_accounting")
+        for event in receipt["events"]:
+            if event["type"] == "mcp_activated":
+                event["data"].pop("audit_schema_version")
+                event["data"].pop("disclosure_accounting")
+        previous = None
+        for sequence, event in enumerate(receipt["events"], start=1):
+            event["sequence"] = sequence
+            event["previous_event_hash"] = previous
+            event["event_hash"] = self.module.event_hash(event)
+            previous = event["event_hash"]
+        (handoff / "state.json").write_text(
+            json.dumps(state, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        (handoff / "receipt.json").write_text(
+            json.dumps(receipt, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            self.module.HandoffError,
+            "compatibility requires an actual legacy",
+        ):
+            self.module.verify_package(handoff)
 
     def test_concurrent_normal_stop_records_one_receipt_and_one_global_binding(self) -> None:
         handoff = self.prepare_and_approve()
@@ -1855,6 +1999,11 @@ class WebMcpRuntimeTests(unittest.TestCase):
             self.run_cli("mcp-verify-audit", "--handoff-dir", str(handoff)).stdout
         )
         self.assertTrue(verified_audit["audit"]["valid"])
+        self.assertEqual(2, verified_audit["audit"]["audit_schema_version"])
+        self.assertEqual(
+            "complete_model_visible_result_v1",
+            verified_audit["audit"]["disclosure_accounting"],
+        )
         diagnostic = json.loads(
             self.run_cli(
                 "mcp-protocol-trace", "--handoff-dir", str(handoff), "--json"
@@ -1883,6 +2032,58 @@ class WebMcpRuntimeTests(unittest.TestCase):
                 self.load(handoff / "manifest.json"),
                 manifest_sha256=self.module.sha256_file(handoff / "manifest.json"),
             )
+
+    def test_terminal_package_and_receipt_must_match_actual_audit_footer(self) -> None:
+        for tamper in ("counter", "reason", "footer", "timestamp"):
+            with self.subTest(tamper=tamper):
+                self.use_runtime_home(f"terminal-audit-{tamper}")
+                handoff = self.prepare_and_approve()
+                store, _, _ = self.activate(handoff)
+                self.module.stop_mcp_authorization(handoff, store)
+
+                state = self.load(handoff / "state.json")
+                receipt = self.load(handoff / "receipt.json")
+                terminal = next(
+                    event for event in receipt["events"] if event["type"] == "mcp_revoked"
+                )
+                if tamper == "counter":
+                    state["mcp_session"]["disclosed_bytes"] += 1
+                    terminal["data"]["disclosed_bytes"] += 1
+                elif tamper == "reason":
+                    state["mcp_session"]["reason"] = "remote_stop"
+                    terminal["data"]["reason"] = "remote_stop"
+                elif tamper == "footer":
+                    state["mcp_session"]["footer"] = False
+                else:
+                    state["mcp_session"]["last_committed_at"] = (
+                        "1970-01-01T00:00:00Z"
+                    )
+                previous = None
+                for sequence, event in enumerate(receipt["events"], start=1):
+                    event["sequence"] = sequence
+                    event["previous_event_hash"] = previous
+                    event["event_hash"] = self.module.event_hash(event)
+                    previous = event["event_hash"]
+                (handoff / "state.json").write_text(
+                    json.dumps(state, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                (handoff / "receipt.json").write_text(
+                    json.dumps(receipt, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(
+                    self.module.HandoffError,
+                    "does not match its audit footer",
+                ):
+                    self.module.verify_package(handoff)
+                with self.assertRaisesRegex(
+                    self.module.HandoffError,
+                    "does not match its audit footer",
+                ):
+                    self.module.stop_mcp_authorization(handoff, store)
+                self.assertEqual("revoked", store.read()["status"])
 
     def test_parent_shutdown_footer_is_eof_observed_and_receipt_bound(self) -> None:
         handoff = self.prepare_and_approve()
@@ -2124,6 +2325,95 @@ class WebMcpRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(1, groups["gptpro_package_info"]["argument_group_ordinal"])
         self.assertEqual(2, groups["gptpro_repo_search"]["argument_group_ordinal"])
+
+    def test_request_correlation_keeps_unadvertised_tool_identities_internal(self) -> None:
+        session_hash = "a" * 64
+        verified = {"state": {"mcp_session": {"session_id_sha256": session_hash}}}
+        rpc_hash = hashlib.sha256(b"unadvertised-rpc").hexdigest()
+        first_tool_hash = hashlib.sha256(b"unknown-tool-one").hexdigest()
+        second_tool_hash = hashlib.sha256(b"unknown-tool-two").hexdigest()
+        arguments_hash = hashlib.sha256(b"same-arguments").hexdigest()
+        trace_summary = SimpleNamespace(
+            truncated=False,
+            closed=True,
+            close_reason="parent_shutdown",
+            events=tuple(
+                {
+                    "sequence": index,
+                    "method": "tools_call",
+                    "stage": "response",
+                    "outcome": "response_flushed",
+                }
+                for index in range(1, 4)
+            ),
+        )
+        audits = tuple(
+            {
+                "audit_sequence": index,
+                "tool": "<unadvertised>",
+                "requested_tool_sha256": tool_hash,
+                "jsonrpc_request_id_sha256": rpc_hash,
+                "arguments_sha256": arguments_hash,
+                "disclosure_bytes": 0,
+                "result": "rejected",
+            }
+            for index, tool_hash in enumerate(
+                (first_tool_hash, second_tool_hash, first_tool_hash), start=1
+            )
+        )
+        captured = {
+            "schema_version": 1,
+            "status": "captured",
+            "private_contract": (
+                "tunnel-client-0.0.12-881c9a8fed7cccbe6607cd419863bbca506b8215"
+            ),
+            "capture_window_complete": True,
+            "admin_events_observed": 3,
+            "terminal_command_events": 3,
+            "terminal_error_events": 0,
+            "events": [
+                {
+                    "ordinal": index,
+                    "outcome": "forwarded",
+                    "outer_request_id_hmac_sha256": outer,
+                    "rpc_request_id_hmac_sha256": "e" * 64,
+                    "jsonrpc_request_id_sha256": rpc_hash,
+                }
+                for index, outer in enumerate(("b" * 64, "c" * 64, "d" * 64), start=1)
+            ],
+            "privacy": {
+                "scope": "terminal_identifiers_ephemeral_session_hmac_sha256",
+                "raw_identifiers_persisted": False,
+                "raw_payloads_persisted": False,
+                "hmac_key_persisted": False,
+                "stable_join_hashes_exposed_in_terminal": False,
+                "raw_http_logging_enabled": False,
+            },
+        }
+        fake_audit = SimpleNamespace(diagnostic_tool_records=lambda: audits)
+        with (
+            mock.patch.object(
+                self.module,
+                "verify_bound_protocol_trace",
+                return_value=(None, trace_summary, None, True),
+            ),
+            mock.patch.object(self.module, "audit_log_for", return_value=fake_audit),
+        ):
+            report = self.module.mcp_request_correlation_payload(verified, captured)
+
+        self.assertEqual("correlated", report["status"])
+        self.assertEqual(
+            [1, 2, 1],
+            [event["argument_group_ordinal"] for event in report["events"]],
+        )
+        groups = report["analysis"]["duplicate_argument_groups"]
+        self.assertEqual(1, len(groups))
+        self.assertEqual(2, groups[0]["physical_calls"])
+        self.assertEqual("distinct_outer_requests", groups[0]["classification"])
+        serialized = json.dumps(report, sort_keys=True)
+        self.assertNotIn("requested_tool_sha256", serialized)
+        self.assertNotIn(first_tool_hash, serialized)
+        self.assertNotIn(second_tool_hash, serialized)
 
     def test_request_correlation_rejects_an_incomplete_admin_ring_window(self) -> None:
         report = self.module.mcp_request_correlation_payload(
@@ -2522,6 +2812,50 @@ class WebMcpRuntimeTests(unittest.TestCase):
         )
         self.run_cli("verify", "--handoff-dir", str(handoff))
 
+    def test_stop_reconciles_faulted_postappend_ambiguity_footer(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, session_hash, _ = self.activate(handoff)
+        verified = self.module.verify_package(handoff)
+        summary = self.module.audit_log_for(verified, session_hash).append_footer(
+            "commit_outcome_uncertain"
+        )
+        store.transition(session_hash, "active", "faulted")
+
+        # Structural verification keeps this durable close-before-package
+        # crash window recoverable, while the active authorization gate still
+        # rejects the closed audit.
+        self.assertTrue(summary.footer)
+        self.assertEqual(
+            "active",
+            self.module.verify_package(handoff)["state"]["mcp_session"]["status"],
+        )
+        with self.assertRaisesRegex(
+            self.module.HandoffError,
+            "closed audit",
+        ):
+            self.module.mcp_audit_status(self.module.verify_package(handoff))
+
+        recovered = self.module.stop_mcp_authorization(handoff, store)
+        self.assertEqual("revoked", recovered["authorization"]["status"])
+        self.assertEqual(
+            "commit_outcome_uncertain",
+            recovered["authorization"]["revoked_reason"],
+        )
+        final = self.module.verify_package(handoff)
+        self.assertEqual("revoked", final["state"]["mcp_session"]["status"])
+        self.assertEqual(
+            "commit_outcome_uncertain",
+            final["state"]["mcp_session"]["reason"],
+        )
+        self.assertEqual(
+            "commit_outcome_uncertain",
+            next(
+                event["data"]["reason"]
+                for event in final["receipt"]["events"]
+                if event["type"] == "mcp_revoked"
+            ),
+        )
+
     def test_late_activation_failure_does_not_rewrite_external_revoke(self) -> None:
         handoff = self.prepare_and_approve()
         store, session_hash, _ = self.activate(handoff)
@@ -2668,6 +3002,42 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertTrue(final_trace["lifecycle_binding_valid"])
         self.run_cli("verify", "--handoff-dir", str(handoff))
 
+    def test_status_denies_a_closed_audit_active_state_crash_window(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, session_hash, _ = self.activate(handoff)
+        verified = self.module.verify_package(handoff)
+        closed = self.module.audit_log_for(verified, session_hash).append_footer(
+            "commit_outcome_uncertain"
+        )
+        self.assertTrue(closed.footer)
+
+        with self.module.ControllerLease(store, session_hash):
+            status = json.loads(
+                self.run_cli(
+                    "mcp-status",
+                    "--handoff-dir",
+                    str(handoff),
+                    "--json",
+                ).stdout
+            )
+        self.assertEqual("active", status["authorization"]["status"])
+        self.assertTrue(status["audit"]["valid"])
+        self.assertTrue(status["audit"]["footer"])
+        self.assertFalse(status["effective_authorized"])
+        self.assertTrue(status["split_brain"])
+        self.assertIn("run_mcp_stop_for_exact_package", status["recovery_actions"])
+
+        recovered = self.module.stop_mcp_authorization(handoff, store)
+        self.assertEqual("revoked", recovered["authorization"]["status"])
+        self.assertEqual(
+            "commit_outcome_uncertain",
+            recovered["authorization"]["revoked_reason"],
+        )
+        self.assertEqual(
+            "revoked",
+            self.module.verify_package(handoff)["state"]["mcp_session"]["status"],
+        )
+
     def test_stop_emergency_denies_exact_session_without_rewriting_damaged_evidence(self) -> None:
         for index, artifact in enumerate(
             ("manifest", "state", "receipt", "archive", "audit")
@@ -2756,6 +3126,50 @@ class WebMcpRuntimeTests(unittest.TestCase):
                     self.module.control_socket_path(store.root), session_hash
                 )
                 broad_signal.assert_not_called()
+
+    def test_valid_but_replaced_audit_header_triggers_global_denial_only(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, session_hash, _ = self.activate(handoff)
+        audit_path = handoff / "mcp-audit.jsonl"
+        records = [
+            json.loads(line)
+            for line in audit_path.read_text(encoding="utf-8").splitlines()
+        ]
+        records[0]["created_at"] = "2026-01-01T00:00:00Z"
+        records[0].pop("event_sha256")
+        records[0]["event_sha256"] = self.module.sha256_bytes(
+            self.module.canonical_json_bytes(records[0])
+        )
+        audit_path.write_text(
+            "".join(
+                json.dumps(
+                    record,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                + "\n"
+                for record in records
+            ),
+            encoding="utf-8",
+        )
+        audit_path.chmod(0o600)
+        before_state = (handoff / "state.json").read_bytes()
+        before_receipt = (handoff / "receipt.json").read_bytes()
+        replaced_audit = audit_path.read_bytes()
+
+        result = self.module.revoke_mcp_authorization_fail_closed(handoff, store)
+
+        self.assertFalse(result["package_evidence_available"])
+        self.assertTrue(result["authorization_denied"])
+        self.assertEqual("faulted", result["authorization_status"])
+        self.assertFalse(result["revocation_receipt_recorded"])
+        self.assertFalse(result["authorization_revoked"])
+        self.assertEqual(session_hash, result["authorization"]["session_id_sha256"])
+        self.assertEqual(before_state, (handoff / "state.json").read_bytes())
+        self.assertEqual(before_receipt, (handoff / "receipt.json").read_bytes())
+        self.assertEqual(replaced_audit, audit_path.read_bytes())
+        self.assertEqual("faulted", store.read()["status"])
 
     def test_stop_ack_loss_still_reports_durable_exact_child_evidence(self) -> None:
         handoff = self.prepare_and_approve()
@@ -3422,6 +3836,90 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertNotIn("runtime_child_stopped", store.read())
         self.run_cli("verify", "--handoff-dir", str(handoff))
 
+    def test_recover_reconciles_terminal_package_commit_crash_on_rerun(self) -> None:
+        handoff = self.prepare_and_approve()
+        store, _, _ = self.activate(handoff)
+        command = [
+            "mcp-recover",
+            "--handoff-dir",
+            str(handoff),
+            "--confirm-controller-lost",
+        ]
+        with mock.patch.object(
+            self.module,
+            "_record_terminal_package_session",
+            side_effect=self.module.HandoffError("injected package commit failure"),
+        ):
+            failed = self.run_cli(*command, expected=2)
+        self.assertIn("rerun mcp-recover", failed.stderr)
+        self.assertEqual("revoked", store.read()["status"])
+        self.assertEqual(
+            "active", self.load(handoff / "state.json")["mcp_session"]["status"]
+        )
+
+        recovered = json.loads(self.run_cli(*command).stdout)
+        self.assertEqual("revoked", recovered["authorization"]["status"])
+        self.assertEqual("terminal_package_reconciled", recovered["recovery_mode"])
+        self.assertTrue(recovered["package_evidence_recovered"])
+        self.assertTrue(recovered["audit"]["footer"])
+        self.assertFalse(recovered["tunnel_runtime_stopped"])
+        self.assertEqual(
+            "revoked", self.load(handoff / "state.json")["mcp_session"]["status"]
+        )
+        receipt = self.load(handoff / "receipt.json")
+        self.assertEqual(1, len(self.module.receipt_events(receipt, "mcp_revoked")))
+        self.run_cli("verify", "--handoff-dir", str(handoff))
+
+    def test_recover_does_not_mislabel_an_operational_failure_as_invalid_evidence(
+        self,
+    ) -> None:
+        handoff = self.prepare_and_approve()
+        store, _, _ = self.activate(handoff)
+        original_package = {
+            path.name: path.read_bytes()
+            for path in handoff.iterdir()
+            if path.is_file()
+        }
+        with mock.patch.object(
+            self.module,
+            "recover_interrupted_mcp_activation",
+            side_effect=self.module.HandoffError(
+                "LOCK_TIMEOUT: The package lifecycle lock is busy."
+            ),
+        ):
+            recovered = json.loads(
+                self.run_cli(
+                    "mcp-recover",
+                    "--handoff-dir",
+                    str(handoff),
+                    "--confirm-controller-lost",
+                ).stdout
+            )
+
+        self.assertEqual("global_only_faulted", recovered["recovery_mode"])
+        self.assertFalse(recovered["package_evidence_recovered"])
+        self.assertEqual("unavailable", recovered["audit"]["condition"])
+        self.assertEqual("RECOVERY_FAILED", recovered["audit"]["code"])
+        self.assertEqual("faulted", recovered["authorization"]["status"])
+        self.assertEqual("faulted", store.read()["status"])
+        self.assertEqual(
+            "controller_lost_recovery_failed", store.read()["orphaned_reason"]
+        )
+        self.assertEqual("unavailable", store.read()["audit_recovery_status"])
+        self.assertEqual(
+            original_package,
+            {
+                path.name: path.read_bytes()
+                for path in handoff.iterdir()
+                if path.is_file()
+            },
+        )
+        audit = self.module.audit_log_for(
+            self.module.verify_package(handoff),
+            recovered["authorization"]["session_id_sha256"],
+        ).verify()
+        self.assertFalse(audit.footer)
+
     def test_pre_audit_crash_recovery_faults_global_and_retires_only_stale_socket(self) -> None:
         handoff = self.prepare_and_approve()
         store, session_hash = self.interrupt_before_audit_header(handoff)
@@ -3465,6 +3963,181 @@ class WebMcpRuntimeTests(unittest.TestCase):
         ]
         self.assertEqual(1, len(failures))
         self.run_cli("verify", "--handoff-dir", str(handoff))
+
+    def test_prepublication_recovery_faults_global_on_actual_audit_contract_drift(self) -> None:
+        handoff = self.prepare_and_approve()
+        verified, preflight = self.preflight(handoff)
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        session_hash = hashlib.sha256(b"prepublication-audit-drift").hexdigest()
+        self.module.begin_mcp_activation(
+            verified,
+            store,
+            session_id_sha256=session_hash,
+            preflight=preflight,
+        )
+        self.assertIsNone(self.load(handoff / "state.json")["mcp_session"])
+        self.assertEqual(2, store.read()["audit_schema_version"])
+
+        audit_path = handoff / "mcp-audit.jsonl"
+        header = json.loads(audit_path.read_text(encoding="utf-8"))
+        header["audit_schema_version"] = 1
+        header.pop("accounting_mode")
+        header.pop("event_sha256")
+        header["event_sha256"] = self.module.sha256_bytes(
+            self.module.canonical_json_bytes(header)
+        )
+        audit_path.write_text(
+            json.dumps(
+                header,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        audit_path.chmod(0o600)
+        original_package = {
+            path.name: path.read_bytes()
+            for path in handoff.iterdir()
+            if path.is_file()
+        }
+
+        recovered = json.loads(
+            self.run_cli(
+                "mcp-recover",
+                "--handoff-dir",
+                str(handoff),
+                "--confirm-controller-lost",
+            ).stdout
+        )
+        self.assertEqual("global_only_faulted", recovered["recovery_mode"])
+        self.assertFalse(recovered["package_evidence_recovered"])
+        self.assertEqual("invalid", recovered["audit"]["condition"])
+        self.assertEqual("AUDIT_OR_STATE_MISMATCH", recovered["audit"]["code"])
+        self.assertEqual("faulted", recovered["authorization"]["status"])
+        self.assertTrue(recovered["orphan_child_may_remain"])
+        self.assertFalse(recovered["tunnel_runtime_stopped"])
+        self.assertEqual("faulted", store.read()["status"])
+        self.assertEqual(
+            "controller_lost_evidence_mismatch",
+            store.read()["orphaned_reason"],
+        )
+        self.assertEqual("invalid", store.read()["audit_recovery_status"])
+        self.assertEqual(2, store.read()["audit_schema_version"])
+        self.assertIsNone(self.load(handoff / "state.json")["mcp_session"])
+        self.assertEqual(
+            original_package,
+            {
+                path.name: path.read_bytes()
+                for path in handoff.iterdir()
+                if path.is_file()
+            },
+        )
+        self.assertEqual(1, len(audit_path.read_text(encoding="utf-8").splitlines()))
+
+    def test_prepublication_current_audit_rejects_stripped_global_accounting(self) -> None:
+        handoff = self.prepare_and_approve()
+        verified, preflight = self.preflight(handoff)
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        session_hash = hashlib.sha256(b"prepublication-stripped-current").hexdigest()
+        self.module.begin_mcp_activation(
+            verified,
+            store,
+            session_id_sha256=session_hash,
+            preflight=preflight,
+        )
+        with store.locked() as transaction:
+            runtime = transaction.read()
+            runtime.pop("audit_schema_version")
+            runtime.pop("disclosure_accounting")
+            runtime["revision"] += 1
+            runtime["updated_at"] = self.module.utc_now()
+            transaction.write(runtime)
+        original_package = {
+            path.name: path.read_bytes()
+            for path in handoff.iterdir()
+            if path.is_file()
+        }
+
+        recovered = json.loads(
+            self.run_cli(
+                "mcp-recover",
+                "--handoff-dir",
+                str(handoff),
+                "--confirm-controller-lost",
+            ).stdout
+        )
+        self.assertEqual("global_only_faulted", recovered["recovery_mode"])
+        self.assertFalse(recovered["package_evidence_recovered"])
+        self.assertEqual("invalid", recovered["audit"]["condition"])
+        self.assertEqual("AUDIT_OR_STATE_MISMATCH", recovered["audit"]["code"])
+        self.assertEqual("faulted", recovered["authorization"]["status"])
+        self.assertEqual("faulted", store.read()["status"])
+        self.assertEqual(
+            "controller_lost_evidence_mismatch", store.read()["orphaned_reason"]
+        )
+        self.assertEqual("invalid", store.read()["audit_recovery_status"])
+        self.assertEqual(
+            original_package,
+            {
+                path.name: path.read_bytes()
+                for path in handoff.iterdir()
+                if path.is_file()
+            },
+        )
+
+    def test_prepublication_actual_legacy_audit_remains_closable(self) -> None:
+        handoff = self.prepare_and_approve()
+        verified, preflight = self.preflight(handoff)
+        store = self.module.RuntimeStateStore(root=self.runtime_root)
+        session_hash = hashlib.sha256(b"prepublication-legacy-audit").hexdigest()
+        self.module.begin_mcp_activation(
+            verified,
+            store,
+            session_id_sha256=session_hash,
+            preflight=preflight,
+        )
+
+        audit_path = handoff / "mcp-audit.jsonl"
+        header = json.loads(audit_path.read_text(encoding="utf-8"))
+        header["audit_schema_version"] = 1
+        header.pop("accounting_mode")
+        header.pop("event_sha256")
+        header["event_sha256"] = self.module.sha256_bytes(
+            self.module.canonical_json_bytes(header)
+        )
+        legacy_header = header["event_sha256"]
+        audit_path.write_text(
+            json.dumps(
+                header,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        audit_path.chmod(0o600)
+
+        # A genuine older pre-publication identity omitted the current pair
+        # and bound the actual v1 header.  That exact historical shape remains
+        # closure-compatible rather than being globally pinned to v2.
+        with store.locked() as transaction:
+            runtime = transaction.read()
+            runtime.pop("audit_schema_version")
+            runtime.pop("disclosure_accounting")
+            runtime["audit_header_sha256"] = legacy_header
+            runtime["revision"] += 1
+            runtime["updated_at"] = self.module.utc_now()
+            transaction.write(runtime)
+        recovered = self.module.recover_interrupted_mcp_activation(handoff, store)
+        self.assertEqual("revoked", recovered["authorization"]["status"])
+        self.assertEqual(1, recovered["audit"]["audit_schema_version"])
+        self.assertEqual(
+            "legacy_tool_body_estimate",
+            recovered["audit"]["disclosure_accounting"],
+        )
 
     def test_recover_retires_nonwritable_post_bind_stale_socket_in_private_parent(self) -> None:
         handoff = self.prepare_and_approve()
@@ -3535,7 +4208,7 @@ class WebMcpRuntimeTests(unittest.TestCase):
             },
         )
 
-    def test_corrupt_pre_audit_crash_is_faulted_but_active_audit_corruption_is_not_rewritten(self) -> None:
+    def test_corrupt_audit_faults_authorization_without_rewriting_package_evidence(self) -> None:
         pre_handoff = self.prepare_and_approve()
         pre_runtime = self.use_runtime_home("pre-corrupt-home")
         pre_store, _ = self.interrupt_before_audit_header(
@@ -3567,16 +4240,35 @@ class WebMcpRuntimeTests(unittest.TestCase):
                 else:
                     audit_path.write_bytes(b"{}\n")
                     audit_path.chmod(0o600)
-                rejected = self.run_cli(
+                original_package = {
+                    path.name: path.read_bytes()
+                    for path in handoff.iterdir()
+                    if path.is_file()
+                }
+                recovered = json.loads(
+                    self.run_cli(
                     "mcp-recover",
                     "--handoff-dir",
                     str(handoff),
                     "--confirm-controller-lost",
-                    expected=2,
+                    ).stdout
                 )
-                self.assertIn("after package activation", rejected.stderr)
-                self.assertEqual("active", store.read()["status"])
+                self.assertEqual("global_only_faulted", recovered["recovery_mode"])
+                self.assertFalse(recovered["package_evidence_recovered"])
+                self.assertEqual("faulted", recovered["authorization"]["status"])
+                self.assertTrue(recovered["orphan_child_may_remain"])
+                self.assertFalse(recovered["process_discovery_attempted"])
+                self.assertFalse(recovered["process_signal_attempted"])
+                self.assertEqual("faulted", store.read()["status"])
                 self.assertEqual("active", self.load(handoff / "state.json")["mcp_session"]["status"])
+                self.assertEqual(
+                    original_package,
+                    {
+                        path.name: path.read_bytes()
+                        for path in handoff.iterdir()
+                        if path.is_file()
+                    },
+                )
 
     def test_recover_rejects_wrong_handoff_and_faults_unavailable_package_without_process_kill(self) -> None:
         handoff = self.prepare_and_approve()

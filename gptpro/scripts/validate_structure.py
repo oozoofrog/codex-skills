@@ -92,7 +92,7 @@ EXPECTED_BASE_PLACEHOLDERS = {
     "TREE_SHA",
 }
 IGNORED_NAMES = {"__pycache__", ".DS_Store"}
-EXPECTED_MCP_SCHEMA_SHA256 = "2e35562d02bfbb71d08bef11cd0273fe067de1b87b96c484a3e5148acae5f723"
+EXPECTED_MCP_SCHEMA_SHA256 = "bb8141b0aa1abb0f044498c491454e2665e68f0f413879d5d8949b914e0e6927"
 
 
 class ValidationError(Exception):
@@ -270,6 +270,7 @@ def validate_mcp_foundation(skill_root: Path, errors: list[str]) -> None:
         "RESEARCH_SERVER_NAME",
         "RESEARCH_SERVER_VERSION",
         "RESEARCH_SERVER_INSTRUCTIONS",
+        "MAX_TOOL_NAME_BYTES",
         "DEFAULT_LIMITS",
         "HARD_LIMITS",
         "RESEARCH_DEFAULT_LIMITS",
@@ -284,6 +285,7 @@ def validate_mcp_foundation(skill_root: Path, errors: list[str]) -> None:
         "_string_property",
         "_output_schema",
         "canonical_json_bytes",
+        "validate_tool_name",
         "tool_schema_payload",
         "tool_schema_sha256",
         "research_tool_schema_payload",
@@ -376,6 +378,8 @@ def validate_mcp_foundation(skill_root: Path, errors: list[str]) -> None:
             "openWorldHint": False,
             "idempotentHint": True,
         }
+        if ast.literal_eval(assignments["MAX_TOOL_NAME_BYTES"]) != 128:
+            errors.append("Web MCP tool-name byte bound is unsafe")
         annotations = ast.literal_eval(assignments["COMMON_ANNOTATIONS"])
         if annotations != expected_annotations:
             errors.append("Web MCP common tool annotations are unsafe")

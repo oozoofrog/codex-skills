@@ -26,6 +26,8 @@ RESEARCH_SERVER_INSTRUCTIONS = (
     "or broader authorization."
 )
 
+MAX_TOOL_NAME_BYTES = 128
+
 DEFAULT_LIMITS: dict[str, int] = {
     "max_result_bytes": 65_536,
     "max_read_content_bytes": 49_152,
@@ -97,6 +99,20 @@ RESEARCH_HARD_LIMITS: dict[str, tuple[int, int]] = {
     "max_evidence_total_bytes": (1, 8 * 1_048_576),
     "max_diff_bytes": (1, 4 * 1_048_576),
 }
+
+
+def validate_tool_name(value: Any) -> str:
+    """Return one bounded MCP tool name without normalizing its identity."""
+
+    if not isinstance(value, str) or not value or "\0" in value:
+        raise ValueError("tool name is invalid")
+    try:
+        encoded = value.encode("utf-8", "strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError("tool name is invalid") from exc
+    if len(encoded) > MAX_TOOL_NAME_BYTES:
+        raise ValueError("tool name is invalid")
+    return value
 
 
 def _string_property(*, maximum: int) -> dict[str, Any]:

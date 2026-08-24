@@ -50,7 +50,16 @@ from runtime.gptpro_mcp.schema import (  # noqa: I001
     validate_limits as validate_mcp_limits,
 )
 from runtime.gptpro_mcp.analysis import AnalysisBinding, AnalysisLedger
-from runtime.gptpro_mcp.audit import AuditBinding, AuditLog, AuditSummary
+from runtime.gptpro_mcp.audit import (
+    ACCOUNTING_MODE as MCP_DISCLOSURE_ACCOUNTING,
+    AUDIT_SCHEMA_VERSION as MCP_AUDIT_SCHEMA_VERSION,
+    LEGACY_ACCOUNTING_MODE as MCP_LEGACY_DISCLOSURE_ACCOUNTING,
+    LEGACY_AUDIT_SCHEMA_VERSION as MCP_LEGACY_AUDIT_SCHEMA_VERSION,
+    UNADVERTISED_TOOL_LABEL,
+    AuditBinding,
+    AuditLog,
+    AuditSummary,
+)
 from runtime.gptpro_mcp.controller import (
     ActiveSession,
     ControllerError,
@@ -1732,12 +1741,13 @@ def mcp_prompt_guidance(
         "`path_page_size=1`, then use `gptpro_workspace_map` to narrow exploration. "
         "For search, explicitly set `max_results`, `context_lines`, `include`, and "
         "`exclude` within approved limits. For reads, request ordered non-overlapping "
-        "`ranges`. Invalid and rejected attempts consume the approved call budget."
+        "`ranges`. Attempts and rejections durably recorded by the governance audit consume "
+        "the approved call budget."
         if schema_version == SCHEMA_V4
         else "Call `gptpro_package_info` first with `include_paths=true` and "
         "`path_page_size=1`. For search, explicitly set `max_results`, `context_lines`, "
-        "and any `paths` list within the approved limits. Invalid and rejected tool "
-        "attempts consume the approved call budget."
+        "and any `paths` list within the approved limits. Tool attempts and rejections "
+        "durably recorded by the governance audit consume the approved call budget."
     )
     return "\n".join(
         [
@@ -2385,15 +2395,26 @@ def verify_schema3_mcp_session(
         "audit_file",
         "audit_header_sha256",
     }
+    status = session.get("status")
+    if status not in MCP_SESSION_STATUSES:
+        raise HandoffError("Schema-3 MCP session status is invalid")
+    audit_contract_fields = {"audit_schema_version", "disclosure_accounting"}
+    present_audit_contract = audit_contract_fields & set(session)
+    if int(manifest.get("schema_version", 0)) == SCHEMA_V4:
+        required_fields.update(audit_contract_fields)
+    if present_audit_contract and (
+        present_audit_contract != audit_contract_fields
+        or type(session.get("audit_schema_version")) is not int
+        or session.get("audit_schema_version") != MCP_AUDIT_SCHEMA_VERSION
+        or session.get("disclosure_accounting") != MCP_DISCLOSURE_ACCOUNTING
+    ):
+        raise HandoffError("Schema-3 MCP disclosure accounting binding is invalid")
     if int(manifest.get("schema_version", 0)) == SCHEMA_V4:
         required_fields.update({"analysis_file", "analysis_header_sha256"})
     if not required_fields <= set(session):
         raise HandoffError(
             "Schema-3 runtime sessions are not supported without verified package-local evidence"
         )
-    status = session.get("status")
-    if status not in MCP_SESSION_STATUSES:
-        raise HandoffError("Schema-3 MCP session status is invalid")
     session_hash = require_sha256(
         session.get("session_id_sha256"), label="Schema-3 MCP session ID hash"
     )
@@ -2523,6 +2544,13 @@ def verify_schema3_mcp_session(
         "audit_file": "mcp-audit.jsonl",
         "audit_header_sha256": session["audit_header_sha256"],
     }
+    if present_audit_contract:
+        expected_activation.update(
+            {
+                "audit_schema_version": MCP_AUDIT_SCHEMA_VERSION,
+                "disclosure_accounting": MCP_DISCLOSURE_ACCOUNTING,
+            }
+        )
     if trace_bound:
         expected_activation.update(
             {
@@ -4187,6 +4215,40 @@ def verify_package(
         "manifest_sha256": expected_hashes["manifest_sha256"],
     }
     package_session = state.get("mcp_session")
+    if is_mcp_schema(schema_version) and isinstance(package_session, dict):
+        session_hash = require_sha256(
+            package_session.get("session_id_sha256"),
+            label="MCP audit session hash",
+        )
+        try:
+            audit_summary = audit_log_for(verified_result, session_hash).verify()
+        except ToolError as exc:
+            raise runtime_failure(exc) from exc
+        if audit_summary.header_sha256 != package_session.get("audit_header_sha256"):
+            raise HandoffError("MCP audit header differs from package session state")
+        audit_contract_fields = {"audit_schema_version", "disclosure_accounting"}
+        present_audit_contract = audit_contract_fields & set(package_session)
+        if present_audit_contract:
+            if (
+                present_audit_contract != audit_contract_fields
+                or type(package_session.get("audit_schema_version")) is not int
+                or package_session.get("audit_schema_version")
+                != audit_summary.schema_version
+                or package_session.get("disclosure_accounting")
+                != audit_summary.accounting_mode
+            ):
+                raise HandoffError(
+                    "MCP audit accounting differs from package session state"
+                )
+        elif not (
+            schema_version == SCHEMA_V3
+            and audit_summary.schema_version == MCP_LEGACY_AUDIT_SCHEMA_VERSION
+            and audit_summary.accounting_mode == MCP_LEGACY_DISCLOSURE_ACCOUNTING
+        ):
+            raise HandoffError(
+                "MCP disclosure accounting compatibility requires an actual legacy Schema-3 audit"
+            )
+        assert_package_audit_summary_binding(verified_result, audit_summary)
     if schema_version == SCHEMA_V4 and isinstance(package_session, dict):
         session_hash = require_sha256(
             package_session.get("session_id_sha256"),
@@ -4516,6 +4578,16 @@ def bind_terminal_runtime_evidence(
 
 def audit_summary_payload(summary: AuditSummary) -> dict[str, Any]:
     return {
+        "audit_schema_version": summary.schema_version,
+        "disclosure_accounting": summary.accounting_mode,
+        **audit_state_payload(summary),
+    }
+
+
+def audit_state_payload(summary: AuditSummary) -> dict[str, Any]:
+    """Package-state fields shared by legacy and current audit receipts."""
+
+    return {
         "audit_header_sha256": summary.header_sha256,
         "audit_head_sha256": summary.head_sha256,
         "audit_final_sequence": summary.final_sequence,
@@ -4528,6 +4600,89 @@ def audit_summary_payload(summary: AuditSummary) -> dict[str, Any]:
     }
 
 
+def assert_package_audit_summary_binding(
+    verified: dict[str, Any], summary: AuditSummary
+) -> None:
+    """Bind the actual audit summary to package state and terminal receipt evidence."""
+
+    session = verified["state"].get("mcp_session")
+    if not isinstance(session, dict):
+        raise HandoffError("This package has no MCP session audit to verify")
+    if summary.header_sha256 != session.get("audit_header_sha256"):
+        raise HandoffError("MCP audit header does not match package session state")
+    status = session.get("status")
+    if status not in {"revoked", "expired"}:
+        # A footer may be durably committed just before the package terminal
+        # transition.  verify_package must leave that crash window recoverable;
+        # callers that require a fully coherent status use mcp_audit_status().
+        return
+    if not summary.footer or not isinstance(summary.close_reason, str):
+        raise HandoffError("MCP terminal package session has an open audit")
+    expected = {
+        **audit_state_payload(summary),
+        "reason": summary.close_reason,
+    }
+    if any(session.get(key) != value for key, value in expected.items()):
+        raise HandoffError("MCP terminal package state does not match its audit footer")
+    event_type = "mcp_revoked" if status == "revoked" else "mcp_expired"
+    terminal_events = receipt_events(verified["receipt"], event_type)
+    if len(terminal_events) != 1:
+        raise HandoffError("MCP terminal package receipt is missing or duplicated")
+    event_data = terminal_events[0].get("data")
+    receipt_expected = {
+        "session_id_sha256": session.get("session_id_sha256"),
+        "audit_final_sequence": summary.final_sequence,
+        "audit_final_head_sha256": summary.head_sha256,
+        "tool_calls": summary.tool_calls,
+        "disclosed_bytes": summary.disclosed_bytes,
+        "reason": summary.close_reason,
+    }
+    if not isinstance(event_data, dict) or any(
+        event_data.get(key) != value for key, value in receipt_expected.items()
+    ):
+        raise HandoffError("MCP terminal package receipt does not match its audit footer")
+
+
+def assert_mcp_audit_summary_binding(
+    verified: dict[str, Any],
+    runtime_state: dict[str, Any],
+    summary: AuditSummary,
+) -> None:
+    """Require the verified audit to retain its activation-time identities."""
+
+    package_session = verified["state"].get("mcp_session")
+    identities = [runtime_state]
+    if isinstance(package_session, dict):
+        identities.append(package_session)
+    contract_fields = {"audit_schema_version", "disclosure_accounting"}
+    current_contract = (
+        summary.schema_version == MCP_AUDIT_SCHEMA_VERSION
+        and summary.accounting_mode == MCP_DISCLOSURE_ACCOUNTING
+    )
+    legacy_contract = (
+        int(verified["schema_version"]) == SCHEMA_V3
+        and summary.schema_version == MCP_LEGACY_AUDIT_SCHEMA_VERSION
+        and summary.accounting_mode == MCP_LEGACY_DISCLOSURE_ACCOUNTING
+    )
+    if not current_contract and not legacy_contract:
+        raise HandoffError("MCP disclosure accounting contract is unsupported")
+    for identity in identities:
+        header = identity.get("audit_header_sha256")
+        if header is not None and (
+            require_sha256(header, label="MCP audit header hash")
+            != summary.header_sha256
+        ):
+            raise HandoffError("MCP audit header changed after activation")
+        present = contract_fields & set(identity)
+        if current_contract and (
+            present != contract_fields
+            or type(identity.get("audit_schema_version")) is not int
+            or identity.get("audit_schema_version") != summary.schema_version
+            or identity.get("disclosure_accounting") != summary.accounting_mode
+        ):
+            raise HandoffError("MCP disclosure accounting changed after activation")
+        if legacy_contract and present:
+            raise HandoffError("MCP disclosure accounting changed after activation")
 def assert_mcp_runtime_binding(
     verified: dict[str, Any],
     runtime_state: dict[str, Any] | None,
@@ -4584,6 +4739,46 @@ def assert_mcp_runtime_binding(
         "workspace_binding_confirmed": True,
         "audit_file": "mcp-audit.jsonl",
     }
+    if isinstance(package_session, dict):
+        expected["audit_header_sha256"] = require_sha256(
+            package_session.get("audit_header_sha256"),
+            label="Package MCP audit header hash",
+        )
+    audit_contract_fields = {"audit_schema_version", "disclosure_accounting"}
+    runtime_audit_contract = audit_contract_fields & set(runtime_state)
+    package_audit_contract = (
+        audit_contract_fields & set(package_session)
+        if isinstance(package_session, dict)
+        else runtime_audit_contract
+    )
+    if isinstance(package_session, dict) and package_audit_contract != runtime_audit_contract:
+        raise HandoffError("Package and machine-global MCP accounting bindings differ")
+    if int(verified["schema_version"]) == SCHEMA_V4 and (
+        runtime_audit_contract != audit_contract_fields
+        or (
+            isinstance(package_session, dict)
+            and package_audit_contract != audit_contract_fields
+        )
+    ):
+        raise HandoffError("Schema-4 requires current MCP accounting bindings")
+    audit_identities = [(runtime_state, runtime_audit_contract)]
+    if isinstance(package_session, dict):
+        audit_identities.append((package_session, package_audit_contract))
+    for identity, present_audit_contract in audit_identities:
+        if present_audit_contract and (
+            present_audit_contract != audit_contract_fields
+            or type(identity.get("audit_schema_version")) is not int
+            or identity.get("audit_schema_version") != MCP_AUDIT_SCHEMA_VERSION
+            or identity.get("disclosure_accounting") != MCP_DISCLOSURE_ACCOUNTING
+        ):
+            raise HandoffError("Machine-global MCP disclosure accounting binding is invalid")
+    if runtime_audit_contract:
+        expected.update(
+            {
+                "audit_schema_version": MCP_AUDIT_SCHEMA_VERSION,
+                "disclosure_accounting": MCP_DISCLOSURE_ACCOUNTING,
+            }
+        )
     if int(verified["schema_version"]) == SCHEMA_V4:
         analysis_header = require_sha256(
             runtime_identity.get("analysis_header_sha256"),
@@ -4946,6 +5141,8 @@ def begin_mcp_activation(
         "last_activity_monotonic": preflight["last_activity_monotonic"],
         "idle_ttl_seconds": preflight["idle_ttl_seconds"],
         "audit_file": "mcp-audit.jsonl",
+        "audit_schema_version": MCP_AUDIT_SCHEMA_VERSION,
+        "disclosure_accounting": MCP_DISCLOSURE_ACCOUNTING,
     }
     begun = False
     try:
@@ -5055,6 +5252,8 @@ def _activation_receipt_data(
         "expires_at": runtime_state["expires_at"],
         "audit_file": "mcp-audit.jsonl",
         "audit_header_sha256": audit_header_sha256,
+        "audit_schema_version": runtime_state["audit_schema_version"],
+        "disclosure_accounting": runtime_state["disclosure_accounting"],
         "protocol_trace_file": TRACE_FILE_NAME,
         "protocol_trace_header_sha256": protocol_trace_header_sha256,
         **(
@@ -5107,7 +5306,14 @@ def complete_mcp_activation(
         )
     except (RuntimeStateError, ToolError) as exc:
         raise runtime_failure(exc) from exc
-    if audit_summary.header_sha256 != header_hash or audit_summary.final_sequence != 0:
+    if (
+        audit_summary.schema_version != MCP_AUDIT_SCHEMA_VERSION
+        or audit_summary.accounting_mode != MCP_DISCLOSURE_ACCOUNTING
+        or runtime_state.get("audit_schema_version") != MCP_AUDIT_SCHEMA_VERSION
+        or runtime_state.get("disclosure_accounting") != MCP_DISCLOSURE_ACCOUNTING
+        or audit_summary.header_sha256 != header_hash
+        or audit_summary.final_sequence != 0
+    ):
         raise HandoffError("MCP audit header changed before activation completed")
     if analysis_summary is not None and (
         analysis_summary.closed
@@ -5153,6 +5359,8 @@ def complete_mcp_activation(
         "expires_at": activation_data["expires_at"],
         "audit_file": "mcp-audit.jsonl",
         "audit_header_sha256": header_hash,
+        "audit_schema_version": MCP_AUDIT_SCHEMA_VERSION,
+        "disclosure_accounting": MCP_DISCLOSURE_ACCOUNTING,
         "protocol_trace_file": TRACE_FILE_NAME,
         "protocol_trace_header_sha256": trace_summary.header_sha256,
         **(
@@ -5497,7 +5705,7 @@ def recover_interrupted_mcp_activation(
     *,
     reason: str = "controller_lost",
 ) -> dict[str, Any]:
-    """Close an exact activating/faulted session without claiming its child stopped."""
+    """Reconcile an exact orphaned authorization without claiming its child stopped."""
 
     if reason not in {"controller_lost", "user_requested"}:
         raise HandoffError("MCP recovery reason is invalid")
@@ -5512,44 +5720,102 @@ def recover_interrupted_mcp_activation(
         verified,
         current,
         session_id_sha256=session_hash,
-        expected_statuses={"activating", "active", "revoking", "faulted"},
+        expected_statuses={
+            "activating",
+            "active",
+            "revoking",
+            "faulted",
+            "revoked",
+            "expired",
+        },
+    )
+    terminal_status = (
+        current["status"] if current["status"] in {"revoked", "expired"} else None
     )
     try:
         audit = audit_log_for(verified, session_hash)
-        summary, analysis_final, effective_reason = close_terminal_evidence(
-            verified,
-            session_hash,
-            audit,
-            requested_reason=reason,
-        )
-        if current["status"] == "active":
-            current = runtime_store.transition(session_hash, "active", "revoking")
-        recovered = runtime_store.transition(
-            session_hash,
-            current["status"],
-            "revoked",
-            updates={
-                "audit_final_sequence": summary.final_sequence,
-                "audit_final_head_sha256": summary.head_sha256,
-                "tool_calls": summary.tool_calls,
-                "disclosed_bytes": summary.disclosed_bytes,
-                "revoked_reason": effective_reason,
-                **(analysis_final or {}),
-            },
-        )
+        before = audit.verify()
+        # The machine-global activation already binds the audit contract even
+        # before package-session publication.  Always compare the actual log;
+        # otherwise a rewritten legacy header could be terminally committed as
+        # if it still satisfied the current accounting contract.
+        assert_mcp_audit_summary_binding(verified, current, before)
+        if terminal_status is not None:
+            summary = before
+            if not summary.footer or not isinstance(summary.close_reason, str):
+                raise HandoffError("Terminal MCP authorization has an open audit")
+            effective_reason = require_runtime_terminal_reason(
+                current,
+                status=terminal_status,
+                expected_reason=summary.close_reason,
+            )
+            analysis_final = close_analysis_ledger_if_research(
+                verified,
+                session_hash,
+                reason=effective_reason,
+            )
+            if (
+                analysis_final is not None
+                and analysis_final.get("analysis_close_reason") != effective_reason
+            ):
+                raise HandoffError(
+                    "Schema-4 analysis ledger close reason conflicts with the terminal audit"
+                )
+            recovered = bind_terminal_runtime_evidence(
+                runtime_store,
+                session_id_sha256=session_hash,
+                status=terminal_status,
+                reason=effective_reason,
+                summary=summary,
+                analysis_final=analysis_final,
+            )
+            if not _terminal_audit_matches_runtime(recovered, summary):
+                raise HandoffError(
+                    "Terminal MCP authorization does not match its terminal audit"
+                )
+        else:
+            summary, analysis_final, effective_reason = close_terminal_evidence(
+                verified,
+                session_hash,
+                audit,
+                requested_reason=reason,
+            )
+            if current["status"] == "active":
+                current = runtime_store.transition(session_hash, "active", "revoking")
+            recovered = runtime_store.transition(
+                session_hash,
+                current["status"],
+                "revoked",
+                updates={
+                    "audit_final_sequence": summary.final_sequence,
+                    "audit_final_head_sha256": summary.head_sha256,
+                    "tool_calls": summary.tool_calls,
+                    "disclosed_bytes": summary.disclosed_bytes,
+                    "revoked_reason": effective_reason,
+                    **(analysis_final or {}),
+                },
+            )
     except (RuntimeStateError, ToolError) as exc:
         raise runtime_failure(exc) from exc
 
     package_session = verified["state"].get("mcp_session")
     if isinstance(package_session, dict):
-        _record_terminal_package_session(
-            verified,
-            status="revoked",
-            event_type="mcp_revoked",
-            reason=effective_reason,
-            summary=summary,
-            analysis_final=analysis_final,
-        )
+        resulting_status = terminal_status or "revoked"
+        if package_session.get("status") == "active":
+            _record_terminal_package_session(
+                verified,
+                status=resulting_status,
+                event_type=(
+                    "mcp_revoked" if resulting_status == "revoked" else "mcp_expired"
+                ),
+                reason=effective_reason,
+                summary=summary,
+                analysis_final=analysis_final,
+            )
+        elif package_session.get("status") != resulting_status:
+            raise HandoffError(
+                "Terminal MCP authorization conflicts with package session state"
+            )
     else:
         receipt = load_json(handoff_dir / "receipt.json")
         if not receipt_events(receipt, "mcp_activation_failed"):
@@ -5565,7 +5831,13 @@ def recover_interrupted_mcp_activation(
                     else "ACTIVATION_CANCELLED",
                 },
             )
-    return {"authorization": recovered, "audit": audit_summary_payload(summary)}
+    return {
+        "authorization": recovered,
+        "audit": audit_summary_payload(summary),
+        "recovery_mode": (
+            "terminal_package_reconciled" if terminal_status is not None else "audit_closed"
+        ),
+    }
 
 
 def _terminal_audit_matches_runtime(
@@ -5600,6 +5872,7 @@ def _record_terminal_package_session(
     if not isinstance(session, dict):
         raise HandoffError("MCP terminal package state is missing its session")
     session_hash = require_sha256(session.get("session_id_sha256"), label="MCP session ID hash")
+    assert_mcp_audit_summary_binding(verified, session, summary)
     schema_version = int(verified["schema_version"])
     if schema_version == SCHEMA_V4:
         if not isinstance(analysis_final, dict) or set(analysis_final) != {
@@ -5626,7 +5899,7 @@ def _record_terminal_package_session(
             "status": status,
             timestamp_key: utc_now(),
             "reason": reason,
-            **audit_summary_payload(summary),
+            **audit_state_payload(summary),
             **(analysis_final or {}),
         }
     )
@@ -5677,6 +5950,7 @@ def stop_mcp_authorization(
         if current["status"] in {"revoked", "expired"}:
             terminal_status = current["status"]
             summary = audit_log_for(verified, session_hash).verify()
+            assert_mcp_audit_summary_binding(verified, current, summary)
             if not summary.footer or not isinstance(summary.close_reason, str):
                 raise HandoffError("Terminal MCP authorization has an open audit")
             effective_reason = require_runtime_terminal_reason(
@@ -5725,12 +5999,15 @@ def stop_mcp_authorization(
             # If it is unavailable, the caller's emergency path faults only the
             # exact global authorization and leaves every package byte untouched.
             audit = audit_log_for(verified, session_hash)
-            audit.verify()
+            before = audit.verify()
+            assert_mcp_audit_summary_binding(verified, current, before)
             runtime_store.transition(session_hash, "active", "revoking")
         elif current["status"] not in {"revoking", "expired", "faulted"}:
             raise HandoffError("MCP authorization is not in a stoppable state")
         else:
             audit = audit_log_for(verified, session_hash)
+            before = audit.verify()
+            assert_mcp_audit_summary_binding(verified, current, before)
         summary, analysis_final, effective_reason = close_terminal_evidence(
             verified,
             session_hash,
@@ -5799,6 +6076,7 @@ def deny_mcp_authorization_without_package(
     *,
     expected_session_id_sha256: str | None = None,
     reason: str = "package_evidence_unavailable",
+    audit_recovery_status: str = "unavailable",
 ) -> dict[str, Any]:
     """Atomically deny one exact runtime binding without trusting package bytes.
 
@@ -5810,6 +6088,8 @@ def deny_mcp_authorization_without_package(
 
     if re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", reason) is None:
         raise HandoffError("MCP emergency-denial reason is invalid")
+    if audit_recovery_status not in {"unavailable", "invalid"}:
+        raise HandoffError("MCP emergency-denial audit status is invalid")
     expected_session = (
         require_sha256(
             expected_session_id_sha256,
@@ -5840,7 +6120,7 @@ def deny_mcp_authorization_without_package(
                         "revision": int(current["revision"]) + 1,
                         "updated_at": utc_now(),
                         "orphaned_reason": reason,
-                        "audit_recovery_status": "unavailable",
+                        "audit_recovery_status": audit_recovery_status,
                     }
                 )
                 return transaction.write(denied)
@@ -5851,7 +6131,7 @@ def deny_mcp_authorization_without_package(
                         "revision": int(current["revision"]) + 1,
                         "updated_at": utc_now(),
                         "orphaned_reason": reason,
-                        "audit_recovery_status": "unavailable",
+                        "audit_recovery_status": audit_recovery_status,
                     }
                 )
                 return transaction.write(denied)
@@ -5969,6 +6249,22 @@ def expire_mcp_authorization(
         )
         audit = audit_log_for(verified, session_hash)
         before = audit.verify()
+        assert_mcp_audit_summary_binding(verified, current, before)
+        if current["status"] == "active" and before.footer:
+            # A terminalizer may have durably closed the audit immediately
+            # before its global/package commit failed.  This is recoverable,
+            # but it is never an effective active authorization and must not
+            # be reclassified as an ordinary unexpired session.
+            return {
+                "expired": False,
+                "terminal_reconciliation_required": True,
+                "authorization": current,
+                "authorization_denied": False,
+                "authorization_status": "active",
+                "revocation_receipt_recorded": False,
+                "authorization_revoked": False,
+                "audit": audit_summary_payload(before),
+            }
         if current["status"] == "expired":
             persisted_reason = current.get("expired_reason")
             if (
@@ -6001,6 +6297,7 @@ def expire_mcp_authorization(
             if not session_expired and not idle_expired:
                 return {
                     "expired": False,
+                    "terminal_reconciliation_required": False,
                     "authorization": current,
                     "authorization_denied": False,
                     "authorization_status": "active",
@@ -6079,6 +6376,7 @@ def expire_mcp_authorization(
         )
     return {
         "expired": True,
+        "terminal_reconciliation_required": False,
         "authorization": current,
         "authorization_denied": True,
         "authorization_status": "expired",
@@ -6119,6 +6417,12 @@ def require_active_mcp_authorization(
         raise runtime_failure(exc) from exc
     if (
         summary.footer
+        or summary.schema_version != MCP_AUDIT_SCHEMA_VERSION
+        or summary.accounting_mode != MCP_DISCLOSURE_ACCOUNTING
+        or session.get("audit_schema_version") != MCP_AUDIT_SCHEMA_VERSION
+        or session.get("disclosure_accounting") != MCP_DISCLOSURE_ACCOUNTING
+        or current.get("audit_schema_version") != MCP_AUDIT_SCHEMA_VERSION
+        or current.get("disclosure_accounting") != MCP_DISCLOSURE_ACCOUNTING
         or summary.header_sha256 != session.get("audit_header_sha256")
         or current.get("audit_header_sha256") != summary.header_sha256
     ):
@@ -7150,6 +7454,8 @@ def public_runtime_authorization(state: dict[str, Any] | None) -> dict[str, Any]
         "expires_at",
         "idle_ttl_seconds",
         "audit_header_sha256",
+        "audit_schema_version",
+        "disclosure_accounting",
         "protocol_trace_header_sha256",
         "audit_final_sequence",
         "audit_final_head_sha256",
@@ -7838,18 +8144,8 @@ def mcp_audit_status(verified: dict[str, Any]) -> dict[str, Any]:
         summary = audit_log_for(verified, session_hash).verify()
     except ToolError as exc:
         raise runtime_failure(exc) from exc
-    if summary.header_sha256 != session.get("audit_header_sha256"):
-        raise HandoffError("MCP audit header does not match package session state")
-    terminal = session.get("status") in {"revoked", "expired"}
-    if terminal and (
-        not summary.footer
-        or session.get("audit_final_sequence") != summary.final_sequence
-        or session.get("audit_head_sha256") != summary.head_sha256
-        or session.get("tool_calls") != summary.tool_calls
-        or session.get("disclosed_bytes") != summary.disclosed_bytes
-    ):
-        raise HandoffError("MCP terminal package state does not match its audit footer")
-    if not terminal and summary.footer:
+    assert_package_audit_summary_binding(verified, summary)
+    if session.get("status") not in {"revoked", "expired"} and summary.footer:
         raise HandoffError("MCP non-terminal package session has a closed audit")
     return {"valid": True, **audit_summary_payload(summary)}
 
@@ -8364,6 +8660,19 @@ def mcp_request_correlation_payload(
             base["code"] = "REQUEST_CORRELATION_AUDIT_UNAVAILABLE"
             return base
         item["_arguments_sha256"] = arguments_hash
+        requested_tool_hash = audit.get("requested_tool_sha256")
+        if audit.get("tool") == UNADVERTISED_TOOL_LABEL:
+            try:
+                item["_requested_tool_sha256"] = require_sha256(
+                    requested_tool_hash,
+                    label="Audited unadvertised tool hash",
+                )
+            except HandoffError:
+                base["code"] = "REQUEST_CORRELATION_AUDIT_UNAVAILABLE"
+                return base
+        elif requested_tool_hash is not None:
+            base["code"] = "REQUEST_CORRELATION_AUDIT_UNAVAILABLE"
+            return base
         for key in ("audit_sequence", "tool", "disclosure_bytes", "result"):
             public_item[key] = audit.get(key)
     if tool_index != len(audit_records):
@@ -8373,12 +8682,14 @@ def mcp_request_correlation_payload(
         base["code"] = "REQUEST_CORRELATION_NO_TOOL_EVENTS"
         return base
 
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    group_ordinals: dict[tuple[str, str], int] = {}
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    group_ordinals: dict[tuple[str, str, str], int] = {}
     for item, public_item in zip(internal_events, public_events):
         if item.get("method") != "tools_call":
             continue
-        key = (str(public_item["tool"]), str(item["_arguments_sha256"]))
+        tool = str(public_item["tool"])
+        internal_tool_identity = str(item.get("_requested_tool_sha256", tool))
+        key = (tool, internal_tool_identity, str(item["_arguments_sha256"]))
         if key not in group_ordinals:
             group_ordinals[key] = len(group_ordinals) + 1
         public_item["argument_group_ordinal"] = group_ordinals[key]
@@ -8387,7 +8698,7 @@ def mcp_request_correlation_payload(
     for key, group in sorted(
         grouped.items(), key=lambda entry: group_ordinals[entry[0]]
     ):
-        tool, _ = key
+        tool, _, _ = key
         if len(group) <= 1:
             continue
         unique_outer = {
@@ -8583,9 +8894,18 @@ def command_mcp_status(args: argparse.Namespace) -> int:
             )
             current = expiry["authorization"]
             payload["authorization"] = public_runtime_authorization(current)
-            payload["audit"] = expiry["audit"]
+            # expire_mcp_authorization() verifies and binds the open audit even
+            # when no expiry is due.  Preserve that proof explicitly so the
+            # effective-authorization predicate cannot confuse a verified
+            # summary with unverified caller-supplied counters.
+            payload["audit"] = {"valid": True, **expiry["audit"]}
             payload["expired_lazily"] = expiry["expired"]
-            if expiry["expired"]:
+            if expiry.get("terminal_reconciliation_required") is True:
+                payload["split_brain"] = True
+                payload["recovery_actions"].append(
+                    "run_mcp_stop_for_exact_package"
+                )
+            elif expiry["expired"]:
                 payload["recovery_actions"].append("stop_foreground_tunnel_controller")
         else:
             try:
@@ -8634,6 +8954,7 @@ def command_mcp_status(args: argparse.Namespace) -> int:
     package_session = (
         verified["state"].get("mcp_session") if verified is not None else None
     )
+    audit_status = payload.get("audit")
     payload["effective_authorized"] = bool(
         current is not None
         and current.get("status") == "active"
@@ -8641,6 +8962,18 @@ def command_mcp_status(args: argparse.Namespace) -> int:
         and isinstance(package_session, dict)
         and package_session.get("status") == "active"
         and package_session.get("session_id_sha256") == current.get("session_id_sha256")
+        and type(current.get("audit_schema_version")) is int
+        and current.get("audit_schema_version") == MCP_AUDIT_SCHEMA_VERSION
+        and current.get("disclosure_accounting") == MCP_DISCLOSURE_ACCOUNTING
+        and type(package_session.get("audit_schema_version")) is int
+        and package_session.get("audit_schema_version") == MCP_AUDIT_SCHEMA_VERSION
+        and package_session.get("disclosure_accounting") == MCP_DISCLOSURE_ACCOUNTING
+        and isinstance(audit_status, dict)
+        and audit_status.get("valid") is True
+        and audit_status.get("footer") is False
+        and type(audit_status.get("audit_schema_version")) is int
+        and audit_status.get("audit_schema_version") == MCP_AUDIT_SCHEMA_VERSION
+        and audit_status.get("disclosure_accounting") == MCP_DISCLOSURE_ACCOUNTING
         and not payload["split_brain"]
     )
     payload["recovery_actions"] = list(dict.fromkeys(payload["recovery_actions"]))
@@ -8910,14 +9243,95 @@ def command_mcp_recover(args: argparse.Namespace) -> int:
             "active",
             "revoking",
             "faulted",
+            "revoked",
+            "expired",
         }:
-            audit_condition, _, audit_error = _inspect_orphan_audit(verified, session_hash)
+            audit_condition, audit_summary, audit_error = _inspect_orphan_audit(
+                verified, session_hash
+            )
             if audit_condition == "valid":
-                recovered = recover_interrupted_mcp_activation(
-                    package_handoff_dir,
-                    store,
-                    reason="controller_lost",
-                )
+                recovery_start_status = current.get("status")
+                assert audit_summary is not None
+                try:
+                    assert_mcp_audit_summary_binding(
+                        verified, current, audit_summary
+                    )
+                except HandoffError:
+                    # The actual audit can be structurally self-consistent yet
+                    # differ from the immutable package/global activation
+                    # identity.  Only this proven comparison failure is
+                    # classified as invalid evidence.
+                    current = deny_mcp_authorization_without_package(
+                        package_handoff_dir,
+                        store,
+                        expected_session_id_sha256=session_hash,
+                        reason="controller_lost_evidence_mismatch",
+                        audit_recovery_status="invalid",
+                    )
+                    if current.get("status") != "faulted":
+                        raise HandoffError(
+                            "Machine-global authorization changed during orphan recovery"
+                        )
+                    audit = {
+                        "valid": False,
+                        "condition": "invalid",
+                        "code": "AUDIT_OR_STATE_MISMATCH",
+                    }
+                    recovery_mode = "global_only_faulted"
+                    package_recovered = False
+                else:
+                    try:
+                        recovered = recover_interrupted_mcp_activation(
+                            package_handoff_dir,
+                            store,
+                            reason="controller_lost",
+                        )
+                    except HandoffError as exc:
+                        latest_after_error = store.read()
+                        if recovery_start_status in {"revoked", "expired"}:
+                            raise
+                        if (
+                            latest_after_error is not None
+                            and latest_after_error.get("session_id_sha256")
+                            == session_hash
+                            and latest_after_error.get("handoff_dir")
+                            == expected_handoff_identity
+                            and latest_after_error.get("status")
+                            in {"revoked", "expired"}
+                        ):
+                            raise HandoffError(
+                                "Terminal authorization was committed but package evidence was not; "
+                                "rerun mcp-recover to reconcile the exact terminal evidence"
+                            ) from exc
+                        # Lock/write/transient failures do not prove evidence
+                        # corruption.  Deny globally, preserve all package and
+                        # audit bytes, and classify the failed recovery as
+                        # unavailable instead of falsely calling it invalid.
+                        current = deny_mcp_authorization_without_package(
+                            package_handoff_dir,
+                            store,
+                            expected_session_id_sha256=session_hash,
+                            reason="controller_lost_recovery_failed",
+                            audit_recovery_status="unavailable",
+                        )
+                        if current.get("status") != "faulted":
+                            raise HandoffError(
+                                "Machine-global authorization changed during orphan recovery"
+                            )
+                        audit = {
+                            "valid": False,
+                            "condition": "unavailable",
+                            "code": "RECOVERY_FAILED",
+                        }
+                        recovery_mode = "global_only_faulted"
+                        package_recovered = False
+                    else:
+                        current = recovered["authorization"]
+                        audit = recovered["audit"]
+                        recovery_mode = recovered.get(
+                            "recovery_mode", "audit_closed"
+                        )
+                        package_recovered = True
             elif (
                 verified["state"].get("mcp_session") is None
                 and current.get("status") in {"activating", "faulted"}
@@ -8934,10 +9348,11 @@ def command_mcp_recover(args: argparse.Namespace) -> int:
                     "Orphan recovery cannot close missing or corrupt audit evidence after package activation; "
                     "authorization remains fail-closed for manual inspection"
                 )
-            current = recovered["authorization"]
-            audit = recovered["audit"]
-            recovery_mode = recovered.get("recovery_mode", "audit_closed")
-            package_recovered = True
+            if audit_condition != "valid":
+                current = recovered["authorization"]
+                audit = recovered["audit"]
+                recovery_mode = recovered.get("recovery_mode", "audit_closed")
+                package_recovered = True
         elif verified is None and current.get("status") in {"activating", "active", "revoking"}:
             try:
                 current = store.transition(

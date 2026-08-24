@@ -27,7 +27,14 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
-from runtime.gptpro_mcp.audit import AuditBinding, AuditLog
+from runtime.gptpro_mcp.audit import (
+    ACCOUNTING_MODE,
+    AUDIT_SCHEMA_VERSION,
+    LEGACY_ACCOUNTING_MODE,
+    LEGACY_AUDIT_SCHEMA_VERSION,
+    AuditBinding,
+    AuditLog,
+)
 from runtime.gptpro_mcp.authorization import AuthorizationGrant
 from runtime.gptpro_mcp.clock import Clock
 from runtime.gptpro_mcp.errors import ToolError
@@ -89,6 +96,8 @@ def state_candidate(session_hash: str, handoff: Path, *, package_id: str = "pack
         "activated_monotonic": monotonic_now,
         "expires_monotonic": monotonic_now + 3600,
         "last_activity_monotonic": monotonic_now,
+        "audit_schema_version": AUDIT_SCHEMA_VERSION,
+        "disclosure_accounting": ACCOUNTING_MODE,
         "updated_at": now.isoformat().replace("+00:00", "Z"),
     }
 
@@ -113,6 +122,30 @@ class RuntimeStateTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_disclosure_accounting_binding_is_paired_and_immutable(self) -> None:
+        candidate = state_candidate(self.session, self.handoff)
+        candidate.pop("disclosure_accounting")
+        with self.assertRaises(RuntimeStateError) as incomplete:
+            validate_active_state(candidate)
+        self.assertEqual("RUNTIME_STATE_UNSAFE", incomplete.exception.code)
+
+        candidate["disclosure_accounting"] = ACCOUNTING_MODE
+        validated = validate_active_state(candidate)
+        self.assertEqual(AUDIT_SCHEMA_VERSION, validated["audit_schema_version"])
+        self.assertEqual(ACCOUNTING_MODE, validated["disclosure_accounting"])
+
+        store = RuntimeStateStore(self.root)
+        store.begin_activation(candidate)
+        with self.assertRaises(RuntimeStateError) as mutation:
+            store.transition(
+                self.session,
+                "activating",
+                "active",
+                updates={"disclosure_accounting": "legacy_tool_body_estimate"},
+            )
+        self.assertEqual("RUNTIME_STATE_UNSAFE", mutation.exception.code)
+        self.assertEqual("activating", store.read()["status"])
 
     def test_private_modes_one_active_guard_and_exact_transitions(self) -> None:
         store = RuntimeStateStore(self.root)
@@ -587,6 +620,88 @@ class AuditTests(unittest.TestCase):
             disclosed_bytes=disclosed,
         )
 
+    def downgrade_header_to_legacy(self) -> None:
+        record = json.loads(self.path.read_text(encoding="utf-8"))
+        record["audit_schema_version"] = LEGACY_AUDIT_SCHEMA_VERSION
+        record.pop("accounting_mode")
+        record.pop("event_sha256")
+        canonical = json.dumps(
+            record,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        record["event_sha256"] = digest(canonical)
+        self.path.write_text(
+            json.dumps(
+                record,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.path.chmod(0o600)
+
+    def test_current_accounting_is_bound_and_legacy_is_verification_only(self) -> None:
+        log = AuditLog(self.path, self.binding)
+        log.create_header()
+        current = log.verify()
+        self.assertEqual(AUDIT_SCHEMA_VERSION, current.schema_version)
+        self.assertEqual(ACCOUNTING_MODE, current.accounting_mode)
+
+        self.downgrade_header_to_legacy()
+        legacy = log.verify()
+        self.assertEqual(LEGACY_AUDIT_SCHEMA_VERSION, legacy.schema_version)
+        self.assertEqual(LEGACY_ACCOUNTING_MODE, legacy.accounting_mode)
+        with self.assertRaises(ToolError) as raised:
+            self.commit(log)
+        self.assertEqual("AUDIT_SCHEMA_UNSUPPORTED", raised.exception.code)
+
+        final = log.append_footer("user_requested")
+        self.assertTrue(final.footer)
+        self.assertEqual(LEGACY_ACCOUNTING_MODE, final.accounting_mode)
+        self.assertEqual(LEGACY_ACCOUNTING_MODE, log.verify().accounting_mode)
+
+    def test_audit_schema_version_requires_an_exact_json_integer(self) -> None:
+        for index, invalid in enumerate((True, False, 1.0, 2.0, "2")):
+            with self.subTest(value=invalid):
+                path = self.root / f"invalid-schema-version-{index}.jsonl"
+                log = AuditLog(path, self.binding)
+                log.create_header()
+                record = json.loads(path.read_text(encoding="utf-8"))
+                record["audit_schema_version"] = invalid
+                if invalid in {True, 1.0}:
+                    record.pop("accounting_mode", None)
+                record.pop("event_sha256")
+                record["event_sha256"] = digest(
+                    json.dumps(
+                        record,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    ).encode("utf-8")
+                )
+                path.write_text(
+                    json.dumps(
+                        record,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                path.chmod(0o600)
+                with self.assertRaises(ToolError) as raised:
+                    log.verify()
+                self.assertEqual("AUDIT_CHAIN_INVALID", raised.exception.code)
+
     def test_header_tool_rejection_footer_chain_and_no_bodies_or_raw_query(self) -> None:
         log = AuditLog(self.path, self.binding)
         header = log.create_header()
@@ -619,6 +734,54 @@ class AuditTests(unittest.TestCase):
         with self.assertRaises(ToolError) as raised:
             self.commit(log, calls=3, disclosed=42)
         self.assertEqual("AUDIT_CHAIN_INVALID", raised.exception.code)
+
+    def test_unadvertised_rejection_is_hash_bound_and_chain_continues(self) -> None:
+        log = AuditLog(self.path, self.binding)
+        log.create_header()
+        unknown_tool = "gptpro_analysis_post"
+        rejected = log.append_rejection(
+            tool=unknown_tool,
+            request_id_sha256=digest(b"request-unknown"),
+            arguments_sha256=digest(b"arguments-unknown"),
+            error_code="MCP_INVALID_ARGUMENT",
+            calls_used=1,
+        )
+        self.assertEqual(1, rejected.tool_calls)
+        self.assertEqual(0, rejected.disclosed_bytes)
+        self.commit(log, calls=2, disclosed=21)
+        verified = log.verify()
+        self.assertEqual(2, verified.tool_calls)
+        self.assertEqual(21, verified.disclosed_bytes)
+
+        payload = self.path.read_text(encoding="utf-8")
+        self.assertNotIn(unknown_tool, payload)
+        records = [json.loads(line) for line in payload.splitlines()]
+        self.assertEqual("<unadvertised>", records[1]["tool"])
+        self.assertEqual(
+            digest(unknown_tool.encode("utf-8")),
+            records[1]["requested_tool_sha256"],
+        )
+        self.assertEqual("committed_for_return", records[2]["result"])
+        diagnostic_records = log.diagnostic_tool_records()
+        self.assertEqual(
+            records[1]["requested_tool_sha256"],
+            diagnostic_records[0]["requested_tool_sha256"],
+        )
+        self.assertNotIn("requested_tool_sha256", diagnostic_records[1])
+
+        invalid_path = self.root / "invalid-unadvertised.jsonl"
+        invalid = AuditLog(invalid_path, self.binding)
+        invalid.create_header()
+        with self.assertRaises(ToolError) as bad_code:
+            invalid.append_rejection(
+                tool=unknown_tool,
+                request_id_sha256=digest(b"request-invalid"),
+                arguments_sha256=digest(b"arguments-invalid"),
+                error_code="CANCELLED",
+                calls_used=1,
+            )
+        self.assertEqual("AUDIT_WRITE_FAILED", bad_code.exception.code)
+        self.assertEqual(0, invalid.verify().tool_calls)
 
     def test_audit_tamper_truncate_hardlink_symlink_and_mode_are_rejected(self) -> None:
         log = AuditLog(self.path, self.binding)
@@ -680,7 +843,12 @@ class AuditTests(unittest.TestCase):
         failing = AuditLog(self.path, self.binding, file_fsync=fail_fsync)
         with self.assertRaises(ToolError) as raised:
             self.commit(failing)
-        self.assertEqual("AUDIT_WRITE_FAILED", raised.exception.code)
+        self.assertEqual("COMMIT_OUTCOME_UNCERTAIN", raised.exception.code)
+        self.assertEqual(1, raised.exception.committed_calls_used)
+        uncertain = AuditLog(self.path, self.binding).verify()
+        self.assertEqual(1, uncertain.tool_calls)
+        self.assertTrue(uncertain.footer)
+        self.assertEqual("commit_outcome_uncertain", uncertain.close_reason)
 
         directory_failure_path = self.root / "directory-failure.jsonl"
         directory_failure = AuditLog(
@@ -771,6 +939,44 @@ class AuditTests(unittest.TestCase):
                 disclosed_bytes=1,
             )
         self.assertEqual("SESSION_EXPIRED", expiry.exception.code)
+
+    def test_postappend_runtime_state_failure_faults_and_closes_exact_audit(self) -> None:
+        runtime_root = self.root / "postappend-runtime"
+        store = RuntimeStateStore(runtime_root)
+        candidate = state_candidate(self.session, self.root, package_id=self.package)
+        candidate["manifest_sha256"] = self.binding.manifest_sha256
+        candidate["archive_sha256"] = self.binding.archive_sha256
+        store.begin_activation(candidate)
+        store.transition(self.session, "activating", "active")
+        log = AuditLog(self.path, self.binding, runtime_store=store)
+        log.create_header()
+
+        original_write = store._write_unlocked
+        failed = False
+
+        def write_then_report_failure(state) -> None:
+            nonlocal failed
+            original_write(state)
+            if not failed and state.get("status") == "active":
+                failed = True
+                raise RuntimeStateError(
+                    "RUNTIME_STATE_WRITE_FAILED",
+                    "simulated post-append state sync failure",
+                )
+
+        with mock.patch.object(store, "_write_unlocked", side_effect=write_then_report_failure):
+            with self.assertRaises(ToolError) as raised:
+                self.commit(log)
+
+        self.assertEqual("COMMIT_OUTCOME_UNCERTAIN", raised.exception.code)
+        self.assertEqual(1, raised.exception.committed_calls_used)
+        self.assertEqual(21, raised.exception.committed_disclosed_bytes)
+        self.assertEqual("faulted", store.read()["status"])
+        summary = log.verify()
+        self.assertEqual(1, summary.tool_calls)
+        self.assertEqual(21, summary.disclosed_bytes)
+        self.assertTrue(summary.footer)
+        self.assertEqual("commit_outcome_uncertain", summary.close_reason)
 
 
 class TunnelClientTests(unittest.TestCase):
