@@ -111,6 +111,8 @@ codex plugin marketplace add oozoofrog/codex-skills --ref main
 
 이 두 경로 모두 사용자가 `python3` 설치 명령을 직접 실행할 필요가 없습니다. 공개 Plugins Directory의 완전한 클릭 설치는 OpenAI의 Plugin 검토·게시 이후 사용할 수 있습니다. 자세한 내용은 [`docs/plugin-installation.md`](./docs/plugin-installation.md)를 참고하세요.
 
+설치 뒤 첫 상담부터 package 승인, ChatGPT 화면에서 사람이 해야 하는 단계, 응답 검증과 `.gptpro/` 관리까지는 [`gptpro` 한국어 사용자 매뉴얼](./gptpro/references/user-manual.md)에 정리되어 있습니다.
+
 저장소 maintainer가 clone에서 설치 상태를 점검하거나 기존 설치를 원자적으로 갱신할 때는 호환 관리 도구를 사용할 수 있습니다.
 
 ```bash

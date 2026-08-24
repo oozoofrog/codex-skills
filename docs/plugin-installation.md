@@ -12,6 +12,8 @@ $skill-installer Install gptpro from https://github.com/oozoofrog/codex-skills/t
 
 The installer downloads only the selected Skill into the Codex skills directory. Start a new Codex task after installation so discovery uses the new package.
 
+설치 후 첫 상담을 시작하는 방법과 승인·브라우저·`.gptpro/` 관리가 궁금하면 [`gptpro` 한국어 사용자 매뉴얼](../gptpro/references/user-manual.md)을 참고하세요.
+
 ## Install from the repository marketplace
 
 Until the Plugin is published in the universal Plugins Directory, register this GitHub marketplace once:

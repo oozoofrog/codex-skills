@@ -43,7 +43,7 @@ Choose exactly one mode:
 10. Read [references/advisory-validation.md](references/advisory-validation.md), inspect the repository again, test the relevant claims, and decide which recommendations survive verification.
 11. Record the result with `record-evaluation`, including concrete evidence. Apply changes only within the user's authorization and report executed evidence separately from Pro advice.
 
-For detailed CLI examples and lifecycle rules, read [references/workflow.md](references/workflow.md). For scanner and data-handling policy, read [references/security.md](references/security.md). For artifact fields, read [references/manifest-schema.md](references/manifest-schema.md). Read [references/web-mcp.md](references/web-mcp.md) only for an explicit Web MCP request.
+For user onboarding and plain-language operation, read [references/user-manual.md](references/user-manual.md). For detailed CLI examples and lifecycle rules, read [references/workflow.md](references/workflow.md). For scanner and data-handling policy, read [references/security.md](references/security.md). For artifact fields, read [references/manifest-schema.md](references/manifest-schema.md). Read [references/web-mcp.md](references/web-mcp.md) only for an explicit Web MCP request.
 
 ## Quick commands
 

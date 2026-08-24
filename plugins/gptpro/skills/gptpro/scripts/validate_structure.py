@@ -26,6 +26,7 @@ REQUIRED_FILES = (
     "references/manifest-schema.md",
     "references/request-correlation.md",
     "references/security.md",
+    "references/user-manual.md",
     "references/web-mcp.md",
     "references/workflow.md",
     "runtime/__init__.py",
