@@ -38,7 +38,7 @@ The static catalog is also the execution allowlist. After a session is normally 
 
 ## Prepare and approve
 
-Use the narrowest useful repository selection. Evidence and supplemental documents must be explicit owner-controlled UTF-8 regular files and are secret-scanned before packaging. A supplement is an evidence artifact with an additional purpose label; it does not enter repository read/search paths.
+Use the narrowest useful repository selection. Evidence and supplemental documents must be explicit current-owner, single-link, non-group/world-writable UTF-8 regular files and are secret-scanned before packaging. Secure capture requires supported POSIX current-user and descriptor-relative/no-follow file-open capabilities; symlinks, hard links, FIFOs and other non-regular files fail closed. A supplement is an evidence artifact with an additional purpose label; it does not enter repository read/search paths.
 
 ```bash
 export GPTPRO_TUNNEL_ID='tunnel_<value>'
@@ -61,7 +61,7 @@ python3 <skill-dir>/scripts/gptpro.py verify --handoff-dir <dir>
 python3 <skill-dir>/scripts/gptpro.py status --handoff-dir <dir> --json
 ```
 
-Preparation fails closed if the Git index/worktree changes during schema-4 snapshot capture. Tracked deletions selected by the disclosure scope are represented explicitly in the prepared diff. HEAD blobs and internal research artifacts are size-checked before expensive reads or package publication. `--supplement` shares safe-label, count, per-file, and total-byte limits with `--evidence-file`; option source paths are not persisted, are rejected if reflected into outbound metadata, and captured bytes are never refreshed in place.
+Preparation fails closed if the Git index/worktree changes during schema-4 snapshot capture. Tracked deletions selected by the disclosure scope are represented explicitly in the prepared diff. HEAD blobs and internal research artifacts are size-checked before expensive reads or package publication. `--supplement` shares safe-label, count, per-file, total-byte, and per-line readability limits with `--evidence-file`; a single UTF-8 line cannot exceed the package's `max_read_content_bytes` (currently 98,304 bytes by default). Option source locators are not persisted in gptpro artifacts, but can remain in shell/process/tool history; they are rejected if reflected into outbound metadata after case-folded Unicode normalization, and captured bytes are never refreshed in place.
 
 Before approval, show the user:
 

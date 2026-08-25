@@ -96,9 +96,9 @@ Normal `auto|github|paste|text-file` handoffs continue to use manifest schema 2.
 ## Local CLI
 
 ```bash
-python3 scripts/gptpro.py prepare --repo /path/to/repo --mode plan --transport auto --task "Plan the change."
-python3 scripts/gptpro.py prepare --repo /path/to/repo --mode review --transport paste --supplement requirements=/absolute/private/requirements.md --task "Review against the supplemental requirements."
-python3 scripts/gptpro.py prepare --repo /path/to/repo --mode review --transport github --github-pr-url https://github.com/owner/repo/pull/123 --task "Review the pinned PR."
+python3 scripts/gptpro.py prepare --repo /path/to/repo --mode plan --transport auto --include 'src/**' --include 'tests/**' --task "Plan the change."
+python3 scripts/gptpro.py prepare --repo /path/to/repo --mode review --transport paste --include 'src/**' --include 'tests/**' --supplement requirements=/absolute/private/requirements.md --task "Review against the supplemental requirements."
+python3 scripts/gptpro.py prepare --repo /path/to/repo --mode review --transport github --github-pr-url https://github.com/owner/repo/pull/123 --include 'src/**' --include 'tests/**' --task "Review the pinned PR."
 python3 scripts/gptpro.py verify --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
 python3 scripts/gptpro.py status --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
 python3 scripts/gptpro.py human-handoff --handoff-dir /path/to/repo/.gptpro/handoffs/<id> --reason manual-transport

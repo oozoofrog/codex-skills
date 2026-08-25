@@ -63,6 +63,8 @@ python3 <skill-dir>/scripts/gptpro.py prepare \
   --repo "$PWD" \
   --mode review \
   --transport auto \
+  --include "src/**" \
+  --include "tests/**" \
   --task "Review the current change for correctness and missing tests."
 
 # Use only when every selected file is committed at HEAD and that SHA is pushed.

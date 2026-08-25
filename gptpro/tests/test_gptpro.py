@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 import zipfile
 from pathlib import Path
@@ -110,6 +111,61 @@ class GptProCliTests(unittest.TestCase):
 
     def load(self, path: Path) -> dict:
         return json.loads(path.read_text(encoding="utf-8"))
+
+    def write_json(self, path: Path, value: dict) -> None:
+        path.write_bytes(GPTPRO.pretty_json_bytes(value))
+
+    def rebind_prepared_package(self, handoff: Path) -> dict:
+        """Rebind ordinary integrity fields so semantic tamper tests reach verification."""
+
+        manifest_path = handoff / "manifest.json"
+        manifest = self.load(manifest_path)
+        artifacts = manifest["artifacts"]
+        hashes = manifest["hashes"]
+        for artifact in ("prompt", "context", "archive", "paste_payload"):
+            name = artifacts.get(artifact)
+            if isinstance(name, str):
+                hashes[f"{artifact}_sha256"] = GPTPRO.sha256_file(handoff / name)
+        for outbound in manifest["transport"]["outbound_artifacts"]:
+            artifact = outbound["artifact"]
+            path = handoff / artifacts[artifact]
+            outbound["bytes"] = path.stat().st_size
+            outbound["sha256"] = hashes[f"{artifact}_sha256"]
+        if "candidate_paste_bytes" in manifest["transport"]:
+            manifest["transport"]["candidate_paste_bytes"] = (
+                handoff / artifacts["paste_payload"]
+            ).stat().st_size
+        self.write_json(manifest_path, manifest)
+        manifest_hash = GPTPRO.sha256_file(manifest_path)
+
+        state_path = handoff / "state.json"
+        state = self.load(state_path)
+        state["artifact_hashes"] = {
+            "manifest_sha256": manifest_hash,
+            **{
+                f"{artifact}_sha256": hashes[f"{artifact}_sha256"]
+                for artifact in ("prompt", "archive", "context", "paste_payload")
+                if artifact in artifacts
+            },
+        }
+        self.write_json(state_path, state)
+
+        receipt_path = handoff / "receipt.json"
+        receipt = self.load(receipt_path)
+        self.assertEqual(["prepared"], [event["type"] for event in receipt["events"]])
+        receipt["events"][0]["data"] = GPTPRO.prepared_receipt_data(
+            manifest, manifest_hash
+        )
+        receipt["events"][0]["event_hash"] = GPTPRO.event_hash(receipt["events"][0])
+        self.write_json(receipt_path, receipt)
+        return manifest
+
+    def replace_zip_member(self, archive_path: Path, member: str, content: bytes) -> None:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            members = [(info, archive.read(info.filename)) for info in archive.infolist()]
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            for info, original in members:
+                archive.writestr(info, content if info.filename == member else original)
 
     def approve_and_submit(self, handoff: Path, *, thread_url: str | None = None) -> dict:
         manifest = self.load(handoff / "manifest.json")
@@ -332,6 +388,206 @@ class GptProCliTests(unittest.TestCase):
                 self.assertNotIn(source_path, result.stdout + result.stderr)
                 self.assertFalse(output_root.exists())
 
+    def test_supplement_source_path_reflection_uses_case_and_unicode_normalization(self) -> None:
+        supplement = self.root / "Privaté-Requirements.md"
+        supplement.write_text("approved body\n", encoding="utf-8")
+        supplement.chmod(0o600)
+        source_path = str(supplement.resolve())
+        reflected_variants = {
+            source_path.swapcase(),
+            unicodedata.normalize("NFD", source_path),
+        }
+        self.assertTrue(any(value != source_path for value in reflected_variants))
+
+        for index, reflected in enumerate(sorted(reflected_variants)):
+            with self.subTest(reflected=reflected):
+                output_root = self.root / f"normalized-reflection-{index}"
+                result = self.run_cli(
+                    "prepare",
+                    "--repo",
+                    str(self.repo),
+                    "--mode",
+                    "ask",
+                    "--task",
+                    f"Read the source at {reflected}.",
+                    "--transport",
+                    "paste",
+                    "--supplement",
+                    f"requirements={source_path}",
+                    "--output-root",
+                    str(output_root),
+                    expected=2,
+                )
+                self.assertIn("safe supplement LABEL", result.stderr)
+                self.assertFalse(output_root.exists())
+
+    def test_supplement_input_requires_strict_utf8_owner_controlled_unlinked_regular_file(self) -> None:
+        invalid_utf8 = self.root / "invalid-utf8.txt"
+        invalid_utf8.write_bytes(b"plain-prefix-\xff\xfe")
+        invalid_utf8.chmod(0o600)
+        shared_writable = self.root / "shared-writable.txt"
+        shared_writable.write_text("approved body\n", encoding="utf-8")
+        shared_writable.chmod(0o620)
+        hardlinked = self.root / "hardlinked.txt"
+        hardlinked.write_text("approved body\n", encoding="utf-8")
+        hardlinked.chmod(0o600)
+        os.link(hardlinked, self.root / "hardlinked-copy.txt")
+
+        for label, source, message in (
+            ("invalid", invalid_utf8, "strict UTF-8"),
+            ("mode", shared_writable, "unsafe ownership"),
+            ("link", hardlinked, "unsafe ownership"),
+        ):
+            with self.subTest(case=label), self.assertRaisesRegex(
+                GPTPRO.HandoffError, message
+            ):
+                GPTPRO.read_supplements([f"{label}={source.resolve()}"])
+
+    def test_supplement_input_fails_closed_without_posix_owner_open_capabilities(self) -> None:
+        source = self.root / "platform-capability.txt"
+        source.write_text("approved body\n", encoding="utf-8")
+        source.chmod(0o600)
+        for patcher in (
+            mock.patch.object(GPTPRO, "_OPEN_SUPPORTS_DIR_FD", False),
+            mock.patch.object(GPTPRO.os, "getuid", None),
+        ):
+            with patcher, self.assertRaisesRegex(
+                GPTPRO.HandoffError, "POSIX owner and directory-fd support"
+            ):
+                GPTPRO.read_supplements([f"platform={source.resolve()}"])
+
+    def test_supplement_input_rejects_file_changed_during_descriptor_read(self) -> None:
+        source = self.root / "racing-input.txt"
+        source.write_bytes(b"approved body A\n")
+        source.chmod(0o600)
+        real_read = GPTPRO.os.read
+        changed = False
+
+        def racing_read(descriptor: int, maximum: int) -> bytes:
+            nonlocal changed
+            chunk = real_read(descriptor, maximum)
+            if chunk and not changed:
+                changed = True
+                source.write_bytes(b"approved body B\n")
+                source.chmod(0o600)
+            return chunk
+
+        with (
+            mock.patch.object(GPTPRO.os, "read", side_effect=racing_read),
+            self.assertRaisesRegex(GPTPRO.HandoffError, "changed while it was read"),
+        ):
+            GPTPRO.read_supplements([f"racing={source.resolve()}"])
+        self.assertTrue(changed)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires POSIX FIFO support")
+    def test_supplement_fifo_is_rejected_without_blocking(self) -> None:
+        fifo = self.root / "supplement.fifo"
+        os.mkfifo(fifo, 0o600)
+        arguments = [
+            sys.executable,
+            str(SCRIPT),
+            "prepare",
+            "--repo",
+            str(self.repo),
+            "--mode",
+            "ask",
+            "--task",
+            "Reject a non-regular supplemental input.",
+            "--transport",
+            "paste",
+            "--supplement",
+            f"fifo={fifo.resolve()}",
+            "--output-root",
+            str(self.root / "fifo-output"),
+        ]
+        try:
+            result = subprocess.run(
+                arguments,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=3,
+            )
+        except subprocess.TimeoutExpired as exc:
+            self.fail(f"FIFO open blocked past the bounded timeout: {exc}")
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn("unsafe ownership", result.stderr)
+
+    def test_supplement_missing_tilde_user_fails_without_traceback(self) -> None:
+        result = self.run_cli(
+            "prepare",
+            "--repo",
+            str(self.repo),
+            "--mode",
+            "ask",
+            "--task",
+            "Reject an unresolved home-directory reference.",
+            "--transport",
+            "paste",
+            "--supplement",
+            "requirements=~gptpro-user-that-must-not-exist/document.txt",
+            "--output-root",
+            str(self.root / "missing-home-output"),
+            expected=2,
+        )
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertNotIn(str(SCRIPT), result.stderr)
+        self.assertFalse((self.root / "missing-home-output").exists())
+
+    def test_supplement_count_file_and_total_byte_boundaries(self) -> None:
+        tiny_files: list[Path] = []
+        for index in range(GPTPRO.DEFAULT_MAX_SUPPLEMENT_FILES + 1):
+            path = self.root / f"tiny-{index:02d}.txt"
+            path.write_bytes(b"x")
+            path.chmod(0o600)
+            tiny_files.append(path)
+        accepted_tiny = [
+            f"tiny-{index}={path.resolve()}"
+            for index, path in enumerate(tiny_files[:-1])
+        ]
+        self.assertEqual(
+            GPTPRO.DEFAULT_MAX_SUPPLEMENT_FILES,
+            len(GPTPRO.read_supplements(accepted_tiny)),
+        )
+        with self.assertRaisesRegex(GPTPRO.HandoffError, "Too many"):
+            GPTPRO.read_supplements(
+                [
+                    f"tiny-{index}={path.resolve()}"
+                    for index, path in enumerate(tiny_files)
+                ]
+            )
+
+        full_files: list[Path] = []
+        for index in range(
+            GPTPRO.DEFAULT_MAX_SUPPLEMENT_TOTAL_BYTES
+            // GPTPRO.DEFAULT_MAX_SUPPLEMENT_FILE_BYTES
+        ):
+            path = self.root / f"full-{index}.txt"
+            path.write_bytes(b"x" * GPTPRO.DEFAULT_MAX_SUPPLEMENT_FILE_BYTES)
+            path.chmod(0o600)
+            full_files.append(path)
+        accepted_full = [
+            f"full-{index}={path.resolve()}"
+            for index, path in enumerate(full_files)
+        ]
+        self.assertEqual(
+            GPTPRO.DEFAULT_MAX_SUPPLEMENT_TOTAL_BYTES,
+            sum(item.size for item in GPTPRO.read_supplements(accepted_full)),
+        )
+
+        over_file = self.root / "over-file.txt"
+        over_file.write_bytes(b"x" * (GPTPRO.DEFAULT_MAX_SUPPLEMENT_FILE_BYTES + 1))
+        over_file.chmod(0o600)
+        with self.assertRaisesRegex(GPTPRO.HandoffError, "unsafe ownership"):
+            GPTPRO.read_supplements([f"over={over_file.resolve()}"])
+
+        over_total = self.root / "over-total.txt"
+        over_total.write_bytes(b"x")
+        over_total.chmod(0o600)
+        with self.assertRaisesRegex(GPTPRO.HandoffError, "total-byte limit"):
+            GPTPRO.read_supplements([*accepted_full, f"over={over_total.resolve()}"])
+
     def test_supplement_archive_or_manifest_tampering_is_detected(self) -> None:
         supplement = self.root / "review.txt"
         supplement.write_text("immutable review notes\n", encoding="utf-8")
@@ -349,6 +605,96 @@ class GptProCliTests(unittest.TestCase):
         manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         rejected = self.run_cli("verify", "--handoff-dir", str(handoff), expected=2)
         self.assertIn("supplemental document set hash mismatch", rejected.stderr)
+
+    def test_schema2_context_body_mismatch_rejects_after_integrity_rebinding(self) -> None:
+        supplement = self.root / "body-binding.txt"
+        original = b"archive body A\r\n"
+        replacement = b"context body B\r\n"
+        self.assertEqual(len(original), len(replacement))
+        supplement.write_bytes(original)
+        supplement.chmod(0o600)
+        handoff = self.prepare(
+            "review",
+            "--transport",
+            "paste",
+            "--supplement",
+            f"binding={supplement.resolve()}",
+        )
+        manifest = self.load(handoff / "manifest.json")
+        context_path = handoff / manifest["artifacts"]["context"]
+        context = context_path.read_bytes()
+        self.assertEqual(1, context.count(original))
+        context_path.write_bytes(context.replace(original, replacement, 1))
+        prompt = (handoff / manifest["artifacts"]["prompt"]).read_bytes().decode("utf-8")
+        changed_context = context_path.read_bytes().decode("utf-8")
+        paste_path = handoff / manifest["artifacts"]["paste_payload"]
+        paste_path.write_bytes(
+            GPTPRO.render_paste_payload(prompt, changed_context).encode("utf-8")
+        )
+        self.rebind_prepared_package(handoff)
+
+        rejected = self.run_cli("verify", "--handoff-dir", str(handoff), expected=2)
+        self.assertIn("context", rejected.stderr.lower())
+
+    def test_schema2_supplement_manifest_entry_rejects_extra_keys(self) -> None:
+        supplement = self.root / "exact-entry.txt"
+        supplement.write_text("exact manifest entry\n", encoding="utf-8")
+        supplement.chmod(0o600)
+        handoff = self.prepare(
+            "review",
+            "--transport",
+            "paste",
+            "--supplement",
+            f"exact={supplement.resolve()}",
+        )
+        manifest_path = handoff / "manifest.json"
+        manifest = self.load(manifest_path)
+        manifest["supplements"][0]["source_path"] = "/private/reflected.txt"
+        archive_path = handoff / manifest["artifacts"]["archive"]
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            internal = json.loads(
+                archive.read("_gptpro/file-manifest.json").decode("utf-8")
+            )
+        internal["supplements"][0]["source_path"] = "/private/reflected.txt"
+        internal_bytes = GPTPRO.pretty_json_bytes(internal)
+        self.replace_zip_member(
+            archive_path, "_gptpro/file-manifest.json", internal_bytes
+        )
+        manifest["hashes"]["internal_manifest_sha256"] = GPTPRO.sha256_bytes(
+            internal_bytes
+        )
+        self.write_json(manifest_path, manifest)
+        self.rebind_prepared_package(handoff)
+
+        rejected = self.run_cli("verify", "--handoff-dir", str(handoff), expected=2)
+        self.assertIn("supplement", rejected.stderr.lower())
+
+    def test_empty_schema2_package_rejects_tampered_supplement_totals_and_limits(self) -> None:
+        for field, value in (
+            ("supplemental_documents", 1),
+            ("supplemental_bytes", 1),
+            ("max_supplement_files", GPTPRO.DEFAULT_MAX_SUPPLEMENT_FILES - 1),
+            (
+                "max_supplement_file_bytes",
+                GPTPRO.DEFAULT_MAX_SUPPLEMENT_FILE_BYTES - 1,
+            ),
+            (
+                "max_supplement_total_bytes",
+                GPTPRO.DEFAULT_MAX_SUPPLEMENT_TOTAL_BYTES - 1,
+            ),
+        ):
+            with self.subTest(field=field):
+                handoff = self.prepare("review", "--transport", "paste")
+                manifest_path = handoff / "manifest.json"
+                manifest = self.load(manifest_path)
+                target = manifest["totals"] if field.startswith("supplemental_") else manifest["limits"]
+                target[field] = value
+                self.write_json(manifest_path, manifest)
+                self.rebind_prepared_package(handoff)
+                rejected = self.run_cli(
+                    "verify", "--handoff-dir", str(handoff), expected=2
+                )
+                self.assertIn("supplement", rejected.stderr.lower())
 
     def test_schema2_supplement_approval_is_cross_bound_to_state_receipt_and_manifest(self) -> None:
         supplement = self.root / "approval.txt"

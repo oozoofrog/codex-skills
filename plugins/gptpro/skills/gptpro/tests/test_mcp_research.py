@@ -168,8 +168,35 @@ class McpResearchTests(unittest.TestCase):
         approve: bool = True,
         evidence: Path | None = None,
         supplement: Path | None = None,
+        extra: tuple[str, ...] = (),
     ) -> Path:
-        prepared = self.run_cli(
+        prepared = self.run_cli(*self.prepare_arguments(
+            evidence=evidence,
+            supplement=supplement,
+            extra=extra,
+        ))
+        handoff = Path(json.loads(prepared.stdout)["handoff_dir"])
+        if approve:
+            self.run_cli(
+                "approve",
+                "--handoff-dir",
+                str(handoff),
+                "--approved-by",
+                "research-test-user",
+                "--confirm-transmission",
+                "--confirm-mcp-disclosure",
+                "--confirm-analysis-ledger",
+            )
+        return handoff
+
+    def prepare_arguments(
+        self,
+        *,
+        evidence: Path | None = None,
+        supplement: Path | None = None,
+        extra: tuple[str, ...] = (),
+    ) -> list[str]:
+        return [
             "prepare",
             "--repo",
             str(self.repo),
@@ -204,20 +231,42 @@ class McpResearchTests(unittest.TestCase):
                 if supplement is not None
                 else []
             ),
+            *extra,
+        ]
+
+    def write_json(self, path: Path, value: dict) -> None:
+        path.write_bytes(self.module.pretty_json_bytes(value))
+
+    def rebind_prepared_package(self, handoff: Path) -> dict:
+        """Rebind integrity fields so a semantic manifest mutation is isolated."""
+
+        manifest_path = handoff / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["hashes"]["approval_basis_sha256"] = self.module.sha256_bytes(
+            self.module.canonical_json_bytes(self.module.mcp_approval_basis(manifest))
         )
-        handoff = Path(json.loads(prepared.stdout)["handoff_dir"])
-        if approve:
-            self.run_cli(
-                "approve",
-                "--handoff-dir",
-                str(handoff),
-                "--approved-by",
-                "research-test-user",
-                "--confirm-transmission",
-                "--confirm-mcp-disclosure",
-                "--confirm-analysis-ledger",
-            )
-        return handoff
+        manifest["hashes"]["manifest_basis_sha256"] = self.module.sha256_bytes(
+            self.module.canonical_json_bytes(self.module.mcp_manifest_basis(manifest))
+        )
+        self.write_json(manifest_path, manifest)
+        manifest_hash = self.module.sha256_file(manifest_path)
+
+        state_path = handoff / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["artifact_hashes"]["manifest_sha256"] = manifest_hash
+        self.write_json(state_path, state)
+
+        receipt_path = handoff / "receipt.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(["prepared"], [event["type"] for event in receipt["events"]])
+        receipt["events"][0]["data"] = self.module.prepared_receipt_data(
+            manifest, manifest_hash
+        )
+        receipt["events"][0]["event_hash"] = self.module.event_hash(
+            receipt["events"][0]
+        )
+        self.write_json(receipt_path, receipt)
+        return manifest
 
     def activate(self, handoff: Path) -> tuple[object, str, dict]:
         verified = self.module.verify_package(handoff)
@@ -430,6 +479,75 @@ class McpResearchTests(unittest.TestCase):
         self.assertEqual(
             [], list(self.output_root.iterdir()) if self.output_root.exists() else []
         )
+
+    def test_evidence_and_supplement_share_one_combined_byte_budget(self) -> None:
+        evidence = self.root / "combined-evidence.txt"
+        supplement = self.root / "combined-supplement.txt"
+        evidence.write_bytes(b"e" * 11 + b"\n")
+        supplement.write_bytes(b"s" * 11 + b"\n")
+        evidence.chmod(0o600)
+        supplement.chmod(0o600)
+        limit_args = (
+            "--max-evidence-file-bytes",
+            "12",
+            "--max-evidence-total-bytes",
+            "24",
+        )
+
+        handoff = self.prepare(
+            approve=False,
+            evidence=evidence,
+            supplement=supplement,
+            extra=limit_args,
+        )
+        manifest = self.module.verify_package(handoff)["manifest"]
+        self.assertEqual(24, sum(item["size"] for item in manifest["research"]["evidence"]))
+
+        rejected = self.run_cli(
+            *self.prepare_arguments(
+                evidence=evidence,
+                supplement=supplement,
+                extra=(
+                    "--max-evidence-file-bytes",
+                    "12",
+                    "--max-evidence-total-bytes",
+                    "23",
+                ),
+            ),
+            expected=2,
+        )
+        self.assertIn("total-byte limit", rejected.stderr)
+
+    def test_research_artifact_line_boundary_is_readable_by_the_runtime_contract(self) -> None:
+        line_limit = self.module.RESEARCH_DEFAULT_LIMITS["max_read_content_bytes"]
+        boundary = self.root / "line-boundary.txt"
+        boundary.write_bytes(b"x" * line_limit)
+        boundary.chmod(0o600)
+        handoff = self.prepare(approve=False, evidence=boundary)
+        self.module.verify_package(handoff)
+
+        oversized = self.root / "line-oversized.txt"
+        oversized.write_bytes(b"x" * (line_limit + 1))
+        oversized.chmod(0o600)
+        rejected = self.run_cli(
+            *self.prepare_arguments(evidence=oversized),
+            expected=2,
+        )
+        self.assertIn("line longer than the approved read limit", rejected.stderr)
+
+    def test_schema4_rejects_tampered_supplement_totals_after_integrity_rebinding(self) -> None:
+        for field, delta in (("supplemental_documents", 1), ("supplemental_bytes", 1)):
+            with self.subTest(field=field):
+                handoff = self.prepare(approve=False, supplement=self.supplement)
+                manifest_path = handoff / "manifest.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["totals"][field] += delta
+                self.write_json(manifest_path, manifest)
+                self.rebind_prepared_package(handoff)
+                with self.assertRaisesRegex(
+                    self.module.HandoffError, "supplemental totals"
+                ):
+                    self.module.verify_package(handoff)
 
     def test_approval_requires_disclosure_and_analysis_confirmation(self) -> None:
         handoff = self.prepare(approve=False)

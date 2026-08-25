@@ -159,7 +159,7 @@ HUMAN_HANDOFF_REASONS = (
     "submission-uncertain",
     "response-export",
 )
-_OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
+_OPEN_SUPPORTS_DIR_FD = os.open in (getattr(os, "supports_dir_fd", ()) or ())
 DEFAULT_REQUESTED_MODEL = "ChatGPT Pro / GPT-5.6 Sol / Intelligence: Pro"
 DESTINATION = "https://chatgpt.com/"
 DEFAULT_MAX_FILES = 2_000
@@ -649,14 +649,22 @@ def validate_schema3_archive_plan(files: list[SelectedFile], internal_manifest: 
 def open_owner_input_file(raw: str, *, label: str) -> tuple[int, Path]:
     """Open one absolute input through a no-symlink directory-fd walk."""
 
-    candidate = Path(raw).expanduser()
+    if not _OPEN_SUPPORTS_DIR_FD or not callable(getattr(os, "getuid", None)):
+        raise HandoffError(f"{label} requires POSIX owner and directory-fd support")
+    try:
+        candidate = Path(raw).expanduser()
+    except (OSError, RuntimeError) as exc:
+        raise HandoffError(f"Unable to resolve {label} source path safely") from exc
     if not candidate.is_absolute():
         raise HandoffError(f"{label} must use an absolute path")
     lexical = Path(os.path.abspath(candidate))
     nofollow = getattr(os, "O_NOFOLLOW", None)
     directory = getattr(os, "O_DIRECTORY", None)
-    if nofollow is None or directory is None:
-        raise HandoffError(f"{label} requires O_NOFOLLOW and O_DIRECTORY support")
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    if nofollow is None or directory is None or nonblock is None:
+        raise HandoffError(
+            f"{label} requires O_NOFOLLOW, O_DIRECTORY, and O_NONBLOCK support"
+        )
     components = lexical.parts
     if len(components) < 2 or components[0] != os.sep:
         raise HandoffError(f"{label} has an invalid absolute path")
@@ -679,11 +687,14 @@ def open_owner_input_file(raw: str, *, label: str) -> tuple[int, Path]:
             directory_descriptor = next_descriptor
         descriptor = os.open(
             components[-1],
-            os.O_RDONLY | int(nofollow) | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY
+            | int(nofollow)
+            | int(nonblock)
+            | getattr(os, "O_CLOEXEC", 0),
             dir_fd=directory_descriptor,
         )
         return descriptor, lexical
-    except OSError as exc:
+    except (OSError, TypeError, NotImplementedError) as exc:
         raise HandoffError(f"Unable to open {label} without symlink traversal") from exc
     finally:
         if directory_descriptor >= 0:
@@ -756,6 +767,13 @@ def read_research_evidence(
             text = content.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise HandoffError(f"{kind_label} {artifact_id!r} is not strict UTF-8") from exc
+        read_limit = limits.get("max_read_content_bytes")
+        if read_limit is not None and any(
+            len(line) > read_limit for line in content.splitlines(keepends=True)
+        ):
+            raise HandoffError(
+                f"{kind_label} {artifact_id!r} contains a line longer than the approved read limit"
+            )
         findings = secret_findings(f"external-text:{artifact_id}", text)
         if findings:
             detectors = ", ".join(sorted({str(item["detector"]) for item in findings}))
@@ -815,17 +833,27 @@ def reject_supplement_source_path_reflection(
             for item in value:
                 yield from string_values(item)
 
-    metadata_strings = tuple(string_values(outbound_metadata))
+    def normalized(value: str) -> str:
+        return unicodedata.normalize("NFC", value).casefold()
+
+    metadata_strings = tuple(
+        normalized(value) for value in string_values(outbound_metadata)
+    )
     for specification in specifications:
         _, separator, raw_path = specification.partition("=")
         if not separator or not raw_path:
             continue
-        candidate = Path(raw_path).expanduser()
+        try:
+            candidate = Path(raw_path).expanduser()
+        except (OSError, RuntimeError) as exc:
+            raise HandoffError(
+                "Unable to resolve a supplemental document source path safely"
+            ) from exc
         variants = {raw_path, str(candidate)}
         if candidate.is_absolute():
             variants.add(str(Path(os.path.abspath(candidate))))
         if any(
-            locator and locator in field
+            normalized(locator) and normalized(locator) in field
             for locator in variants
             for field in metadata_strings
         ):
@@ -4050,7 +4078,12 @@ def verify_mcp_manifest_contract(manifest: dict[str, Any]) -> None:
         seen: set[str] = set()
         total_evidence = 0
         for item in evidence:
-            if not isinstance(item, dict):
+            if not isinstance(item, dict) or set(item) != {
+                "artifact_id",
+                "archive_path",
+                "size",
+                "sha256",
+            }:
                 raise HandoffError("Schema-4 evidence entry is invalid")
             artifact_id = item.get("artifact_id")
             size = item.get("size")
@@ -4082,6 +4115,20 @@ def verify_mcp_manifest_contract(manifest: dict[str, Any]) -> None:
             )
         ):
             raise HandoffError("Schema-4 supplemental artifact IDs are invalid")
+        evidence_by_id = {item["artifact_id"]: item for item in evidence}
+        supplemental_bytes = sum(
+            int(evidence_by_id[artifact_id]["size"])
+            for artifact_id in supplement_artifact_ids
+        )
+        totals = manifest.get("totals")
+        if (
+            not isinstance(totals, dict)
+            or type(totals.get("supplemental_documents")) is not int
+            or totals.get("supplemental_documents") != len(supplement_artifact_ids)
+            or type(totals.get("supplemental_bytes")) is not int
+            or totals.get("supplemental_bytes") != supplemental_bytes
+        ):
+            raise HandoffError("Schema-4 supplemental totals are invalid")
         evidence_hash = sha256_bytes(canonical_json_bytes(expected_evidence))
         if research.get("evidence_set_sha256") != evidence_hash or hashes.get("evidence_set_sha256") != evidence_hash:
             raise HandoffError("Schema-4 evidence-set hash mismatch")
@@ -4187,7 +4234,12 @@ def verify_package(
             raise HandoffError("Schema-2 supplemental document contract is invalid")
         seen_supplement_labels: set[str] = set()
         for index, entry in enumerate(supplements_raw):
-            if not isinstance(entry, dict):
+            if not isinstance(entry, dict) or set(entry) != {
+                "label",
+                "archive_path",
+                "size",
+                "sha256",
+            }:
                 raise HandoffError(f"Supplemental document entry {index} is invalid")
             label = entry.get("label")
             size = entry.get("size")
@@ -4227,6 +4279,23 @@ def verify_package(
                 raise HandoffError("Schema-2 supplemental document set hash mismatch")
         elif "supplement_set_sha256" in hashes:
             raise HandoffError("Empty Schema-2 package must not declare a supplemental set hash")
+        totals = manifest.get("totals")
+        limits = manifest.get("limits")
+        if (
+            not isinstance(totals, dict)
+            or type(totals.get("supplemental_documents")) is not int
+            or totals.get("supplemental_documents") != len(supplements)
+            or type(totals.get("supplemental_bytes")) is not int
+            or totals.get("supplemental_bytes")
+            != sum(int(item["size"]) for item in supplements)
+            or not isinstance(limits, dict)
+            or limits.get("max_supplement_files") != DEFAULT_MAX_SUPPLEMENT_FILES
+            or limits.get("max_supplement_file_bytes")
+            != DEFAULT_MAX_SUPPLEMENT_FILE_BYTES
+            or limits.get("max_supplement_total_bytes")
+            != DEFAULT_MAX_SUPPLEMENT_TOTAL_BYTES
+        ):
+            raise HandoffError("Schema-2 supplemental totals or limits are invalid")
     elif "supplements" in manifest:
         raise HandoffError("MCP packages expose external documents only as approved research artifacts")
     requested_transport = transport.get("requested")
@@ -4241,21 +4310,6 @@ def verify_package(
             raise HandoffError(
                 "Supplemental documents require browser-upload-free paste delivery in schema 2"
             )
-        totals = manifest.get("totals")
-        limits = manifest.get("limits")
-        if (
-            not isinstance(totals, dict)
-            or totals.get("supplemental_documents") != len(supplements)
-            or totals.get("supplemental_bytes")
-            != sum(int(item["size"]) for item in supplements)
-            or not isinstance(limits, dict)
-            or limits.get("max_supplement_files") != DEFAULT_MAX_SUPPLEMENT_FILES
-            or limits.get("max_supplement_file_bytes")
-            != DEFAULT_MAX_SUPPLEMENT_FILE_BYTES
-            or limits.get("max_supplement_total_bytes")
-            != DEFAULT_MAX_SUPPLEMENT_TOTAL_BYTES
-        ):
-            raise HandoffError("Schema-2 supplemental totals or limits are invalid")
     if is_mcp_schema(schema_version):
         verify_mcp_manifest_contract(manifest)
     state_hashes = state.get("artifact_hashes")
@@ -4408,38 +4462,29 @@ def verify_package(
         raise HandoffError("State artifact hashes do not match current artifacts")
 
     try:
-        prompt_text = prompt_path.read_text(encoding="utf-8")
-        context_text = context_path.read_text(encoding="utf-8") if context_path is not None else None
+        prompt_bytes = prompt_path.read_bytes()
+        context_bytes = context_path.read_bytes() if context_path is not None else None
+        prompt_text = prompt_bytes.decode("utf-8")
+        context_text = context_bytes.decode("utf-8") if context_bytes is not None else None
     except (OSError, UnicodeDecodeError) as exc:
         raise HandoffError(f"Unable to read text transport artifacts: {exc}") from exc
     if schema_version == SCHEMA_V2:
         context_markers = manifest.get("context_markers")
-        if not isinstance(context_markers, dict) or context_text is None:
-            raise HandoffError("Context markers are missing")
-        for marker_name in ("begin", "end"):
-            marker = context_markers.get(marker_name)
-            if not isinstance(marker, str) or context_text.count(marker) != 1:
-                raise HandoffError(f"Context {marker_name} marker mismatch")
-        for item in supplements:
-            label_json = json.dumps(item["label"], ensure_ascii=False)
-            begin = (
-                f"GPTPRO_SUPPLEMENT_BEGIN:{package_id}:{label_json}:"
-                f"{item['size']}:{item['sha256']}"
-            )
-            end = f"GPTPRO_SUPPLEMENT_END:{package_id}:{label_json}"
-            if context_text.count(begin) != 1 or context_text.count(end) != 1:
-                raise HandoffError(
-                    f"Supplemental context markers do not match {item['label']}"
-                )
+        expected_context_markers = {
+            "begin": f"GPTPRO_CONTEXT_BEGIN:{package_id}",
+            "end": f"GPTPRO_CONTEXT_END:{package_id}",
+        }
+        if context_markers != expected_context_markers or context_text is None:
+            raise HandoffError("Context markers are missing or invalid")
     elif manifest.get("context_markers") is not None:
         raise HandoffError("Schema-3 MCP package must not declare plaintext context markers")
     if paste_payload_path is not None:
         try:
-            actual_paste = paste_payload_path.read_text(encoding="utf-8")
+            actual_paste = paste_payload_path.read_bytes()
         except (OSError, UnicodeDecodeError) as exc:
             raise HandoffError(f"Unable to read paste payload: {exc}") from exc
         assert context_text is not None
-        if actual_paste != render_paste_payload(prompt_text, context_text):
+        if actual_paste != render_paste_payload(prompt_text, context_text).encode("utf-8"):
             raise HandoffError("Paste payload does not match prompt and context artifacts")
 
     outbound = transport.get("outbound_artifacts")
@@ -4556,12 +4601,15 @@ def verify_package(
         if archive_name in expected_members:
             raise HandoffError(f"Duplicate supplemental archive member: {archive_name}")
         expected_members[archive_name] = item
+    research_evidence_paths: set[str] = set()
     if schema_version == SCHEMA_V4:
         research = manifest["research"]
         for item in research["evidence"]:
             expected_members[item["archive_path"]] = item
+            research_evidence_paths.add(item["archive_path"])
         expected_members[research["diff"]["archive_path"]] = research["diff"]
         expected_members[research["workspace_index"]["archive_path"]] = research["workspace_index"]
+    archive_member_data: dict[str, bytes] = {}
     try:
         with zipfile.ZipFile(archive_path, "r") as archive:
             infos = archive.infolist()
@@ -4654,12 +4702,24 @@ def verify_package(
                 data = archive.read(name)
                 if len(data) != entry.get("size") or sha256_bytes(data) != entry.get("sha256"):
                     raise HandoffError(f"Archived file hash mismatch: {name}")
+                archive_member_data[name] = data
                 try:
                     text = data.decode("utf-8")
                 except UnicodeDecodeError as exc:
                     raise HandoffError(f"Archived file is not strict UTF-8: {name}") from exc
                 if is_mcp_schema(schema_version) and "\0" in text:
                     raise HandoffError(f"Archived file contains NUL bytes: {name}")
+                if schema_version == SCHEMA_V4 and name in research_evidence_paths:
+                    read_limit = manifest["mcp_disclosure"]["limits"][
+                        "max_read_content_bytes"
+                    ]
+                    if any(
+                        len(line) > read_limit
+                        for line in data.splitlines(keepends=True)
+                    ):
+                        raise HandoffError(
+                            f"Archived research artifact contains a line longer than the approved read limit: {name}"
+                        )
                 if schema_version == SCHEMA_V4 and name in {
                     "_gptpro/research/diff.json",
                     "_gptpro/research/workspace-index.json",
@@ -4676,6 +4736,46 @@ def verify_package(
         UnicodeDecodeError,
     ) as exc:
         raise HandoffError(f"Unable to verify archive: {exc}") from exc
+
+    if schema_version == SCHEMA_V2:
+        assert context_bytes is not None
+        try:
+            reconstructed_files = [
+                SelectedFile(
+                    path=item["path"],
+                    content=archive_member_data[item["archive_path"]],
+                    sha256=item["sha256"],
+                    size=item["size"],
+                )
+                for item in files
+            ]
+            reconstructed_supplements = [
+                SupplementFile(
+                    label=item["label"],
+                    content=archive_member_data[item["archive_path"]],
+                    sha256=item["sha256"],
+                    size=item["size"],
+                )
+                for item in supplements
+            ]
+            expected_context_bytes = render_context(
+                schema_version=SCHEMA_V2,
+                package_id=package_id,
+                git=manifest["git"],
+                selection=manifest["selection"],
+                files=reconstructed_files,
+                supplements=reconstructed_supplements,
+                package_tree_hash=require_sha256(
+                    hashes.get("packaged_tree_sha256"),
+                    label="Packaged tree hash",
+                ),
+            ).encode("utf-8")
+        except (KeyError, TypeError, UnicodeDecodeError) as exc:
+            raise HandoffError("Unable to reconstruct the Schema-2 context safely") from exc
+        if context_bytes != expected_context_bytes:
+            raise HandoffError(
+                "Schema-2 context bytes do not match the verified archive and manifest"
+            )
 
     verified_result = {
         "manifest": manifest,

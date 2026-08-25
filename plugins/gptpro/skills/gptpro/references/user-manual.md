@@ -118,17 +118,19 @@ Skill이 발견되지 않으면 먼저 새 작업을 열었는지 확인합니�
 요구사항, 회의록, 테스트 결과처럼 **현재 저장소에 들어 있지 않은 텍스트 파일**을 Pro가 함께 읽어야 할 수 있습니다. 이때 브라우저 파일 첨부를 시도하는 대신 다음처럼 요청하세요.
 
 ```text
-$gptpro review 모드로 현재 코드를 검토하면서 /절대/경로/요구사항.md도 requirements라는 보충 문서로 함께 읽어주세요. 브라우저에는 파일을 직접 업로드하지 마세요.
+$gptpro review 모드로 src와 tests를 검토하면서 /절대/경로/요구사항.md도 requirements라는 보충 문서로 함께 읽어주세요. 브라우저에는 파일을 직접 업로드하지 마세요.
 ```
 
-Codex는 `--supplement requirements=/절대/경로/요구사항.md`로 준비 시점의 내용을 한 번 복사하고, 비밀정보 검사와 해시를 거칩니다. 이 경로는 로컬 CLI 입력으로만 사용하며, ChatGPT에 보낼 task에는 `requirements` 라벨만 씁니다. CLI도 원본 경로가 task·모델·앱/워크스페이스 메타데이터에 다시 들어가면 package 생성을 거절합니다. 단, 문서 본문 자체에 적힌 경로 문자열까지 자동 삭제하지는 않으므로 승인 전에 실제 본문을 확인합니다.
+Codex는 directed `--include` 또는 정확한 `--file-list`와 함께 `--supplement requirements=/절대/경로/요구사항.md`를 사용해 준비 시점의 내용을 한 번 복사하고, 비밀정보 검사와 해시를 거칩니다. 원본 경로는 package나 ChatGPT task에 저장되지 않는 로컬 CLI 입력이고, task에는 `requirements` 라벨만 씁니다. 다만 이 locator는 shell history, process list, 터미널 캡처 또는 명령을 실행한 도구의 로그에는 보일 수 있으므로 경로 이름 자체도 민감하게 다룹니다. 없는 `~user`는 traceback으로 새지 않고 안전하게 실패하며, CLI는 원본 경로의 대소문자·Unicode 정규화 변형까지 task·모델·앱/워크스페이스 메타데이터에 다시 들어가면 package 생성을 거절합니다. 문서 본문 자체에 적힌 경로 문자열까지 자동 삭제하지는 않으므로 승인 전에 실제 본문을 확인합니다.
 
-- 작은 문서는 `paste` 메시지 안에 라벨과 해시가 붙은 텍스트로 포함됩니다.
+- 선택한 repository 문맥, prompt, 보충 문서를 합친 **complete payload**가 paste 한도 안이면 `paste` 메시지에 라벨과 해시가 붙은 텍스트로 포함됩니다. 보충 문서 하나가 작다는 사실만으로는 paste 가능하다고 판단하지 않습니다.
 - 크거나 여러 번 찾아 읽어야 하는 문서는 명시적 `mcp-research` package의 읽기 전용 artifact가 됩니다.
 - GitHub, text-file, 기존 schema-3 `mcp-read`에는 보충 문서를 섞지 않습니다.
 - PDF, 이미지, 바이너리는 직접 지원하지 않습니다. 필요한 부분을 검토된 UTF-8 텍스트로 내보낸 뒤 사용하세요.
 
-원본 파일을 나중에 바꿔도 이미 만든 package는 바뀌지 않습니다. 최신 내용이 필요하면 새 package를 만들고, 새 라벨·크기·SHA-256과 전송/공개 범위를 다시 승인합니다. 상세 규칙과 한도는 [Supplemental text documents](supplemental-documents.md)를 참고하세요.
+원본은 현재 사용자 소유의 single-link 일반 파일이어야 하고 symlink, hard link, FIFO/socket/device, group/world 쓰기 권한, 읽는 중 변경을 허용하지 않습니다. 이 안전한 열기에는 POSIX current-UID 및 descriptor-relative/no-follow 기능이 필요하며, 지원하지 않는 환경에서는 우회하지 않고 실패합니다. `mcp-research` artifact는 package의 `max_read_content_bytes`보다 긴 단일 UTF-8 line도 허용하지 않으므로, 현재 기본 98,304 bytes보다 긴 한 줄짜리 JSON/log는 미리 줄바꿈한 검토용 UTF-8 사본으로 만듭니다.
+
+원본 파일을 나중에 바꿔도 이미 만든 package는 바뀌지 않습니다. 최신 내용이 필요하면 새 package를 만들고, 새 라벨·크기·SHA-256과 전송/공개 범위를 다시 승인합니다. Schema 2 verifier는 archive의 document bytes로 context와 paste를 다시 만들어 byte-for-byte 비교하고 exact manifest keys/totals/limits를 확인합니다. Schema 4는 evidence allowlist와 supplement subset의 counts/bytes를 교차검증합니다. 상세 규칙과 한도는 [Supplemental text documents](supplemental-documents.md)를 참고하세요.
 
 ## Schema 4 상담을 실제로 진행하는 순서
 
@@ -298,8 +300,8 @@ $gptpro architecture 모드로 현재 구조와 event-driven 구조를 비교해
 
 보충 문서가 없는 일반 저장소 문맥에서 조건이 맞지 않으면 이유를 기록하고 다음 중 하나를 선택합니다.
 
-- 작은 텍스트: `paste`
-- 큰 텍스트: `text-file`
+- complete prompt-plus-context payload가 paste 한도 안인 텍스트: `paste`
+- complete payload가 paste 한도를 넘는 텍스트: `text-file`
 
 `--supplement`가 있으면 예외입니다. `auto`는 GitHub와 `text-file`을 건너뛰고 전체 payload가 paste 한도 안일 때만 `paste`를 사용합니다. 한도를 넘으면 브라우저 첨부로 바꾸지 않고 실패하므로, 필요하면 새 explicit `mcp-research` package를 준비하고 다시 승인합니다.
 
@@ -319,7 +321,7 @@ ChatGPT의 GitHub 연결이 검증된 repository와 immutable commit을 읽도�
 
 ### `paste`: 텍스트 붙여넣기
 
-작은 구조화 Markdown 문맥을 prompt와 함께 붙여넣습니다. GitHub 저장소 권한을 주지 않아도 되지만, 승인 화면에 표시된 텍스트 전체가 ChatGPT에 공개됩니다.
+구성된 complete Markdown payload가 paste 한도 안일 때 prompt와 context를 함께 붙여넣습니다. GitHub 저장소 권한을 주지 않아도 되지만, 승인 화면에 표시된 텍스트 전체가 ChatGPT에 공개됩니다. ChatGPT UI가 큰 직접 paste를 inline text 대신 **pasted text** 항목으로 표시할 수 있습니다. 이는 파일 upload나 `text-file` 전환이 아니므로, 승인된 전체 payload와 package marker가 보이는지만 확인하고 한 번만 전송합니다.
 
 ### `text-file`: Markdown 파일 첨부
 
@@ -632,12 +634,14 @@ Developer Mode는 ChatGPT 설정 기능이며 브라우저 설정이 아닙니�
 상담 전에:
 
 - [ ] 필요한 파일만 선택했는가
+- [ ] `--include` 또는 `--file-list`로 repository 범위를 직접 지정했는가
 - [ ] secret/exclude 경고를 읽었는가
 - [ ] Git SHA와 dirty 상태가 기대와 같은가
 - [ ] 전송 방식과 외부로 나갈 path/hash를 확인했는가
 - [ ] 승인 문장에 정확한 package ID가 있는가
 - [ ] Web MCP라면 최대 파일/바이트/호출/시간 범위와 정확한 도구 목록을 확인했는가
 - [ ] `mcp-research`라면 evidence/diff와 읽기 전용 context-note ledger 정책을 확인했는가
+- [ ] 보충 문서 locator가 shell/process/tool log에 남을 수 있고, 원본과 한 줄 길이가 안전한 입력 계약을 만족하는가
 
 상담 중:
 
@@ -669,6 +673,8 @@ python3 <skill-dir>/scripts/gptpro.py prepare \
   --repo "$PWD" \
   --mode review \
   --transport auto \
+  --include "src/**" \
+  --include "tests/**" \
   --task "Review the current change."
 
 python3 <skill-dir>/scripts/gptpro.py verify --handoff-dir <dir>
