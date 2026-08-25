@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import os
@@ -145,6 +146,12 @@ class GptProCliTests(unittest.TestCase):
         )
         return manifest
 
+    def test_prepare_help_explains_supplement_transport_and_paste_limit(self) -> None:
+        result = self.run_cli("prepare", "--help")
+        normalized = " ".join(result.stdout.split())
+        self.assertIn("--supplement makes it bounded paste-only", normalized)
+        self.assertIn("hard limit on the complete paste payload", normalized)
+
     def test_prepare_records_git_and_excludes_detected_secrets_without_values(self) -> None:
         handoff = self.prepare()
         manifest_text = (handoff / "manifest.json").read_text(encoding="utf-8")
@@ -158,6 +165,267 @@ class GptProCliTests(unittest.TestCase):
         self.assertIn("secret.txt", finding_paths)
         self.assertNotIn(self.secret_value, manifest_text)
         self.assertEqual(0, self.run_cli("verify", "--handoff-dir", str(handoff)).returncode)
+
+    def test_paste_packages_external_supplement_without_source_path_disclosure(self) -> None:
+        supplement = self.root / "private requirements.md"
+        content = b"# Requirements\r\nPreserve exact bytes without browser upload.\r\n"
+        supplement.write_bytes(content)
+        supplement.chmod(0o600)
+
+        handoff = self.prepare(
+            "review",
+            "--transport",
+            "paste",
+            "--supplement",
+            f"requirements={supplement.resolve()}",
+        )
+        manifest = self.load(handoff / "manifest.json")
+        entry = manifest["supplements"][0]
+        self.assertEqual("requirements", entry["label"])
+        self.assertEqual(len(content), entry["size"])
+        self.assertEqual(GPTPRO.sha256_bytes(content), entry["sha256"])
+        self.assertEqual(
+            GPTPRO.sha256_bytes(
+                GPTPRO.canonical_json_bytes(
+                    [{"label": "requirements", "size": len(content), "sha256": entry["sha256"]}]
+                )
+            ),
+            manifest["hashes"]["supplement_set_sha256"],
+        )
+        context = (handoff / manifest["artifacts"]["context"]).read_bytes()
+        self.assertIn(content, context)
+        self.assertIn(b"GPTPRO_SUPPLEMENT_BEGIN:", context)
+        with zipfile.ZipFile(handoff / manifest["artifacts"]["archive"], "r") as archive:
+            self.assertEqual(content, archive.read("_gptpro/supplements/requirements.txt"))
+        source_path = str(supplement.resolve()).encode("utf-8")
+        for artifact in handoff.iterdir():
+            if artifact.is_file():
+                self.assertNotIn(source_path, artifact.read_bytes(), artifact.name)
+        prepared = self.load(handoff / "receipt.json")["events"][0]["data"]
+        self.assertEqual(
+            manifest["hashes"]["supplement_set_sha256"],
+            prepared["supplement_set_sha256"],
+        )
+        status = json.loads(
+            self.run_cli("status", "--handoff-dir", str(handoff), "--json").stdout
+        )
+        self.assertEqual(
+            [{"label": "requirements", "size": len(content), "sha256": entry["sha256"]}],
+            status["supplemental_documents"],
+        )
+        supplement.write_text("changed after prepare\n", encoding="utf-8")
+        self.run_cli("verify", "--handoff-dir", str(handoff))
+
+    def test_supplement_auto_uses_only_bounded_paste_and_rejects_other_transports(self) -> None:
+        self.configure_github_remote()
+        supplement = self.root / "notes.txt"
+        supplement.write_text("local-only note\n", encoding="utf-8")
+        supplement.chmod(0o600)
+
+        auto = self.prepare("ask", "--supplement", f"notes={supplement.resolve()}")
+        manifest = self.load(auto / "manifest.json")
+        self.assertEqual("paste", manifest["transport"]["resolved"])
+        self.assertNotIn("github", manifest["transport"])
+        self.assertTrue(any("supplemental" in item for item in manifest["warnings"]))
+
+        for transport in ("github", "text-file", "mcp-read"):
+            with self.subTest(transport=transport):
+                result = self.run_cli(
+                    "prepare",
+                    "--repo",
+                    str(self.repo),
+                    "--mode",
+                    "ask",
+                    "--task",
+                    "Reject an unsupported supplemental transport.",
+                    "--transport",
+                    transport,
+                    "--supplement",
+                    f"notes={supplement.resolve()}",
+                    "--output-root",
+                    str(self.root / f"rejected-{transport}"),
+                    expected=2,
+                )
+                self.assertIn("cannot represent this external document contract", result.stderr)
+
+        oversized = self.root / "oversized.txt"
+        oversized.write_bytes(b"x" * (GPTPRO.DEFAULT_MAX_PASTE_BYTES + 1))
+        oversized.chmod(0o600)
+        rejected = self.run_cli(
+            "prepare",
+            "--repo",
+            str(self.repo),
+            "--mode",
+            "ask",
+            "--task",
+            "Reject a browser upload fallback.",
+            "--supplement",
+            f"oversized={oversized.resolve()}",
+            "--output-root",
+            str(self.root / "oversized-output"),
+            expected=2,
+        )
+        self.assertIn("mcp-research", rejected.stderr)
+        self.assertFalse((self.root / "oversized-output").exists())
+
+    def test_supplement_rejects_unsafe_or_secret_external_inputs(self) -> None:
+        secret = self.root / "secret supplement.txt"
+        secret.write_text(f"OPENAI_API_KEY={self.secret_value}\n", encoding="utf-8")
+        secret.chmod(0o600)
+        invalid = self.root / "invalid.bin"
+        invalid.write_bytes(b"\xff\xfe\x00")
+        invalid.chmod(0o600)
+        symlink = self.root / "linked.txt"
+        symlink.symlink_to(invalid)
+
+        for label, specification, expected_text in (
+            ("secret", f"requirements={secret.resolve()}", "secret-like material"),
+            ("invalid", f"invalid={invalid.resolve()}", "NUL or binary data"),
+            ("symlink", f"linked={symlink}", "symlink traversal"),
+            ("relative", "relative=not-absolute.txt", "absolute path"),
+        ):
+            with self.subTest(case=label):
+                result = self.run_cli(
+                    "prepare",
+                    "--repo",
+                    str(self.repo),
+                    "--mode",
+                    "ask",
+                    "--task",
+                    "Reject unsafe supplemental input.",
+                    "--transport",
+                    "paste",
+                    "--supplement",
+                    specification,
+                    "--output-root",
+                    str(self.root / f"unsafe-{label}"),
+                    expected=2,
+                )
+                self.assertIn(expected_text, result.stderr)
+                self.assertNotIn(self.secret_value, result.stdout + result.stderr)
+
+    def test_supplement_source_path_cannot_be_reflected_into_outbound_task(self) -> None:
+        for index, filename in enumerate(("private-location.md", 'quoted"\nlocation.md')):
+            with self.subTest(filename=filename):
+                supplement = self.root / filename
+                supplement.write_text("approved body\n", encoding="utf-8")
+                supplement.chmod(0o600)
+                source_path = str(supplement.resolve())
+                output_root = self.root / f"reflected-path-output-{index}"
+                result = self.run_cli(
+                    "prepare",
+                    "--repo",
+                    str(self.repo),
+                    "--mode",
+                    "ask",
+                    "--task",
+                    f"Read the source at {source_path}.",
+                    "--transport",
+                    "paste",
+                    "--supplement",
+                    f"requirements={source_path}",
+                    "--output-root",
+                    str(output_root),
+                    expected=2,
+                )
+                self.assertIn("refer to the safe supplement LABEL", result.stderr)
+                self.assertNotIn(source_path, result.stdout + result.stderr)
+                self.assertFalse(output_root.exists())
+
+    def test_supplement_archive_or_manifest_tampering_is_detected(self) -> None:
+        supplement = self.root / "review.txt"
+        supplement.write_text("immutable review notes\n", encoding="utf-8")
+        supplement.chmod(0o600)
+        handoff = self.prepare(
+            "review",
+            "--transport",
+            "paste",
+            "--supplement",
+            f"review={supplement.resolve()}",
+        )
+        manifest_path = handoff / "manifest.json"
+        manifest = self.load(manifest_path)
+        manifest["supplements"][0]["sha256"] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        rejected = self.run_cli("verify", "--handoff-dir", str(handoff), expected=2)
+        self.assertIn("supplemental document set hash mismatch", rejected.stderr)
+
+    def test_schema2_supplement_approval_is_cross_bound_to_state_receipt_and_manifest(self) -> None:
+        supplement = self.root / "approval.txt"
+        supplement.write_text("approval-bound document\n", encoding="utf-8")
+        supplement.chmod(0o600)
+        handoff = self.prepare(
+            "review",
+            "--transport",
+            "paste",
+            "--supplement",
+            f"approval={supplement.resolve()}",
+        )
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(handoff),
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        state_path = handoff / "state.json"
+        receipt_path = handoff / "receipt.json"
+        original_state = self.load(state_path)
+        original_receipt = self.load(receipt_path)
+        self.run_cli("verify", "--handoff-dir", str(handoff))
+
+        def write(value: dict, path: Path) -> None:
+            path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+        for name, mutate, expected_error in (
+            (
+                "missing-state",
+                lambda state, receipt: state.__setitem__("approval", None),
+                "approval state is missing",
+            ),
+            (
+                "manifest-hash",
+                lambda state, receipt: state["approval"].__setitem__(
+                    "manifest_sha256", "0" * 64
+                ),
+                "differs from the manifest",
+            ),
+            (
+                "outbound-hash",
+                lambda state, receipt: state["approval"]["outbound_artifacts"][0].__setitem__(
+                    "sha256", "0" * 64
+                ),
+                "differs from the manifest",
+            ),
+            (
+                "receipt-state",
+                lambda state, receipt: receipt["events"][1]["data"].__setitem__(
+                    "approved_by", "different-user"
+                ),
+                "receipt chain",
+            ),
+        ):
+            with self.subTest(case=name):
+                state = copy.deepcopy(original_state)
+                receipt = copy.deepcopy(original_receipt)
+                mutate(state, receipt)
+                if name in {"manifest-hash", "outbound-hash"}:
+                    receipt["events"][1]["data"] = copy.deepcopy(state["approval"])
+                if name in {"manifest-hash", "outbound-hash", "receipt-state"}:
+                    receipt["events"][1]["event_hash"] = GPTPRO.event_hash(
+                        receipt["events"][1]
+                    )
+                write(state, state_path)
+                write(receipt, receipt_path)
+                result = self.run_cli(
+                    "verify", "--handoff-dir", str(handoff), expected=2
+                )
+                self.assertIn(expected_error, result.stderr)
+
+        write(original_state, state_path)
+        write(original_receipt, receipt_path)
+        self.run_cli("verify", "--handoff-dir", str(handoff))
 
     def test_json_boundaries_normalize_surrogates_and_excessive_depth(self) -> None:
         surrogate = json.loads(r'{"value":"\ud800"}')

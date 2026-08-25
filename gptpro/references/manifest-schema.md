@@ -10,21 +10,22 @@ Important fields:
 - `git`: repository root, HEAD SHA, branch, clean flag, and dirty paths
 - `selection`: whole or directed mode plus include/exclude/file-list criteria
 - `files`: included workspace-relative path, size, SHA-256, and local-audit archive path
+- optional schema-2 `supplements`: safe label, exact byte count, SHA-256, and `_gptpro/supplements/<label>.txt` local-audit member; never the source path
 - `excluded`: path and non-secret reason
 - `security_findings`: path, detector, optional line, and exclusion action; never a secret value
-- `totals`: candidate, included, excluded, omitted, and byte counts
+- `totals`: candidate, included, excluded, omitted, repository byte, and supplemental document/byte counts
 - `response_markers`: package-specific begin/end lines
 - `transport`: requested/resolved transport, auto threshold, candidate paste size, exact outbound artifact list, and optional GitHub identity
 - `artifacts`: generated prompt, structured context, optional paste payload, local audit archive, state, and receipt filenames
-- `hashes`: packaged tree, prompt, context, optional paste payload, local archive, and internal-manifest SHA-256 values
+- `hashes`: packaged tree, prompt, context, optional paste payload, local archive, internal-manifest, and optional supplemental-set SHA-256 values
 
-The external manifest is authoritative for local verification. `context-<id>.md` carries package/context markers, sanitized Git and selection metadata, and every selected UTF-8 file. It omits the local absolute repository root and local file-list path.
+The external manifest is authoritative for local verification. `context-<id>.md` carries package/context markers, sanitized Git and selection metadata, every selected repository UTF-8 file, and any schema-2 supplemental snapshot inside package-specific supplement markers. It omits the local absolute repository root, local file-list path, and supplement option source paths; preparation also rejects reflecting a supplement source path into outbound task/model/app/workspace metadata. Supplemental bytes are not part of `packaged_tree_sha256`; they have their own ordered set hash and remain bound by the context/paste/archive/manifest hashes.
 
 For `github`, the only outbound artifact is `prompt.md`. `transport.github` records canonical repository/commit URLs, immutable commit SHA, verified remote/ref, optional PR identity, exact allowed paths, selected-tree hash, and preparation-time remote verification. For `paste`, the only outbound artifact is `paste-<id>.md`, which deterministically combines the prompt and structured context. For `text-file`, the outbound artifacts are `prompt.md` and `context-<id>.md`. The ZIP contains `_gptpro/file-manifest.json` and exact source bytes for local integrity/audit, but is not in the default outbound list.
 
 ## `state.json`
 
-Records the current lifecycle phase and phase-specific metadata. Artifact hashes copied into the state bind later approval and response events to the prepared package. Approval and submission events also record the resolved transport and exact outbound artifact metadata. GitHub submissions additionally record the approved/observed repository identity; imported GitHub responses store the parsed attestation.
+Records the current lifecycle phase and phase-specific metadata. Artifact hashes copied into the state bind later approval and response events to the prepared package. Approval and submission events also record the resolved transport and exact outbound artifact metadata. For schema 2 at every approved-or-later phase, verification requires `state.approval` to equal the single receipt approval event and the current destination, manifest hash, transport, outbound artifact set, and optional GitHub identity. GitHub submissions additionally record the approved/observed repository identity; imported GitHub responses store the parsed attestation.
 
 An optional additive `response_monitor` object records one package-scoped Codex heartbeat: `active|stopped` status, exact automation and target-task identity when created, start/deadline/stop timestamps, fixed two-minute interval, 15-run limit, and terminal reason. A `creation_failed` record has no automation/start identity. This state does not alter manifest approval, transport, or response completion and is absent from older packages.
 
@@ -68,11 +69,11 @@ Additional archive members and manifest bindings are:
 - `_gptpro/research/workspace-index.json`: canonical prepare-time directory/file metadata derived exactly from approved members;
 - `_gptpro/research/diff.json`: canonical prepare-time pinned-HEAD-SHA-to-snapshot entries, including the exact `research.diff.base_sha`, file hashes, and either bounded diff text/hash or a stable content-withheld reason;
 - `_gptpro/evidence/<artifact-id>.txt`: explicit strict-UTF-8 evidence members named only by safe IDs;
-- `research.workspace_index`, `research.diff`, `research.evidence`, `research.evidence_set_sha256` and matching artifact hashes;
+- `research.workspace_index`, `research.diff`, `research.evidence`, optional `research.supplement_artifact_ids`, `research.evidence_set_sha256` and matching artifact hashes;
 - schema-4 limits for workspace depth, search-query/range counts, evidence members/bytes, diff bytes, analysis events/event bytes/ledger bytes;
 - `analysis_collaboration`: `read-only-context-notes-v1`, ledger filename, `mcp_write_tools: false`, visible-Chat Pro response channel, and the exact-byte Codex context-note approval requirement.
 
-The manifest never persists source evidence absolute paths. Approval requires `--confirm-transmission`, `--confirm-mcp-disclosure`, and `--confirm-analysis-ledger`. The research session's default disclosure budget is an explicit fixed approved maximum rather than the selected source byte count because workspace metadata, diff/evidence, ledger pages and repeated physical calls are independently budgeted.
+The manifest never persists source evidence or supplement absolute paths. Supplement IDs are a sorted subset of the evidence allowlist, share its limits and set hash, and are readable only with `gptpro_artifact_read`, not repository tools. Approval requires `--confirm-transmission`, `--confirm-mcp-disclosure`, and `--confirm-analysis-ledger`. The research session's default disclosure budget is an explicit fixed approved maximum rather than the selected source byte count because workspace metadata, diff/evidence, ledger pages and repeated physical calls are independently budgeted.
 
 ## Schema-3/4 session and audit records
 

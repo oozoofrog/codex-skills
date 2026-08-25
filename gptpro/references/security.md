@@ -4,7 +4,7 @@
 
 The workflow crosses three trust boundaries:
 
-1. local repository -> generated text and local audit archive;
+1. local repository and explicitly selected supplemental text -> generated text and local audit archive;
 2. approved text artifacts -> `chatgpt.com` after user approval;
 3. ChatGPT Pro response -> local Codex judgment.
 
@@ -33,16 +33,19 @@ The matching value is never printed or copied into the manifest. There is delibe
 
 The scanner is a backstop, not proof that the outbound text is secret-free. The manifest, context, and exact outbound paths still require human review before approval.
 
+Repeatable `--supplement LABEL=/ABSOLUTE/PATH` uses the stricter external-artifact reader: absolute path, no-follow directory traversal, current-owner regular file, one hard link, no group/world write, stable metadata across the read, strict UTF-8, no NUL, safe unique label, hard count/per-file/total bounds, and the same credential scan. The option source path is discarded after capture and is rejected if reflected into outbound task/model/app/workspace metadata. The scanner does not remove path strings already present inside approved document or repository bodies. Schema 2 hashes and embeds the immutable snapshot in the paste context; Schema 4 places it under the existing evidence allowlist and limits. Neither path grants live arbitrary-filesystem access.
+
 Human takeover does not expand the approved disclosure. The person may complete login, OAuth/app scope, browser permission, OS file selection, the exact approved transport, or response export, but must not substitute files, change transports, reveal credentials, inspect unrelated browser data, or treat a click as proof of submission. `human-handoff` is read-only so asking for help cannot silently mutate the audit chain.
 
 ## Hashes and tampering
 
-The external manifest records SHA-256 hashes for the prompt, structured context, optional paste payload, local archive, internal manifest, and every included file. The local archive contains its own file manifest. `verify` rejects:
+The external manifest records SHA-256 hashes for the prompt, structured context, optional paste payload, local archive, internal manifest, every included repository file, and any supplemental snapshot/set. The local archive contains its own file manifest. `verify` rejects:
 
 - changed prompt/context/paste/archive bytes;
 - duplicate, missing, extra, unsafe, or renamed archive members;
 - file hash/size mismatches;
 - package/state identity mismatches;
+- schema-2 approval state that differs from its receipt, current manifest, transport, or outbound artifact set;
 - broken receipt event hashes.
 
 Git HEAD identity and the packaged tree hash are separate. This preserves honest provenance for dirty worktrees.
@@ -51,7 +54,7 @@ The outbound structured context omits the local absolute repository root and the
 
 For schema-3 `mcp-read`, the ZIP is local-only and no plaintext aggregate context is generated. New handoff directories use mode 0700 and archive files use mode 0600 from creation so the approved source snapshot is not exposed through the process umask. Approval binds its exact allowed path/size/hash set, static tool schema, budgets, expiry, browser delivery, and connector labels. Preparation accepts the raw Tunnel ID only through a named uppercase environment variable or an absolute owner-only mode-0600 regular file and writes only a package-specific hash into gptpro package/runtime/receipt/audit artifacts. When an environment reference is selected, that exact environment name is removed from every Git child process so a configured Git hook or filesystem monitor cannot inherit the Tunnel ID. The attended official `init` command necessarily receives the ID in its child argv and stores it in the owner-only user profile; protect that profile and local process visibility accordingly. Tunnel-shaped identifiers found in repository text are excluded as secrets, while any occurrence of the resolved ID in retained paths, task, labels, prompt, or manifest fails preparation.
 
-Schema-4 `mcp-research` retains all schema-3 controls and additionally binds a derived workspace index, a precomputed diff against the exact prepared Git SHA, explicit evidence artifacts and an owner-only Codex context-note ledger. The Git index/worktree status is captured before scanning and must match after scanning; selected tracked deletions are derived from that captured state. Selected/deleted overlap, unreadable race residue, oversized HEAD blobs, and oversized internal research artifacts fail before package publication. Evidence input must be an owner-controlled, single-link, non-group/world-writable, strict-UTF-8 regular file within per-file/count/total limits. Every path component is opened relative to an already-open parent with no-follow semantics; its absolute source path is not persisted. Evidence and repository members pass the same secret-like scan. Workspace-map, diff and evidence tools never revisit their source locations after preparation.
+Schema-4 `mcp-research` retains all schema-3 controls and additionally binds a derived workspace index, a precomputed diff against the exact prepared Git SHA, explicit evidence/supplement artifacts and an owner-only Codex context-note ledger. The Git index/worktree status is captured before scanning and must match after scanning; selected tracked deletions are derived from that captured state. Selected/deleted overlap, unreadable race residue, oversized HEAD blobs, and oversized internal research artifacts fail before package publication. Evidence and supplemental input must be owner-controlled, single-link, non-group/world-writable, strict-UTF-8 regular files within their shared per-file/count/total limits. Every path component is opened relative to an already-open parent with no-follow semantics; its absolute source path is not persisted. External artifacts and repository members pass the same secret-like scan. Workspace-map, diff and artifact tools never revisit their source locations after preparation.
 
 All seven schema-4 MCP tools are read-only. Pro findings remain in visible Chat and enter the package only through ordinary response import. Codex context notes are read from owner-controlled UTF-8 files, secret-scanned, staged locally, and remain absent from the ledger until an `analysis_note_approved` receipt binds the note ID, exact bytes/hash, and expected head. Canonical sequence/hash verification rejects truncation, rewrites, missing or forged receipt bindings, duplicate IDs, stale heads, backward timestamps, data after closure, and secret-like bodies. A prior package approval cannot approve a later note. Publishing a note to the local ledger is not network-delivery evidence; an audited `gptpro_analysis_status` result proves only that the runtime returned bytes, not that ChatGPT consumed them.
 

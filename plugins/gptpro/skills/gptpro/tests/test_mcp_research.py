@@ -96,6 +96,12 @@ class McpResearchTests(unittest.TestCase):
         self.evidence = self.root / "test-output.txt"
         self.evidence.write_text("PASS unit-suite\n2 tests\n", encoding="utf-8")
         self.evidence.chmod(0o600)
+        self.supplement = self.root / "requirements.md"
+        self.supplement.write_text(
+            "# External requirements\nPreserve the attended approval boundary.\n",
+            encoding="utf-8",
+        )
+        self.supplement.chmod(0o600)
         self.env = os.environ.copy()
         self.env["HOME"] = str(self.test_home)
         self.env[TUNNEL_ENV_NAME] = RAW_TUNNEL_ID
@@ -156,7 +162,13 @@ class McpResearchTests(unittest.TestCase):
         self.assertNotIn(RAW_TUNNEL_ID, result.stdout + result.stderr)
         return result
 
-    def prepare(self, *, approve: bool = True, evidence: Path | None = None) -> Path:
+    def prepare(
+        self,
+        *,
+        approve: bool = True,
+        evidence: Path | None = None,
+        supplement: Path | None = None,
+    ) -> Path:
         prepared = self.run_cli(
             "prepare",
             "--repo",
@@ -187,6 +199,11 @@ class McpResearchTests(unittest.TestCase):
             "64",
             "--evidence-file",
             f"test-log={evidence or self.evidence}",
+            *(
+                ["--supplement", f"requirements={supplement}"]
+                if supplement is not None
+                else []
+            ),
         )
         handoff = Path(json.loads(prepared.stdout)["handoff_dir"])
         if approve:
@@ -318,6 +335,101 @@ class McpResearchTests(unittest.TestCase):
         self.assertIn("`include`", prompt)
         self.assertIn("`exclude`", prompt)
         self.assertNotIn("any `paths` list", prompt)
+
+    def test_supplement_reuses_bounded_research_artifact_without_repository_expansion(self) -> None:
+        handoff = self.prepare(supplement=self.supplement)
+        verified = self.module.verify_package(handoff)
+        manifest = verified["manifest"]
+        self.assertEqual(
+            ["requirements"], manifest["research"]["supplement_artifact_ids"]
+        )
+        self.assertEqual(
+            ["requirements", "test-log"],
+            [item["artifact_id"] for item in manifest["research"]["evidence"]],
+        )
+        self.assertNotIn(str(self.supplement), json.dumps(manifest, sort_keys=True))
+        repository_file_set = manifest["mcp_disclosure"]["allowed_files"]
+        self.assertNotIn("requirements", json.dumps(repository_file_set, sort_keys=True))
+        status = json.loads(
+            self.run_cli("status", "--handoff-dir", str(handoff), "--json").stdout
+        )
+        self.assertEqual(
+            [
+                {
+                    "label": "requirements",
+                    "size": self.supplement.stat().st_size,
+                    "sha256": self.module.sha256_file(self.supplement),
+                }
+            ],
+            status["supplemental_documents"],
+        )
+
+        runtime, _, _ = self.fixture_runtime(handoff)
+        package_id = manifest["package_id"]
+        package = self.result(
+            runtime.call(
+                "gptpro_package_info",
+                {"package_id": package_id, "include_paths": True, "path_page_size": 20},
+            )
+        )
+        self.assertEqual(
+            ["requirements", "test-log"],
+            [item["artifact_id"] for item in package["research"]["evidence"]],
+        )
+        artifact = self.result(
+            runtime.call(
+                "gptpro_artifact_read",
+                {
+                    "package_id": package_id,
+                    "artifact_id": "requirements",
+                    "start_line": 1,
+                    "end_line": 2,
+                },
+            )
+        )
+        self.assertEqual(self.supplement.read_text(encoding="utf-8"), artifact["text"])
+        with self.assertRaises(ToolError) as repository_read:
+            runtime.call(
+                "gptpro_repo_read",
+                {
+                    "package_id": package_id,
+                    "path": "requirements",
+                    "ranges": [{"start_line": 1, "end_line": 1}],
+                },
+            )
+        self.assertEqual("PATH_NOT_APPROVED", repository_read.exception.code)
+
+    def test_supplement_and_evidence_share_label_and_budget_validation(self) -> None:
+        duplicate = self.run_cli(
+            "prepare",
+            "--repo",
+            str(self.repo),
+            "--mode",
+            "review",
+            "--transport",
+            "mcp-research",
+            "--task",
+            "Reject duplicate external artifact labels.",
+            "--output-root",
+            str(self.output_root),
+            "--tunnel-runtime-alias",
+            TUNNEL_PROFILE,
+            "--tunnel-id-ref",
+            TUNNEL_REFERENCE,
+            "--chatgpt-app-name",
+            APP_NAME,
+            "--chatgpt-workspace-label",
+            WORKSPACE_LABEL,
+            "--evidence-file",
+            f"same={self.evidence}",
+            "--supplement",
+            f"same={self.supplement}",
+            expected=2,
+        )
+        self.assertIn("unique safe LABEL", duplicate.stderr)
+        self.assertEqual(
+            [], list(self.output_root.iterdir()) if self.output_root.exists() else []
+        )
 
     def test_approval_requires_disclosure_and_analysis_confirmation(self) -> None:
         handoff = self.prepare(approve=False)

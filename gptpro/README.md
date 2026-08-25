@@ -47,6 +47,8 @@ $gptpro review 모드로 src와 tests를 Pro가 읽어가며 분석하도록 mcp
 
 Do not request Web MCP merely because a repository is local. Start with the ordinary path unless the consultation benefits from iterative workspace mapping, multi-range reads, multiple searches, prepared diff/evidence, or the separately approved context-note ledger. Web MCP currently requires macOS, Python 3.11 or newer, a reviewed official `tunnel-client`, ChatGPT Developer Mode, and attended app/workspace selection.
 
+When the consultation needs exact text from a file outside the selected repository snapshot, ask Codex to include it as a supplemental document. Repeatable `--supplement LABEL=/ABSOLUTE/PATH` packages an owner-controlled, secret-scanned strict-UTF-8 snapshot without using browser file upload. The option path is local CLI input only: Codex writes the outbound task using the safe label, and preparation rejects copying that path into outbound metadata. Small packages use bounded `paste`; larger or exploratory documents use explicit Schema 4 `mcp-research` and `gptpro_artifact_read`. See [supplemental text documents](references/supplemental-documents.md).
+
 The user normally does not need to construct CLI commands. The Skill:
 
 1. previews first-use local setup without writing;
@@ -87,12 +89,15 @@ The default `--transport auto` is GitHub-first:
 
 Auto records the exact GitHub fallback reason. Supplying `--github-pr-url` makes a verification mismatch fatal instead of falling back. The 128 KiB cutoff is a conservative Skill policy, not a published ChatGPT limit. Override it with `--max-paste-bytes`, require GitHub with `--transport github`, or avoid app access with `--transport paste|text-file`. A transport never changes after approval because approval binds the exact outbound bytes and repository disclosure.
 
+With `--supplement`, `auto` deliberately skips GitHub and text-file and resolves only to paste within the configured threshold. If the combined payload is too large, preparation fails and asks for a newly prepared `mcp-research` package; it never silently falls back to a browser attachment.
+
 Normal `auto|github|paste|text-file` handoffs continue to use manifest schema 2. Explicit `--transport mcp-read` uses schema 3. Explicit `--transport mcp-research` uses schema 4 and additionally binds research artifacts and the read-only context-note policy. Neither is inferred from `auto`, and neither approval may be reinterpreted as the other. A schema-1 ZIP-first handoff is not upgraded in place; prepare a new handoff so the transport and approval hashes are explicit.
 
 ## Local CLI
 
 ```bash
 python3 scripts/gptpro.py prepare --repo /path/to/repo --mode plan --transport auto --task "Plan the change."
+python3 scripts/gptpro.py prepare --repo /path/to/repo --mode review --transport paste --supplement requirements=/absolute/private/requirements.md --task "Review against the supplemental requirements."
 python3 scripts/gptpro.py prepare --repo /path/to/repo --mode review --transport github --github-pr-url https://github.com/owner/repo/pull/123 --task "Review the pinned PR."
 python3 scripts/gptpro.py verify --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
 python3 scripts/gptpro.py status --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
@@ -132,6 +137,7 @@ python3 scripts/gptpro.py prepare \
   --include "src/**" \
   --include "tests/**" \
   --evidence-file unit-tests=/private/path/test-output.txt \
+  --supplement specification=/private/path/specification.md \
   --task "Analyze the approved snapshot, prepared diff, and test evidence."
 
 python3 scripts/gptpro.py approve \
@@ -142,7 +148,7 @@ python3 scripts/gptpro.py approve \
   --confirm-analysis-ledger
 ```
 
-The seven static tools are `gptpro_package_info`, `gptpro_workspace_map`, `gptpro_repo_read`, `gptpro_repo_search`, `gptpro_repo_diff`, `gptpro_artifact_read`, and `gptpro_analysis_status`. Every tool advertises `readOnlyHint: true`; no MCP tool exposes repository or application-state mutation, while owner-only audit/runtime bookkeeping records governed calls. Pro findings return through the visible Chat response and the established response-import workflow. See [repository research](references/mcp-research.md) for the separately approved `analysis-note-prepare` / `analysis-note-approve` context flow.
+The seven static tools are `gptpro_package_info`, `gptpro_workspace_map`, `gptpro_repo_read`, `gptpro_repo_search`, `gptpro_repo_diff`, `gptpro_artifact_read`, and `gptpro_analysis_status`. Every tool advertises `readOnlyHint: true`; no MCP tool exposes repository or application-state mutation, while owner-only audit/runtime bookkeeping records governed calls. A Schema 4 supplement shares the bounded evidence contract and is visible only through package info and artifact read, not repository search/read. Pro findings return through the visible Chat response and the established response-import workflow. See [repository research](references/mcp-research.md) for the separately approved `analysis-note-prepare` / `analysis-note-approve` context flow.
 
 New schema-3/4 sessions use disclosure-audit schema 2 with `complete_model_visible_result_v1`, so the approved byte budget counts each complete model-visible success result rather than only its repository-text body. Audit versions are exact JSON integers. Existing schema-1 schema-3 chains remain verifiable/closable as `legacy_tool_body_estimate` but cannot accept new calls; compatibility requires the actual legacy audit and matching omitted package/global accounting bindings, not fields removed from a schema-2 chain. Schema-4 always requires the current pair. A well-formed unadvertised tool is never executed: after a durable zero-content rejection it consumes one call and returns JSON-RPC `-32602` with stable code `MCP_INVALID_ARGUMENT`. If an append may have committed, the runtime reconciles provable counters, latches that process session, and best-effort faults/closes persistent authorization; stop or recover instead of retrying automatically. Pre-publication recovery also compares the actual audit version/mode with its machine-global binding; a proven mismatch faults only that exact global authorization and does not rewrite the package/audit as a normal close, while an operational recovery failure is reported separately as unavailable rather than falsely labeled invalid. A completed package and its terminal receipt are rechecked against the actual audit footer's header/head, sequence, counters, footer flag, commit timestamp, and close reason. If the exact global authorization and audit became terminal immediately before the package commit failed, rerunning `mcp-recover` reconciles only that already-bound terminal evidence into the package receipt; it does not invent child-stop evidence or reopen authorization. `mcp-status` reports an already-closed audit with still-active global/package state as split-brain and never as effectively authorized.
 

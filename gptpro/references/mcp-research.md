@@ -38,7 +38,7 @@ The static catalog is also the execution allowlist. After a session is normally 
 
 ## Prepare and approve
 
-Use the narrowest useful repository selection. Evidence must be explicit owner-controlled UTF-8 regular files and is secret-scanned before packaging.
+Use the narrowest useful repository selection. Evidence and supplemental documents must be explicit owner-controlled UTF-8 regular files and are secret-scanned before packaging. A supplement is an evidence artifact with an additional purpose label; it does not enter repository read/search paths.
 
 ```bash
 export GPTPRO_TUNNEL_ID='tunnel_<value>'
@@ -50,6 +50,7 @@ python3 <skill-dir>/scripts/gptpro.py prepare \
   --include 'src/**' \
   --include 'tests/**' \
   --evidence-file unit-tests=/absolute/path/to/test-output.txt \
+  --supplement requirements=/absolute/path/to/requirements.md \
   --tunnel-runtime-alias gptpro-web \
   --tunnel-id-ref env:GPTPRO_TUNNEL_ID \
   --chatgpt-app-name 'GPT Pro Repository Research' \
@@ -60,12 +61,12 @@ python3 <skill-dir>/scripts/gptpro.py verify --handoff-dir <dir>
 python3 <skill-dir>/scripts/gptpro.py status --handoff-dir <dir> --json
 ```
 
-Preparation fails closed if the Git index/worktree changes during schema-4 snapshot capture. Tracked deletions selected by the disclosure scope are represented explicitly in the prepared diff. HEAD blobs and internal research artifacts are size-checked before expensive reads or package publication.
+Preparation fails closed if the Git index/worktree changes during schema-4 snapshot capture. Tracked deletions selected by the disclosure scope are represented explicitly in the prepared diff. HEAD blobs and internal research artifacts are size-checked before expensive reads or package publication. `--supplement` shares safe-label, count, per-file, and total-byte limits with `--evidence-file`; option source paths are not persisted, are rejected if reflected into outbound metadata, and captured bytes are never refreshed in place.
 
 Before approval, show the user:
 
 - package ID, Git SHA, dirty summary, selected path/hash set, and maximum disclosure;
-- evidence IDs/sizes/hashes and workspace-index/diff hashes;
+- evidence and supplemental artifact IDs/sizes/hashes and workspace-index/diff hashes;
 - all seven exact tool names and every call/byte/result/time limit;
 - app/workspace labels, expiry, transport `mcp-research`, and delivery `browser`;
 - that Pro can only read the approved immutable snapshot and context-note ledger;
@@ -90,7 +91,7 @@ Use the secretless `mcp-probe`, profile check, exact binary-hash confirmation, o
 
 The prepared manifest's schema/profile/tool hash must match exactly. Never expose both schema-3 and schema-4 catalogs under one package, and never silently fall back to another transport after approval. Every durably audited physical call and every committed returned byte consumes budget; the runtime performs no deduplication. For each schema-3/4 committed success, audit schema 2 and `complete_model_visible_result_v1` meter the canonical UTF-8 size of the complete model-visible MCP tool result, including structured metadata, hashes, cursors, disclosure counters, and the fixed text envelope. Tool-specific `content_bytes` or `result_bytes` values remain diagnostic sub-counts rather than the approval boundary. Audit schema 1 is verification-only and is reported as `legacy_tool_body_estimate`, never as current full-result evidence.
 
-Ask Pro to start with `gptpro_package_info`, narrow exploration with `gptpro_workspace_map`, and cite paths, hashes, ranges, evidence IDs, or diff entries in its visible Chat response. Pro cannot persist findings through an MCP write tool. Import the completed visible response through the existing package-marker workflow.
+Ask Pro to start with `gptpro_package_info`, narrow exploration with `gptpro_workspace_map`, read named supplemental artifacts only through `gptpro_artifact_read`, and cite paths, hashes, ranges, evidence IDs, or diff entries in its visible Chat response. `gptpro_repo_read` and `gptpro_repo_search` cannot see external supplements. Pro cannot persist findings through an MCP write tool. Import the completed visible response through the existing package-marker workflow.
 
 ## Codex context-note ledger
 

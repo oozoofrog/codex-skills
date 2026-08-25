@@ -55,13 +55,16 @@ Useful safeguards:
 - `--transport mcp-read|mcp-research`: explicitly choose one experimental Web MCP contract; neither is an automatic fallback.
 - `--github-remote`: choose the GitHub remote verified by `auto` or `github`; default `origin`.
 - `--github-pr-url`: pin an optional GitHub PR whose remote head ref must equal current HEAD. A mismatch fails even under `auto`.
-- `--max-paste-bytes`: set the conservative fallback threshold when GitHub-first `auto` is unavailable; the default 128 KiB is Skill policy, not a published ChatGPT limit.
+- `--max-paste-bytes`: set the conservative fallback threshold when GitHub-first `auto` is unavailable; with any supplement it is also the hard limit for the complete explicit/auto paste payload. The default 128 KiB is Skill policy, not a published ChatGPT limit.
+- `--supplement safe-label=/absolute/private/document.md`: capture a repeatable owner-controlled strict-UTF-8 external document without browser upload. Use bounded `paste`, or explicit `mcp-research` for artifact reads; see [supplemental-documents.md](supplemental-documents.md).
 
 Preparation records both `git.head_sha` and a hash of the actual packaged file set. `auto` first attempts `github`; it succeeds only when every selected byte matches HEAD and that SHA is advertised by the chosen github.com remote. Otherwise it records the reason and resolves to `paste` or `text-file`. Explicit `github` never falls back. A dirty text package is not represented as the HEAD commit; dirty paths and the package tree hash remain explicit. Only valid UTF-8 files enter the text context. The generated ZIP remains local audit evidence and is not a default Pro upload. Read [github-transport.md](github-transport.md) for the remote and response-attestation contract.
 
+An external supplement is not part of the repository tree hash or Git identity. Preparation reads it once without following symlinks, secret-scans and hashes the exact bytes, then stores only its safe label/size/hash and packaged snapshot. Its option source path is not persisted, and preparation rejects that path if repeated in outbound task/model/app/workspace metadata; refer to the label instead. With `auto`, any supplement suppresses GitHub/text-file selection and permits paste only within `--max-paste-bytes`; otherwise preparation fails. Schema 4 represents supplements inside the existing evidence allowlist and its shared limits. Changing the source later does not change an existing package.
+
 When an in-repository output root is not ignored, `prepare` adds a warning pointing to `init`; it does not change Git configuration automatically.
 
-For a deliberate Web MCP package, use `--transport mcp-read` or `--transport mcp-research` plus `--tunnel-id-ref env:NAME` or an absolute owner-only mode-0600 `file:` reference, the intended app/workspace labels, and the smallest directed file set. Both create a prompt-only outbound list and a local immutable ZIP. Schema 4 may add repeated `--evidence-file safe-id=/absolute/private/artifact.txt` entries and research-specific bounds. It never uploads the ZIP and never makes MCP an `auto` fallback. The raw Tunnel ID/reference and evidence source paths are not written to package/runtime/receipt/audit artifacts. Approval and activation remain separate actions.
+For a deliberate Web MCP package, use `--transport mcp-read` or `--transport mcp-research` plus `--tunnel-id-ref env:NAME` or an absolute owner-only mode-0600 `file:` reference, the intended app/workspace labels, and the smallest directed file set. Both create a prompt-only outbound list and a local immutable ZIP. Schema 4 may add repeated `--evidence-file safe-id=/absolute/private/artifact.txt` and `--supplement safe-id=/absolute/private/document.md` entries under the same evidence count/per-file/total limits. It never uploads the ZIP and never makes MCP an `auto` fallback. The raw Tunnel ID/reference and external source paths are not written to package/runtime/receipt/audit artifacts. Approval and activation remain separate actions.
 
 ## Verify and inspect
 
@@ -83,7 +86,7 @@ python3 <skill-dir>/scripts/gptpro.py approve \
   --confirm-transmission
 ```
 
-Approval binds to the manifest, resolved transport, and exact outbound artifact hashes. For `github`, the manifest also binds the repository, immutable commit, optional PR locator, verified remote ref, and selected path set; only `prompt.md` is outbound. Any later artifact change makes verification fail and invalidates progression.
+Approval binds to the manifest, resolved transport, exact outbound artifact hashes, and any supplement labels/sizes/hashes. For `github`, the manifest also binds the repository, immutable commit, optional PR locator, verified remote ref, and selected path set; only `prompt.md` is outbound. Any later artifact change makes verification fail and invalidates progression.
 
 For schema-3 `mcp-read`, first show the exact maximum path/size/hash set, potential bytes, tool schema, limits, expiry, and connector/app/workspace labels, then require both flags:
 
