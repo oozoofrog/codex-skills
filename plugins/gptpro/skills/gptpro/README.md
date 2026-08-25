@@ -2,7 +2,7 @@
 
 `gptpro` is an attended Codex Skill for consulting a logged-in ChatGPT Pro general Chat without giving the web model direct authority over the local repository.
 
-It initializes local handoff storage, scans and hashes selected repository files, records the exact Git state, excludes likely secrets and build noise, requires transport-specific user approval, guides the visible Chrome or human handoff, imports only the package-marked response, and records Codex's later evaluation. GitHub-first handoffs pin a remotely verified immutable commit and send only a prompt; text handoffs retain structured Markdown alternatives. A ZIP is retained locally for audit and integrity checks but is not uploaded by default.
+It initializes local handoff storage, scans and hashes selected repository files, records the exact Git state, excludes likely secrets and build noise, requires transport-specific user approval, guides the visible Chrome or human handoff, imports only the package-marked response, and records Codex's later evaluation. After a confirmed submission with an exact ChatGPT conversation URL, a bounded same-task Codex heartbeat can collect long-running responses without resending the prompt: two-minute checks, at most 15 runs/30 minutes, with receipt-bound creation and terminal cleanup. GitHub-first handoffs pin a remotely verified immutable commit and send only a prompt; text handoffs retain structured Markdown alternatives. A ZIP is retained locally for audit and integrity checks but is not uploaded by default.
 
 This build also contains two explicit experimental Web MCP contracts. Schema-3 `mcp-read` retains the original three-tool immutable repository reader. Schema-4 `mcp-research` adds a prepare-time workspace map and a diff against the exact Git SHA recorded as `HEAD` in the manifest, explicit test/build/diagnostic evidence, multi-range reads, multi-query search, and an owner-controlled context-note ledger. All seven schema-4 MCP tools are read-only so the contract remains usable with ChatGPT Pro's current read/fetch-only custom-MCP support. Pro returns findings in the visible Chat response; it cannot mutate the ledger or repository. Separately approved exact-byte Codex notes may be appended locally and then read by Pro. Both paths supervise the official `tunnel-client` foreground flow and leave Developer Mode, ChatGPT app/workspace selection, account authorization, and prompt submission attended. See [Web MCP repository consultation](references/web-mcp.md), [repository research](references/mcp-research.md), and OpenAI's [Developer mode and MCP apps](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt).
 
@@ -54,7 +54,8 @@ The user normally does not need to construct CLI commands. The Skill:
 3. shows the exact outbound prompt and maximum disclosure contract;
 4. stops for package-specific approval;
 5. guides or performs only the authorized attended delivery steps;
-6. revokes/stops a Web MCP session, imports the marked response, and independently evaluates the advice.
+6. creates one bounded same-task response monitor that checks only the recorded conversation and never resends;
+7. revokes/stops a Web MCP session, imports the marked response, independently evaluates the advice, and removes the monitor.
 
 Transmission is always a separate attended action. Login, Developer Mode, app/workspace selection, OAuth, model selection, and an ambiguous send state remain visible human checkpoints. A successful Tunnel activation is not permission to send the prompt, and a successful Pro response is not permission to modify the repository.
 
@@ -96,7 +97,10 @@ python3 scripts/gptpro.py prepare --repo /path/to/repo --mode review --transport
 python3 scripts/gptpro.py verify --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
 python3 scripts/gptpro.py status --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
 python3 scripts/gptpro.py human-handoff --handoff-dir /path/to/repo/.gptpro/handoffs/<id> --reason manual-transport
+python3 scripts/gptpro.py response-monitor-plan --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
 ```
+
+`response-monitor-plan` is read-only and requires a submitted package with an exact recorded `chatgpt.com` conversation URL. Codex uses its output with the app's same-task heartbeat capability, then records the returned automation identity. See [response completion monitor](references/response-monitor.md); the monitor repeats response collection only and never prompt submission.
 
 Schema-3 preparation requires transient Tunnel identity input plus visible app/workspace labels. The raw Tunnel ID or its reference is not written to package artifacts:
 

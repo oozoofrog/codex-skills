@@ -70,7 +70,7 @@ python3 <skill-dir>/scripts/gptpro.py verify --handoff-dir <dir>
 python3 <skill-dir>/scripts/gptpro.py status --handoff-dir <dir> --json
 ```
 
-`status --json` is the machine-readable bridge between local preparation and any visible browser controller. It reports the resolved transport, exact absolute `outbound_paths`, destination, requested model, context/response markers, current phase, and next required action. It labels the ZIP separately as `local_audit_archive_path`. Its `human_takeover` object reports whether a read-only human checklist is available in the current phase and which reasons are valid. It does not open a browser or submit anything.
+`status --json` is the machine-readable bridge between local preparation and any visible browser controller. It reports the resolved transport, exact absolute `outbound_paths`, destination, requested model, context/response markers, current phase, and next required action. After submission it also reports the receipt-bound `submission`, optional `response_monitor`, and derived `response_collection` status. Collection retry and prompt resend are separate booleans; prompt resend is always false. It labels the ZIP separately as `local_audit_archive_path`. Its `human_takeover` object reports whether a read-only human checklist is available in the current phase and which reasons are valid. It does not open a browser or submit anything.
 
 ## Approve
 
@@ -264,7 +264,21 @@ python3 <skill-dir>/scripts/gptpro.py mark-submitted \
 
 For `github`, use `--observed-transport github` and also provide the exact approved `--observed-github-repository owner/repo` and `--observed-github-commit <sha>`. The command rejects identity drift.
 
-Omit `--thread-url` if the user does not want the URL recorded. Never mark an ambiguous or failed send as submitted. If a transport fails, prepare and approve a new handoff instead of silently falling back.
+Omit `--thread-url` if the user does not want the URL recorded, but automatic response monitoring then fails closed because it cannot prove which conversation to inspect. The URL must be credential-free HTTPS on the exact `chatgpt.com` host. Never mark an ambiguous or failed send as submitted. If a transport fails, prepare and approve a new handoff instead of silently falling back.
+
+## Monitor response completion
+
+After a submitted package records its exact conversation URL, generate a read-only same-task heartbeat plan:
+
+```bash
+python3 <skill-dir>/scripts/gptpro.py response-monitor-plan \
+  --handoff-dir <dir> \
+  --target-thread-id <current-codex-task-id>
+```
+
+Use the Codex app automation capability to create the returned heartbeat, never a daemon or detached cron workaround. It runs every two minutes, at most 15 times/30 minutes, checks only the stored conversation, and prohibits prompt resend or replacement Chat creation. Record the exact returned automation and target task IDs with `record-response-monitor-started`. Delete or pause that automation on completion, blocker, cancellation, or expiry, then call `record-response-monitor-stopped` with the stable reason. If app creation fails, record `creation_failed`; if creation succeeded but receipt recording fails, remove the unbound automation before recording that failure.
+
+The monitor is a response collector, not a new disclosure or execution authority. It may import and independently evaluate the existing marked answer, then resume only work already authorized by the original request. For Web MCP it must complete normal deny/revoke, ledger/audit closure, and exact-child stop requirements before response import. See [response-monitor.md](response-monitor.md) for the complete lifecycle and one-shot cross-task recovery rule.
 
 ## Import
 

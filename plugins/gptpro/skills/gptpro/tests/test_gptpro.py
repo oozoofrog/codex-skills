@@ -110,7 +110,7 @@ class GptProCliTests(unittest.TestCase):
     def load(self, path: Path) -> dict:
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def approve_and_submit(self, handoff: Path) -> dict:
+    def approve_and_submit(self, handoff: Path, *, thread_url: str | None = None) -> dict:
         manifest = self.load(handoff / "manifest.json")
         self.run_cli(
             "approve",
@@ -140,6 +140,7 @@ class GptProCliTests(unittest.TestCase):
             "--observed-transport",
             manifest["transport"]["resolved"],
             "--confirm-sent",
+            *(["--thread-url", thread_url] if thread_url else []),
             *github_args,
         )
         return manifest
@@ -544,9 +545,13 @@ class GptProCliTests(unittest.TestCase):
 
     def test_submitted_handoff_offers_human_response_export(self) -> None:
         handoff = self.prepare()
-        manifest = self.approve_and_submit(handoff)
+        thread_url = "https://chatgpt.com/c/12345678-abcd-1234-abcd-123456789abc"
+        manifest = self.approve_and_submit(handoff, thread_url=thread_url)
         status = json.loads(self.run_cli("status", "--handoff-dir", str(handoff)).stdout)
         self.assertEqual(["login", "captcha", "response-export"], status["human_takeover"]["reasons"])
+        self.assertEqual(thread_url, status["submission"]["thread_url"])
+        self.assertEqual(thread_url, status["response_collection"]["thread_url"])
+        self.assertFalse(status["response_collection"]["automatic_prompt_resend_allowed"])
 
         result = json.loads(
             self.run_cli(
@@ -561,10 +566,178 @@ class GptProCliTests(unittest.TestCase):
         instructions = "\n".join(result["human_steps"] + result["return_with"])
         self.assertIn(markers["begin"], instructions)
         self.assertIn(markers["end"], instructions)
+        self.assertIn(thread_url, instructions)
+        self.assertFalse(result["resume"]["automatic_retry_allowed"])
+        self.assertTrue(result["resume"]["automatic_collection_retry_allowed"])
+        self.assertFalse(result["resume"]["automatic_prompt_resend_allowed"])
         self.assertEqual(
             "run import-response with the saved response file",
             result["resume"]["on_completed"],
         )
+
+    def test_response_monitor_plan_requires_exact_recorded_thread_url(self) -> None:
+        handoff = self.prepare()
+        self.approve_and_submit(handoff)
+        result = self.run_cli(
+            "response-monitor-plan",
+            "--handoff-dir",
+            str(handoff),
+            "--target-thread-id",
+            "019fe4c2-7b00-7213-964e-22607e752d7b",
+            expected=2,
+        )
+        self.assertIn("RESPONSE_MONITOR_THREAD_URL_MISSING", result.stderr)
+
+    def test_response_monitor_records_bounded_lifecycle_without_resend(self) -> None:
+        handoff = self.prepare()
+        thread_url = "https://chatgpt.com/c/12345678-abcd-1234-abcd-123456789abc"
+        manifest = self.approve_and_submit(handoff, thread_url=thread_url)
+        target_thread_id = "019fe4c2-7b00-7213-964e-22607e752d7b"
+        plan = json.loads(
+            self.run_cli(
+                "response-monitor-plan",
+                "--handoff-dir",
+                str(handoff),
+                "--target-thread-id",
+                target_thread_id,
+            ).stdout
+        )
+        self.assertEqual("create_heartbeat", plan["action"])
+        self.assertEqual(120, plan["interval_seconds"])
+        self.assertEqual(15, plan["max_runs"])
+        self.assertIn(thread_url, plan["prompt"])
+        self.assertIn("Never paste, attach, submit, resend", plan["prompt"])
+        self.assertFalse(plan["automatic_prompt_resend_allowed"])
+
+        automation_id = "automation-12345678"
+        self.run_cli(
+            "record-response-monitor-started",
+            "--handoff-dir",
+            str(handoff),
+            "--automation-id",
+            automation_id,
+            "--target-thread-id",
+            target_thread_id,
+            "--deadline",
+            plan["deadline"],
+        )
+        status = json.loads(self.run_cli("status", "--handoff-dir", str(handoff)).stdout)
+        self.assertEqual("monitoring", status["response_collection"]["status"])
+        self.assertEqual(automation_id, status["response_monitor"]["automation_id"])
+        reused = json.loads(
+            self.run_cli(
+                "response-monitor-plan",
+                "--handoff-dir",
+                str(handoff),
+                "--target-thread-id",
+                target_thread_id,
+            ).stdout
+        )
+        self.assertEqual("reuse_existing", reused["action"])
+
+        markers = manifest["response_markers"]
+        response_file = self.root / "monitor-response.md"
+        response_file.write_text(
+            f"{markers['begin']}\nAdvisory response.\n{markers['end']}\n", encoding="utf-8"
+        )
+        self.run_cli(
+            "import-response",
+            "--handoff-dir",
+            str(handoff),
+            "--response-file",
+            str(response_file),
+        )
+        self.run_cli(
+            "record-response-monitor-stopped",
+            "--handoff-dir",
+            str(handoff),
+            "--automation-id",
+            automation_id,
+            "--reason",
+            "response_imported",
+        )
+        status = json.loads(self.run_cli("status", "--handoff-dir", str(handoff)).stdout)
+        self.assertEqual("stopped", status["response_monitor"]["status"])
+        self.assertEqual("response_imported", status["response_monitor"]["stop_reason"])
+        self.assertEqual("response_imported", status["response_collection"]["status"])
+        receipt = self.load(handoff / "receipt.json")
+        self.assertEqual(1, len([e for e in receipt["events"] if e["type"] == "response_monitor_started"]))
+        self.assertEqual(1, len([e for e in receipt["events"] if e["type"] == "response_monitor_stopped"]))
+        self.run_cli("verify", "--handoff-dir", str(handoff))
+
+    def test_response_monitor_creation_failure_is_terminal_and_nonduplicating(self) -> None:
+        handoff = self.prepare()
+        self.approve_and_submit(
+            handoff,
+            thread_url="https://chatgpt.com/c/12345678-abcd-1234-abcd-123456789abc",
+        )
+        target_thread_id = "019fe4c2-7b00-7213-964e-22607e752d7b"
+        plan = json.loads(
+            self.run_cli(
+                "response-monitor-plan",
+                "--handoff-dir",
+                str(handoff),
+                "--target-thread-id",
+                target_thread_id,
+            ).stdout
+        )
+        self.run_cli(
+            "record-response-monitor-stopped",
+            "--handoff-dir",
+            str(handoff),
+            "--target-thread-id",
+            target_thread_id,
+            "--deadline",
+            plan["deadline"],
+            "--reason",
+            "creation_failed",
+        )
+        status = json.loads(self.run_cli("status", "--handoff-dir", str(handoff)).stdout)
+        self.assertEqual("creation_failed", status["response_collection"]["status"])
+        self.assertFalse(status["response_collection"]["automatic_collection_retry_allowed"])
+        no_restart = json.loads(
+            self.run_cli(
+                "response-monitor-plan",
+                "--handoff-dir",
+                str(handoff),
+                "--target-thread-id",
+                target_thread_id,
+            ).stdout
+        )
+        self.assertEqual("none", no_restart["action"])
+
+    def test_submission_rejects_noncanonical_chatgpt_thread_urls(self) -> None:
+        for url in (
+            "https://example.com/c/12345678",
+            "https://user:secret@chatgpt.com/c/12345678",
+            "http://chatgpt.com/c/12345678",
+            "https://chatgpt.com:443/c/12345678",
+            "https://chatgpt.com/",
+        ):
+            with self.subTest(url=url):
+                handoff = self.prepare()
+                self.run_cli(
+                    "approve",
+                    "--handoff-dir",
+                    str(handoff),
+                    "--approved-by",
+                    "user",
+                    "--confirm-transmission",
+                )
+                manifest = self.load(handoff / "manifest.json")
+                self.run_cli(
+                    "mark-submitted",
+                    "--handoff-dir",
+                    str(handoff),
+                    "--observed-model",
+                    manifest["requested_model"],
+                    "--observed-transport",
+                    manifest["transport"]["resolved"],
+                    "--thread-url",
+                    url,
+                    "--confirm-sent",
+                    expected=2,
+                )
 
     def test_auto_transport_uses_text_file_over_policy_threshold(self) -> None:
         handoff = self.prepare("review", "--max-paste-bytes", "1")

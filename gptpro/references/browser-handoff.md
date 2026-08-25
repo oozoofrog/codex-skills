@@ -15,9 +15,10 @@ This stage is attended browser work. Local scripts intentionally stop at verifie
    - `text-file`: attach the exact `context_path`, then paste the exact `prompt_path` content into the message composer.
    - `mcp-read|mcp-research`: follow [web-mcp.md](web-mcp.md) and, for research, [mcp-research.md](mcp-research.md). Proceed only when package-specific approval is current, the official profile preflight passed, the foreground activation controller is still running, and `mcp-status` proves the exact approved package active after a successful control-plane poll. `doctor`, `/healthz`, or `/readyz` alone is insufficient. Never attach or upload the local ZIP.
 7. Verify the requested model/setting, package ID, applicable context markers, and either the complete approved payload, exact Markdown attachment, pinned GitHub identity, or active MCP package are visibly present. Submit once.
-8. After visible acceptance, record `mark-submitted`. If submission is ambiguous, do not record it and do not retry automatically.
-9. Wait for completion without repeated prompt submission or page refresh. For long reasoning, use bounded waits and infrequent UI inspection. Stop on login loss, CAPTCHA, permission failure, rate limit, selector drift, navigation changes, or lost connection.
-10. Capture the complete answer including both package-specific markers into a UTF-8 file and import it locally.
+8. After visible acceptance, record `mark-submitted`, including the exact matching ChatGPT conversation URL. If submission is ambiguous, do not record it and do not retry automatically.
+9. Read [response-monitor.md](response-monitor.md) and create or reuse the same-task bounded heartbeat. It checks the recorded conversation every two minutes for at most 30 minutes/15 runs; it never resends or creates a replacement Chat. If the app automation capability is unavailable, state that automatic monitoring was not installed and retain bounded in-turn waits or human response export.
+10. Wait for completion without repeated prompt submission or page refresh. Stop the exact heartbeat on completion, blocker, cancellation, or expiry.
+11. Capture the complete answer including both package-specific markers into a UTF-8 file and import it locally.
 
 Browser control is not required to complete this stage. When credentials, OAuth/app scope, account choice, permissions, an OS file chooser, model controls, uncertain submission, or response export require a person, follow [human-takeover.md](human-takeover.md). Generate the checklist with `gptpro.py human-handoff` and resume from the user's visible observation. Do not describe a required human checkpoint as a failed consultation.
 
@@ -48,7 +49,7 @@ The generated checklist provides the user:
 - requested model/Pro setting
 - exact response markers
 
-For an implemented transport, the user can create the Chat, paste or attach as specified, and report `sent`, `not-sent`, or `unknown`. For Web MCP, the user also confirms the intended Developer Mode app/workspace and the exact schema-specific tool catalog while the activation controller stays in the foreground. Record `mark-submitted` only for a visibly matching sent turn. If response extraction later needs a person, use `--reason response-export`. The same `approve`, `mark-submitted`, and `import-response` receipts still apply.
+For an implemented transport, the user can create the Chat, paste or attach as specified, and report `sent`, `not-sent`, or `unknown`. For Web MCP, the user also confirms the intended Developer Mode app/workspace and the exact schema-specific tool catalog while the activation controller stays in the foreground. Record `mark-submitted` only for a visibly matching sent turn and retain its exact conversation URL when automatic response monitoring is expected. If response extraction later needs a person, use `--reason response-export`; it names the recorded URL when available and permits collection retry but never prompt resend. The same `approve`, `mark-submitted`, and `import-response` receipts still apply.
 
 ## Why there are no DOM selectors
 

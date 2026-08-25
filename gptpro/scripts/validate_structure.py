@@ -26,6 +26,7 @@ REQUIRED_FILES = (
     "references/manifest-schema.md",
     "references/mcp-research.md",
     "references/request-correlation.md",
+    "references/response-monitor.md",
     "references/security.md",
     "references/user-manual.md",
     "references/web-mcp.md",
