@@ -485,9 +485,21 @@ Pro의 분석·질문·제안은 MCP write가 아니라 보이는 Chat 응답으
 
 ### 1. 전송을 기록합니다
 
-Codex는 보이는 UI에서 정확히 한 번 전송된 사실을 확인한 뒤 `mark-submitted`를 기록합니다. 실패했거나 성공 여부가 모호하면 submitted로 표시하지 않습니다.
+Codex는 보이는 UI에서 정확히 한 번 전송된 사실을 확인한 뒤 `mark-submitted`를 기록합니다. 자동 응답 감시를 사용하려면 이때 해당 ChatGPT 대화의 정확한 URL도 함께 기록합니다. 실패했거나 성공 여부가 모호하면 submitted로 표시하지 않습니다.
 
-### 2. marker가 포함된 답변을 가져옵니다
+### 2. 같은 Codex 작업이 응답을 자동으로 기다립니다
+
+응답이 현재 Codex 실행보다 오래 걸릴 수 있으므로, 제출이 확인되면 같은 작업에 `gptpro response monitor`가 만들어집니다.
+
+- 2분마다 기존 ChatGPT 대화 한 곳만 확인합니다.
+- 최대 30분, 15회까지만 실행합니다.
+- 아직 생성 중이면 아무것도 다시 보내지 않고 다음 확인을 기다립니다.
+- 완료, 사람 확인 필요, 취소, 시간 만료 중 하나가 되면 감시를 끝냅니다.
+- prompt를 다시 보내거나 새 Chat을 만들거나 공개 범위를 바꾸지 않습니다.
+
+이 감시는 별도 서버나 백그라운드 Python daemon이 아니라 Codex 앱이 같은 작업을 다시 깨우는 제한된 heartbeat입니다. 앱의 자동화 기능을 사용할 수 없으면 Codex는 자동 감시가 설치되지 않았다고 명확히 알리고, 현재 실행 안의 제한된 대기나 사람이 응답을 복사하는 경로를 사용합니다.
+
+### 3. marker가 포함된 답변을 가져옵니다
 
 ChatGPT 응답의 다음 두 줄을 포함한 전체 텍스트를 저장합니다.
 
@@ -497,7 +509,7 @@ BEGIN_GPTPRO_RESPONSE:<package-id>
 END_GPTPRO_RESPONSE:<package-id>
 ```
 
-### 3. Codex가 조언을 검증합니다
+### 4. Codex가 조언을 검증합니다
 
 Codex는 다음을 확인해야 합니다.
 
@@ -507,7 +519,7 @@ Codex는 다음을 확인해야 합니다.
 - 관련 테스트를 실제로 실행했는가
 - 시뮬레이터, 실제 기기, 배포 승인처럼 별도 증거가 필요한가
 
-### 4. 평가를 기록합니다
+### 5. 평가를 기록합니다
 
 - `accepted`: 핵심 조언을 근거와 함께 수용
 - `partially-accepted`: 일부만 수용하고 나머지는 기각
@@ -578,6 +590,14 @@ Developer Mode는 ChatGPT 설정 기능이며 브라우저 설정이 아닙니�
 ### 전송했는지 확실하지 않습니다
 
 다시 보내지 마세요. Codex에 `submission-uncertain` 사람 체크리스트를 요청하고 현재 ChatGPT 화면에서 사용자 메시지와 생성 상태를 확인합니다. 성공이 확인되지 않으면 submitted receipt를 만들지 않습니다.
+
+### ChatGPT 응답은 끝났는데 Codex 작업이 멈췄습니다
+
+새 prompt를 보내지 마세요. 원래 package ID와 Codex 작업을 지정해 “기존 대화의 응답만 회수하고 재전송하지 말라”고 요청하세요. 다른 활성 Codex 작업은 `send_message_to_thread`로 원래 작업을 한 번 깨울 수 있습니다. 이것은 한 번의 메시지 전달일 뿐 반복 감시는 아니므로, 원래 작업이 다시 실행되면 기존 monitor를 재사용하거나 아직 없다면 2분/30분 제한 monitor를 만듭니다. `status`의 `submission.thread_url`과 `response_collection.automatic_prompt_resend_allowed=false`가 안전 기준입니다.
+
+### 응답 monitor가 만료되거나 차단됐습니다
+
+자동으로 새 monitor나 새 Chat을 만들지 않습니다. `status`에서 정확한 URL과 종료 이유를 확인하고, 로그인·CAPTCHA·대화 누락·marker 오류 등 표시된 사람 확인을 해결한 뒤 기존 응답을 수동으로 회수할지 결정합니다. 공개 범위나 전송 방식을 바꿔야 한다면 새 package와 새 승인이 필요합니다.
 
 ### `mcp-activate` terminal을 닫았습니다
 

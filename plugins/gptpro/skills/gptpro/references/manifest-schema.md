@@ -26,9 +26,11 @@ For `github`, the only outbound artifact is `prompt.md`. `transport.github` reco
 
 Records the current lifecycle phase and phase-specific metadata. Artifact hashes copied into the state bind later approval and response events to the prepared package. Approval and submission events also record the resolved transport and exact outbound artifact metadata. GitHub submissions additionally record the approved/observed repository identity; imported GitHub responses store the parsed attestation.
 
+An optional additive `response_monitor` object records one package-scoped Codex heartbeat: `active|stopped` status, exact automation and target-task identity when created, start/deadline/stop timestamps, fixed two-minute interval, 15-run limit, and terminal reason. A `creation_failed` record has no automation/start identity. This state does not alter manifest approval, transport, or response completion and is absent from older packages.
+
 ## `receipt.json`
 
-Contains an ordered event list. Each event includes `sequence`, timestamp, type, data, previous-event hash, and its own SHA-256. `verify` checks the chain and package identity.
+Contains an ordered event list. Each event includes `sequence`, timestamp, type, data, previous-event hash, and its own SHA-256. `verify` checks the chain and package identity. Additive `response_monitor_started` and `response_monitor_stopped` events preserve the current consultation phase, match `state.response_monitor`, and may occur for schema 2, 3, or 4 without reinterpreting an older approval. Each package can start and stop at most one monitor automatically.
 
 ## Read-only human handoff output
 

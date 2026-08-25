@@ -17,6 +17,7 @@ import os
 import platform
 import re
 import secrets
+import shlex
 import socket
 import stat
 import subprocess
@@ -129,6 +130,21 @@ MCP_AUXILIARY_EVENTS = (
     "mcp_recovery_recorded",
     "analysis_note_approved",
 )
+RESPONSE_MONITOR_EVENTS = (
+    "response_monitor_started",
+    "response_monitor_stopped",
+)
+RESPONSE_MONITOR_STOP_REASONS = (
+    "response_imported",
+    "evaluated",
+    "blocked",
+    "expired",
+    "cancelled",
+    "creation_failed",
+)
+DEFAULT_RESPONSE_MONITOR_INTERVAL_SECONDS = 120
+DEFAULT_RESPONSE_MONITOR_MAX_RUNS = 15
+DEFAULT_RESPONSE_MONITOR_DURATION_SECONDS = 30 * 60
 MCP_SESSION_STATUSES = ("activating", "active", "revoking", "revoked", "expired", "faulted")
 HUMAN_HANDOFF_REASONS = (
     "login",
@@ -2074,14 +2090,14 @@ def verify_receipt(receipt: dict[str, Any], package_id: str, *, schema_version: 
         if not isinstance(event, dict):
             raise HandoffError("Receipt contains a non-object event")
         event_type = event.get("type")
-        allowed_types = set(PHASES)
+        allowed_types = set(PHASES) | set(RESPONSE_MONITOR_EVENTS)
         if is_mcp_schema(schema_version):
             allowed_types.update(MCP_AUXILIARY_EVENTS)
         if event_type not in allowed_types:
             raise HandoffError(f"Receipt contains unsupported event type {event_type!r} at event {index}")
         if event_type == "analysis_note_approved" and schema_version != SCHEMA_V4:
             raise HandoffError("Analysis-note approval receipts require schema 4")
-        if event_type in MCP_AUXILIARY_EVENTS:
+        if event_type in (*MCP_AUXILIARY_EVENTS, *RESPONSE_MONITOR_EVENTS):
             data = event.get("data")
             if (
                 not isinstance(data, dict)
@@ -2090,14 +2106,14 @@ def verify_receipt(receipt: dict[str, Any], package_id: str, *, schema_version: 
                 or data.get("phase_before") != current_lifecycle_phase
             ):
                 raise HandoffError(
-                    f"Receipt MCP event {event_type!r} must preserve the lifecycle phase"
+                    f"Receipt auxiliary event {event_type!r} must preserve the lifecycle phase"
                 )
-        elif is_mcp_schema(schema_version):
+        else:
             expected_phase = PHASES[0] if current_lifecycle_phase is None else PHASES[
                 PHASES.index(current_lifecycle_phase) + 1
             ] if current_lifecycle_phase != PHASES[-1] else None
             if event_type != expected_phase:
-                raise HandoffError("Schema-3 receipt lifecycle events are missing, duplicated, or reordered")
+                raise HandoffError("Receipt lifecycle events are missing, duplicated, or reordered")
             current_lifecycle_phase = event_type
         if event.get("sequence") != index or event.get("previous_event_hash") != previous:
             raise HandoffError(f"Receipt chain mismatch at event {index}")
@@ -2118,28 +2134,32 @@ def receipt_with_event(
     if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
         raise HandoffError("Receipt schema is unsupported")
     verify_receipt(receipt, package_id, schema_version=int(schema_version))
-    allowed_types = set(PHASES)
+    allowed_types = set(PHASES) | set(RESPONSE_MONITOR_EVENTS)
     if is_mcp_schema(int(schema_version)):
         allowed_types.update(MCP_AUXILIARY_EVENTS)
     if event_type not in allowed_types:
         raise HandoffError(f"Receipt event type {event_type!r} is not valid for schema {schema_version}")
     if event_type == "analysis_note_approved" and int(schema_version) != SCHEMA_V4:
         raise HandoffError("Analysis-note approval receipts require schema 4")
-    if event_type in MCP_AUXILIARY_EVENTS and (
+    auxiliary_events = (
+        (*MCP_AUXILIARY_EVENTS, *RESPONSE_MONITOR_EVENTS)
+        if is_mcp_schema(int(schema_version))
+        else RESPONSE_MONITOR_EVENTS
+    )
+    if event_type in auxiliary_events and (
         data.get("phase_before") not in PHASES
         or data.get("phase_after") != data.get("phase_before")
     ):
-        raise HandoffError(f"Receipt MCP event {event_type!r} must preserve the lifecycle phase")
+        raise HandoffError(f"Receipt auxiliary event {event_type!r} must preserve the lifecycle phase")
     events = receipt["events"]
-    if is_mcp_schema(int(schema_version)):
-        lifecycle = [event["type"] for event in events if event.get("type") in PHASES]
-        current_phase = lifecycle[-1]
-        if event_type in MCP_AUXILIARY_EVENTS and data.get("phase_before") != current_phase:
-            raise HandoffError(f"Receipt MCP event {event_type!r} does not match the current lifecycle phase")
-        if event_type in PHASES:
-            next_index = PHASES.index(current_phase) + 1
-            if next_index >= len(PHASES) or event_type != PHASES[next_index]:
-                raise HandoffError("Schema-3 receipt lifecycle transition is not the next phase")
+    lifecycle = [event["type"] for event in events if event.get("type") in PHASES]
+    current_phase = lifecycle[-1]
+    if event_type in auxiliary_events and data.get("phase_before") != current_phase:
+        raise HandoffError(f"Receipt auxiliary event {event_type!r} does not match the current lifecycle phase")
+    if event_type in PHASES:
+        next_index = PHASES.index(current_phase) + 1
+        if next_index >= len(PHASES) or event_type != PHASES[next_index]:
+            raise HandoffError("Receipt lifecycle transition is not the next phase")
     event = {
         "sequence": len(events) + 1,
         "timestamp": utc_now(),
@@ -2188,6 +2208,107 @@ def append_receipt_event(
 
 def receipt_events(receipt: dict[str, Any], event_type: str) -> list[dict[str, Any]]:
     return [event for event in receipt["events"] if event.get("type") == event_type]
+
+
+def _response_monitor_identifier(raw: Any, *, label: str) -> str:
+    if (
+        not isinstance(raw, str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", raw)
+    ):
+        raise HandoffError(f"{label} is invalid")
+    return raw
+
+
+def _validate_response_monitor_snapshot(
+    monitor: Any, *, allow_creation_failure: bool
+) -> dict[str, Any]:
+    if not isinstance(monitor, dict):
+        raise HandoffError("Response monitor state is invalid")
+    status = monitor.get("status")
+    if status not in {"active", "stopped"}:
+        raise HandoffError("Response monitor status is invalid")
+    target_thread_id = _response_monitor_identifier(
+        monitor.get("target_thread_id"), label="Response monitor target thread ID"
+    )
+    automation_id = monitor.get("automation_id")
+    stop_reason = monitor.get("stop_reason")
+    creation_failure = status == "stopped" and stop_reason == "creation_failed"
+    if creation_failure:
+        if not allow_creation_failure or automation_id is not None or monitor.get("started_at") is not None:
+            raise HandoffError("Response monitor creation-failure state is invalid")
+    else:
+        _response_monitor_identifier(automation_id, label="Response monitor automation ID")
+        parse_utc_timestamp(monitor.get("started_at"), label="Response monitor start time")
+    deadline = parse_utc_timestamp(monitor.get("deadline"), label="Response monitor deadline")
+    if monitor.get("interval_seconds") != DEFAULT_RESPONSE_MONITOR_INTERVAL_SECONDS:
+        raise HandoffError("Response monitor interval is invalid")
+    if monitor.get("max_runs") != DEFAULT_RESPONSE_MONITOR_MAX_RUNS:
+        raise HandoffError("Response monitor run limit is invalid")
+    if not creation_failure:
+        started_at = parse_utc_timestamp(monitor.get("started_at"), label="Response monitor start time")
+        if deadline <= started_at or deadline > started_at + timedelta(
+            seconds=DEFAULT_RESPONSE_MONITOR_DURATION_SECONDS
+        ):
+            raise HandoffError("Response monitor deadline must be within 30 minutes of its start time")
+    if status == "active":
+        if monitor.get("stopped_at") is not None or stop_reason is not None:
+            raise HandoffError("Active response monitor has terminal fields")
+    else:
+        stopped_at = parse_utc_timestamp(
+            monitor.get("stopped_at"), label="Response monitor stop time"
+        )
+        if stop_reason not in RESPONSE_MONITOR_STOP_REASONS:
+            raise HandoffError("Response monitor stop reason is invalid")
+        if not creation_failure and stopped_at < parse_utc_timestamp(
+            monitor.get("started_at"), label="Response monitor start time"
+        ):
+            raise HandoffError("Response monitor stopped before it started")
+        if creation_failure and (
+            deadline <= stopped_at
+            or deadline > stopped_at + timedelta(seconds=DEFAULT_RESPONSE_MONITOR_DURATION_SECONDS)
+        ):
+            raise HandoffError("Failed response monitor deadline is invalid")
+    return {**monitor, "target_thread_id": target_thread_id}
+
+
+def verify_response_monitor(state: dict[str, Any], receipt: dict[str, Any]) -> None:
+    starts = receipt_events(receipt, "response_monitor_started")
+    stops = receipt_events(receipt, "response_monitor_stopped")
+    monitor = state.get("response_monitor")
+    if monitor is None:
+        if starts or stops:
+            raise HandoffError("Response monitor receipt exists without matching state")
+        return
+    validated = _validate_response_monitor_snapshot(monitor, allow_creation_failure=True)
+    if len(starts) > 1 or len(stops) > 1:
+        raise HandoffError("Response monitor may start and stop at most once per package")
+    if validated["status"] == "active":
+        if len(starts) != 1 or stops:
+            raise HandoffError("Active response monitor receipt history is invalid")
+        if starts[0].get("data", {}).get("monitor") != monitor:
+            raise HandoffError("Response monitor start receipt does not match state")
+        return
+    if validated.get("stop_reason") == "creation_failed":
+        if starts or len(stops) != 1:
+            raise HandoffError("Response monitor creation-failure receipt history is invalid")
+    elif len(starts) != 1 or len(stops) != 1:
+        raise HandoffError("Stopped response monitor receipt history is invalid")
+    if stops[0].get("data", {}).get("monitor") != monitor:
+        raise HandoffError("Response monitor stop receipt does not match state")
+    if starts:
+        started = starts[0].get("data", {}).get("monitor")
+        if not isinstance(started, dict) or any(
+            started.get(key) != monitor.get(key)
+            for key in (
+                "automation_id",
+                "target_thread_id",
+                "started_at",
+                "deadline",
+                "interval_seconds",
+                "max_runs",
+            )
+        ):
+            raise HandoffError("Response monitor start and stop receipts are inconsistent")
 
 
 def _verify_activation_stop_receipt_data(data: dict[str, Any]) -> None:
@@ -3462,6 +3583,7 @@ def create_package(args: argparse.Namespace) -> int:
         },
         "approval": None,
         "submission": None,
+        "response_monitor": None,
         "response": None,
         "evaluation": None,
     }
@@ -3815,6 +3937,7 @@ def verify_package(
                 "Schema-3 submission and response phases are not supported without matching receipt evidence"
             )
         raise HandoffError("Receipt's latest event does not match the current state phase")
+    verify_response_monitor(state, receipt)
 
     artifacts = manifest.get("artifacts")
     hashes = manifest.get("hashes")
@@ -7078,7 +7201,7 @@ def next_action(phase: str, transport: str = "paste") -> str:
     return {
         "prepared": "show exact outbound text, hashes, and transport; obtain package-specific user approval",
         "approved": approved_action,
-        "submitted": "wait for completion and import the package-marked response",
+        "submitted": "create or continue the package-scoped response monitor; inspect only the recorded conversation, never resend, and import one complete package-marked response",
         "response_imported": "independently validate the advisory response",
         "evaluated": "report the verified result and any separately authorized implementation",
     }[phase]
@@ -7123,6 +7246,7 @@ def human_handoff_instructions(
     response_markers: dict[str, str],
     github: dict[str, Any] | None,
     connector: dict[str, Any] | None,
+    thread_url: str | None = None,
 ) -> tuple[str, list[str], list[str], dict[str, Any]]:
     approved_paths = [item["path"] for item in outbound_paths]
     common_return = ["what was visibly observed", "whether the requested action was completed, declined, or blocked"]
@@ -7341,9 +7465,15 @@ def human_handoff_instructions(
             },
         )
     if reason == "response-export":
+        conversation_step = (
+            f"Open only the recorded submitted conversation: {thread_url}"
+            if thread_url
+            else "Locate the one uniquely matching submitted conversation by package ID; do not guess or create a new Chat."
+        )
         return (
             "A complete Pro response may need a human copy or download when browser extraction is unavailable or truncated.",
             [
+                conversation_step,
                 "Wait until the same submitted conversation has finished generating.",
                 "Copy the complete assistant response, including both package-specific marker lines, into a UTF-8 text or Markdown file.",
                 "Do not edit, summarize, combine, or add text outside the response markers.",
@@ -7355,11 +7485,244 @@ def human_handoff_instructions(
             ],
             {
                 "allowed_outcomes": ["completed", "blocked"],
-                "automatic_retry_allowed": True,
+                "automatic_retry_allowed": False,
+                "automatic_collection_retry_allowed": True,
+                "automatic_prompt_resend_allowed": False,
                 "on_completed": "run import-response with the saved response file",
             },
         )
     raise HandoffError(f"Unsupported human handoff reason: {reason}")
+
+
+def _response_collection_status(state: dict[str, Any], transport: str) -> dict[str, Any]:
+    phase = str(state["phase"])
+    submission = state.get("submission") if isinstance(state.get("submission"), dict) else None
+    monitor = state.get("response_monitor") if isinstance(state.get("response_monitor"), dict) else None
+    if PHASES.index(phase) < PHASES.index("submitted"):
+        status = "not_submitted"
+    elif phase == "response_imported":
+        status = "response_imported_monitor_cleanup_required" if monitor and monitor.get("status") == "active" else "response_imported"
+    elif phase == "evaluated":
+        status = "evaluated_monitor_cleanup_required" if monitor and monitor.get("status") == "active" else "evaluated"
+    elif monitor and monitor.get("status") == "active":
+        status = "monitoring"
+    elif monitor and monitor.get("stop_reason") in {
+        "blocked",
+        "expired",
+        "cancelled",
+        "creation_failed",
+    }:
+        status = str(monitor["stop_reason"])
+    else:
+        status = "awaiting_observation"
+    if status in {"blocked", "expired", "cancelled", "creation_failed"}:
+        recommended_action = (
+            "report the terminal response-monitor result and require an attended decision; "
+            "do not resend or create a replacement monitor automatically"
+        )
+    else:
+        recommended_action = next_action(phase, transport)
+    return {
+        "status": status,
+        "thread_url": submission.get("thread_url") if submission else None,
+        "automatic_collection_retry_allowed": phase == "submitted"
+        and status not in {"blocked", "expired", "cancelled", "creation_failed"},
+        "automatic_prompt_resend_allowed": False,
+        "recommended_action": recommended_action,
+    }
+
+
+def _response_monitor_prompt(
+    *, package_id: str, handoff_dir: Path, thread_url: str, target_thread_id: str, deadline: str
+) -> str:
+    command = str(SKILL_ROOT / "scripts" / "gptpro.py")
+    status_command = (
+        f"python3 {shlex.quote(command)} status --handoff-dir {shlex.quote(str(handoff_dir))}"
+    )
+    return "\n".join(
+        (
+            f"Continue the existing $gptpro response collection for package `{package_id}` in this same Codex task `{target_thread_id}`.",
+            f"The package directory is `{handoff_dir}` and the only permitted ChatGPT conversation is `{thread_url}`.",
+            f"First run `{status_command}` and verify the same package remains submitted.",
+            "Inspect only that recorded conversation. Never paste, attach, submit, resend, refresh into a new Chat, change transport/model/account/workspace, or widen repository disclosure.",
+            "If ChatGPT is still generating, make no external change and end this heartbeat normally so the next bounded check can run.",
+            "If exactly one complete assistant response with the package-specific BEGIN/END markers is visible, preserve it byte-for-byte in a UTF-8 file, run import-response, independently evaluate it, and continue only work already authorized by the original user request.",
+            "If login, CAPTCHA, account/workspace ambiguity, a missing conversation, incomplete/truncated output, or marker mismatch prevents safe collection, stop the monitor as blocked and report the attended action needed without sending anything.",
+            f"This monitor expires at `{deadline}`. At completion, blocker, or expiry, delete or pause this exact heartbeat and record its terminal reason; do not create a replacement automatically.",
+        )
+    )
+
+
+def command_response_monitor_plan(args: argparse.Namespace) -> int:
+    handoff_dir = validate_handoff_dir(args.handoff_dir)
+    verified = verify_package(handoff_dir)
+    state = verified["state"]
+    require_phase(state, "submitted")
+    target_thread_id = _response_monitor_identifier(
+        args.target_thread_id, label="Response monitor target thread ID"
+    )
+    submission = state.get("submission")
+    if not isinstance(submission, dict) or not isinstance(submission.get("thread_url"), str):
+        raise HandoffError(
+            "RESPONSE_MONITOR_THREAD_URL_MISSING: mark-submitted must record the exact ChatGPT conversation URL before automatic monitoring"
+        )
+    thread_url = validate_chatgpt_thread_url(submission["thread_url"])
+    existing = state.get("response_monitor")
+    if isinstance(existing, dict):
+        if target_thread_id != "current-thread" and existing.get("target_thread_id") != target_thread_id:
+            raise HandoffError("An existing response monitor is bound to a different Codex task")
+        print(
+            json.dumps(
+                {
+                    "action": "reuse_existing" if existing.get("status") == "active" else "none",
+                    "package_id": state["package_id"],
+                    "response_monitor": existing,
+                    "automatic_prompt_resend_allowed": False,
+                },
+                sort_keys=True,
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+    created = datetime.now(timezone.utc).replace(microsecond=0)
+    deadline = created + timedelta(seconds=DEFAULT_RESPONSE_MONITOR_DURATION_SECONDS)
+    created_text = created.isoformat().replace("+00:00", "Z")
+    deadline_text = deadline.isoformat().replace("+00:00", "Z")
+    prompt = _response_monitor_prompt(
+        package_id=state["package_id"],
+        handoff_dir=handoff_dir,
+        thread_url=thread_url,
+        target_thread_id=target_thread_id,
+        deadline=deadline_text,
+    )
+    print(
+        json.dumps(
+            {
+                "action": "create_heartbeat",
+                "package_id": state["package_id"],
+                "name": f"gptpro response {state['package_id']}",
+                "target_thread_id": target_thread_id,
+                "created_at": created_text,
+                "deadline": deadline_text,
+                "interval_seconds": DEFAULT_RESPONSE_MONITOR_INTERVAL_SECONDS,
+                "max_runs": DEFAULT_RESPONSE_MONITOR_MAX_RUNS,
+                "prompt": prompt,
+                "automatic_collection_retry_allowed": True,
+                "automatic_prompt_resend_allowed": False,
+                "terminal_reasons": list(RESPONSE_MONITOR_STOP_REASONS),
+            },
+            sort_keys=True,
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
+@_with_package_lock(_command_handoff_arg)
+def command_record_response_monitor_started(args: argparse.Namespace) -> int:
+    handoff_dir = validate_handoff_dir(args.handoff_dir)
+    verified = verify_package(handoff_dir)
+    state = verified["state"]
+    require_phase(state, "submitted")
+    if state.get("response_monitor") is not None:
+        raise HandoffError("A response monitor is already recorded for this package")
+    automation_id = _response_monitor_identifier(
+        args.automation_id, label="Response monitor automation ID"
+    )
+    target_thread_id = _response_monitor_identifier(
+        args.target_thread_id, label="Response monitor target thread ID"
+    )
+    started = datetime.now(timezone.utc).replace(microsecond=0)
+    deadline = parse_utc_timestamp(args.deadline, label="Response monitor deadline")
+    if deadline <= started or deadline > started + timedelta(seconds=DEFAULT_RESPONSE_MONITOR_DURATION_SECONDS):
+        raise HandoffError("Response monitor deadline must be in the next 30 minutes")
+    monitor = {
+        "status": "active",
+        "automation_id": automation_id,
+        "target_thread_id": target_thread_id,
+        "started_at": started.isoformat().replace("+00:00", "Z"),
+        "deadline": deadline.isoformat().replace("+00:00", "Z"),
+        "interval_seconds": DEFAULT_RESPONSE_MONITOR_INTERVAL_SECONDS,
+        "max_runs": DEFAULT_RESPONSE_MONITOR_MAX_RUNS,
+        "stopped_at": None,
+        "stop_reason": None,
+    }
+    state["response_monitor"] = monitor
+    state["updated_at"] = monitor["started_at"]
+    if is_mcp_schema(state["schema_version"]):
+        state["revision"] += 1
+    event_data = {"phase_before": state["phase"], "phase_after": state["phase"], "monitor": monitor}
+    commit_state_receipt_event(handoff_dir, state, "response_monitor_started", event_data)
+    print(json.dumps({"package_id": state["package_id"], "response_monitor": monitor}, indent=2))
+    return 0
+
+
+@_with_package_lock(_command_handoff_arg)
+def command_record_response_monitor_stopped(args: argparse.Namespace) -> int:
+    handoff_dir = validate_handoff_dir(args.handoff_dir)
+    verified = verify_package(handoff_dir)
+    state = verified["state"]
+    if PHASES.index(state["phase"]) < PHASES.index("submitted"):
+        raise HandoffError("Response monitor stop evidence requires a submitted package")
+    existing = state.get("response_monitor")
+    stopped_at = utc_now()
+    if isinstance(existing, dict) and existing.get("status") == "stopped":
+        if existing.get("stop_reason") != args.reason:
+            raise HandoffError("Response monitor is already stopped with a different reason")
+        if existing.get("automation_id") is not None and args.automation_id != existing.get("automation_id"):
+            raise HandoffError("Response monitor automation ID does not match stopped state")
+        print(json.dumps({"package_id": state["package_id"], "response_monitor": existing}, indent=2))
+        return 0
+    if args.reason == "creation_failed":
+        if existing is not None:
+            raise HandoffError("creation_failed applies only when no response monitor was created")
+        target_thread_id = _response_monitor_identifier(
+            args.target_thread_id, label="Response monitor target thread ID"
+        )
+        deadline = parse_utc_timestamp(args.deadline, label="Response monitor deadline")
+        stopped_time = parse_utc_timestamp(stopped_at, label="Response monitor stop time")
+        if deadline <= stopped_time or deadline > stopped_time + timedelta(
+            seconds=DEFAULT_RESPONSE_MONITOR_DURATION_SECONDS
+        ):
+            raise HandoffError("Failed response monitor deadline must be in the next 30 minutes")
+        monitor = {
+            "status": "stopped",
+            "automation_id": None,
+            "target_thread_id": target_thread_id,
+            "started_at": None,
+            "deadline": deadline.isoformat().replace("+00:00", "Z"),
+            "interval_seconds": DEFAULT_RESPONSE_MONITOR_INTERVAL_SECONDS,
+            "max_runs": DEFAULT_RESPONSE_MONITOR_MAX_RUNS,
+            "stopped_at": stopped_at,
+            "stop_reason": args.reason,
+        }
+    else:
+        if not isinstance(existing, dict) or existing.get("status") != "active":
+            raise HandoffError("No active response monitor matches this stop request")
+        automation_id = _response_monitor_identifier(
+            args.automation_id, label="Response monitor automation ID"
+        )
+        if automation_id != existing.get("automation_id"):
+            raise HandoffError("Response monitor automation ID does not match active state")
+        if args.reason == "response_imported" and PHASES.index(state["phase"]) < PHASES.index("response_imported"):
+            raise HandoffError("response_imported stop reason requires an imported response")
+        if args.reason == "evaluated" and state["phase"] != "evaluated":
+            raise HandoffError("evaluated stop reason requires an evaluated response")
+        if args.reason == "expired" and datetime.now(timezone.utc) < parse_utc_timestamp(
+            existing["deadline"], label="Response monitor deadline"
+        ):
+            raise HandoffError("Response monitor has not reached its deadline")
+        monitor = {**existing, "status": "stopped", "stopped_at": stopped_at, "stop_reason": args.reason}
+    state["response_monitor"] = monitor
+    state["updated_at"] = stopped_at
+    if is_mcp_schema(state["schema_version"]):
+        state["revision"] += 1
+    event_data = {"phase_before": state["phase"], "phase_after": state["phase"], "monitor": monitor}
+    commit_state_receipt_event(handoff_dir, state, "response_monitor_stopped", event_data)
+    print(json.dumps({"package_id": state["package_id"], "response_monitor": monitor}, indent=2))
+    return 0
 
 
 def command_status(args: argparse.Namespace) -> int:
@@ -7397,6 +7760,11 @@ def command_status(args: argparse.Namespace) -> int:
         "totals": manifest["totals"],
         "security_findings": manifest["security_findings"],
         "warnings": manifest["warnings"],
+        "submission": state.get("submission"),
+        "response_monitor": state.get("response_monitor"),
+        "response_collection": _response_collection_status(
+            state, str(manifest["transport"]["resolved"])
+        ),
         "response": state.get("response"),
         "human_takeover": {
             "available": bool(human_handoff_reasons_for(state["phase"], manifest["transport"]["resolved"])),
@@ -9441,6 +9809,7 @@ def command_human_handoff(args: argparse.Namespace) -> int:
         response_markers=manifest["response_markers"],
         github=manifest["transport"].get("github"),
         connector=manifest.get("connector"),
+        thread_url=(state.get("submission") or {}).get("thread_url"),
     )
     payload = {
         "status": "human_action_required",
@@ -9875,14 +10244,32 @@ def command_approve(args: argparse.Namespace) -> int:
     return 0
 
 
+def validate_chatgpt_thread_url(raw: str) -> str:
+    value = raw.strip()
+    try:
+        parsed = urlparse(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise HandoffError("--thread-url must be a valid https://chatgpt.com/ URL") from exc
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "chatgpt.com"
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or re.fullmatch(r"/c/[A-Za-z0-9-]+/?", parsed.path) is None
+    ):
+        raise HandoffError("--thread-url must be a credential-free https://chatgpt.com/ URL")
+    return value
+
+
 @_with_package_lock(_command_handoff_arg)
 def command_mark_submitted(args: argparse.Namespace) -> int:
     if not args.confirm_sent:
         raise HandoffError("Submission recording requires --confirm-sent after visible UI confirmation")
     if not args.observed_model.strip():
         raise HandoffError("--observed-model must not be empty")
-    if args.thread_url and not args.thread_url.startswith("https://chatgpt.com/"):
-        raise HandoffError("--thread-url must be an https://chatgpt.com/ URL")
+    thread_url = validate_chatgpt_thread_url(args.thread_url) if args.thread_url else None
     handoff_dir = validate_handoff_dir(args.handoff_dir)
     verified = verify_package(handoff_dir)
     state = verified["state"]
@@ -9925,7 +10312,7 @@ def command_mark_submitted(args: argparse.Namespace) -> int:
         "observed_model": requested_model,
         "transport": approved_transport,
         "outbound_artifacts": verified["outbound_artifacts"],
-        "thread_url": args.thread_url or None,
+        "thread_url": thread_url,
         "github": github,
         **(
             {
@@ -10252,6 +10639,37 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "status":
             command.add_argument("--json", action="store_true", help="Compatibility flag; output is always JSON")
         command.set_defaults(func=func)
+
+    response_monitor_plan = subparsers.add_parser(
+        "response-monitor-plan",
+        help="Emit a read-only package-scoped Codex heartbeat plan for one submitted conversation",
+    )
+    response_monitor_plan.add_argument("--handoff-dir", required=True)
+    response_monitor_plan.add_argument("--target-thread-id", default="current-thread")
+    response_monitor_plan.set_defaults(func=command_response_monitor_plan)
+
+    response_monitor_started = subparsers.add_parser(
+        "record-response-monitor-started",
+        help="Record the exact Codex heartbeat created from response-monitor-plan",
+    )
+    response_monitor_started.add_argument("--handoff-dir", required=True)
+    response_monitor_started.add_argument("--automation-id", required=True)
+    response_monitor_started.add_argument("--target-thread-id", required=True)
+    response_monitor_started.add_argument("--deadline", required=True)
+    response_monitor_started.set_defaults(func=command_record_response_monitor_started)
+
+    response_monitor_stopped = subparsers.add_parser(
+        "record-response-monitor-stopped",
+        help="Record terminal cleanup of one exact package-scoped response heartbeat",
+    )
+    response_monitor_stopped.add_argument("--handoff-dir", required=True)
+    response_monitor_stopped.add_argument("--automation-id")
+    response_monitor_stopped.add_argument("--target-thread-id")
+    response_monitor_stopped.add_argument("--deadline")
+    response_monitor_stopped.add_argument(
+        "--reason", choices=RESPONSE_MONITOR_STOP_REASONS, required=True
+    )
+    response_monitor_stopped.set_defaults(func=command_record_response_monitor_stopped)
 
     analysis_status = subparsers.add_parser(
         "analysis-status", help="Verify and print the schema-4 advisory analysis ledger"

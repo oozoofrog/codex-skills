@@ -55,7 +55,8 @@ Treat this report as an attended observation, not as permission for unrelated ac
 - For a completed `manual-transport`, run `mark-submitted` only when the person reports `sent` and a matching user turn is visibly present.
 - For `mcp-read|mcp-research`, verify the exact package remains active before Send. Keep the foreground activation controller running through response completion, then revoke/stop it. A user confirmation of Developer Mode or app selection is not proof that the Tunnel or tool calls worked. For research, never publish a Codex context note merely because the package was approved; use the separate exact-byte note gate, and do not call local publication network delivery.
 - For `submission-uncertain`, never send again automatically. Record submission only after a matching package-specific user turn is visible. Keep the phase `approved` for `not-sent` or `unknown` and ask before any new attempt.
-- For `response-export`, import only the saved UTF-8 file containing both exact response markers.
+- For `response-export`, open only the exact conversation URL stored by `mark-submitted` when available and import only the saved UTF-8 file containing both exact response markers. `automatic_collection_retry_allowed` applies only to checking/copying that existing response; `automatic_prompt_resend_allowed` and the legacy generic retry flag remain false.
+- For a response that may outlive the current turn, follow [response-monitor.md](response-monitor.md). Its same-task heartbeat is bounded and terminal; a different active task may send one recovery message, but that message is not a recurring watcher or permission to resubmit.
 - A declined or blocked human action ends the current browser attempt without changing the approved package. Report the blocker and preserve the handoff for a later explicit decision.
 
 ## Why this is safer
