@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import os
@@ -7,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 import zipfile
 from pathlib import Path
@@ -110,8 +112,65 @@ class GptProCliTests(unittest.TestCase):
     def load(self, path: Path) -> dict:
         return json.loads(path.read_text(encoding="utf-8"))
 
+    def write_json(self, path: Path, value: dict) -> None:
+        path.write_bytes(GPTPRO.pretty_json_bytes(value))
+
+    def rebind_prepared_package(self, handoff: Path) -> dict:
+        """Rebind ordinary integrity fields so semantic tamper tests reach verification."""
+
+        manifest_path = handoff / "manifest.json"
+        manifest = self.load(manifest_path)
+        artifacts = manifest["artifacts"]
+        hashes = manifest["hashes"]
+        for artifact in ("prompt", "context", "archive", "paste_payload"):
+            name = artifacts.get(artifact)
+            if isinstance(name, str):
+                hashes[f"{artifact}_sha256"] = GPTPRO.sha256_file(handoff / name)
+        for outbound in manifest["transport"]["outbound_artifacts"]:
+            artifact = outbound["artifact"]
+            path = handoff / artifacts[artifact]
+            outbound["bytes"] = path.stat().st_size
+            outbound["sha256"] = hashes[f"{artifact}_sha256"]
+        if "candidate_paste_bytes" in manifest["transport"]:
+            manifest["transport"]["candidate_paste_bytes"] = (
+                handoff / artifacts["paste_payload"]
+            ).stat().st_size
+        self.write_json(manifest_path, manifest)
+        manifest_hash = GPTPRO.sha256_file(manifest_path)
+
+        state_path = handoff / "state.json"
+        state = self.load(state_path)
+        state["artifact_hashes"] = {
+            "manifest_sha256": manifest_hash,
+            **{
+                f"{artifact}_sha256": hashes[f"{artifact}_sha256"]
+                for artifact in ("prompt", "archive", "context", "paste_payload")
+                if artifact in artifacts
+            },
+        }
+        self.write_json(state_path, state)
+
+        receipt_path = handoff / "receipt.json"
+        receipt = self.load(receipt_path)
+        self.assertEqual(["prepared"], [event["type"] for event in receipt["events"]])
+        receipt["events"][0]["data"] = GPTPRO.prepared_receipt_data(
+            manifest, manifest_hash
+        )
+        receipt["events"][0]["event_hash"] = GPTPRO.event_hash(receipt["events"][0])
+        self.write_json(receipt_path, receipt)
+        return manifest
+
+    def replace_zip_member(self, archive_path: Path, member: str, content: bytes) -> None:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            members = [(info, archive.read(info.filename)) for info in archive.infolist()]
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            for info, original in members:
+                archive.writestr(info, content if info.filename == member else original)
+
     def approve_and_submit(self, handoff: Path, *, thread_url: str | None = None) -> dict:
         manifest = self.load(handoff / "manifest.json")
+        if thread_url is None:
+            thread_url = f"https://chatgpt.com/c/{manifest['package_id']}"
         self.run_cli(
             "approve",
             "--handoff-dir",
@@ -139,11 +198,19 @@ class GptProCliTests(unittest.TestCase):
             manifest["requested_model"],
             "--observed-transport",
             manifest["transport"]["resolved"],
+            "--thread-url",
+            thread_url,
+            "--confirm-new-general-chat",
             "--confirm-sent",
-            *(["--thread-url", thread_url] if thread_url else []),
             *github_args,
         )
         return manifest
+
+    def test_prepare_help_explains_supplement_transport_and_paste_limit(self) -> None:
+        result = self.run_cli("prepare", "--help")
+        normalized = " ".join(result.stdout.split())
+        self.assertIn("--supplement makes it bounded paste-only", normalized)
+        self.assertIn("hard limit on the complete paste payload", normalized)
 
     def test_prepare_records_git_and_excludes_detected_secrets_without_values(self) -> None:
         handoff = self.prepare()
@@ -158,6 +225,557 @@ class GptProCliTests(unittest.TestCase):
         self.assertIn("secret.txt", finding_paths)
         self.assertNotIn(self.secret_value, manifest_text)
         self.assertEqual(0, self.run_cli("verify", "--handoff-dir", str(handoff)).returncode)
+
+    def test_paste_packages_external_supplement_without_source_path_disclosure(self) -> None:
+        supplement = self.root / "private requirements.md"
+        content = b"# Requirements\r\nPreserve exact bytes without browser upload.\r\n"
+        supplement.write_bytes(content)
+        supplement.chmod(0o600)
+
+        handoff = self.prepare(
+            "review",
+            "--transport",
+            "paste",
+            "--supplement",
+            f"requirements={supplement.resolve()}",
+        )
+        manifest = self.load(handoff / "manifest.json")
+        entry = manifest["supplements"][0]
+        self.assertEqual("requirements", entry["label"])
+        self.assertEqual(len(content), entry["size"])
+        self.assertEqual(GPTPRO.sha256_bytes(content), entry["sha256"])
+        self.assertEqual(
+            GPTPRO.sha256_bytes(
+                GPTPRO.canonical_json_bytes(
+                    [{"label": "requirements", "size": len(content), "sha256": entry["sha256"]}]
+                )
+            ),
+            manifest["hashes"]["supplement_set_sha256"],
+        )
+        context = (handoff / manifest["artifacts"]["context"]).read_bytes()
+        self.assertIn(content, context)
+        self.assertIn(b"GPTPRO_SUPPLEMENT_BEGIN:", context)
+        with zipfile.ZipFile(handoff / manifest["artifacts"]["archive"], "r") as archive:
+            self.assertEqual(content, archive.read("_gptpro/supplements/requirements.txt"))
+        source_path = str(supplement.resolve()).encode("utf-8")
+        for artifact in handoff.iterdir():
+            if artifact.is_file():
+                self.assertNotIn(source_path, artifact.read_bytes(), artifact.name)
+        prepared = self.load(handoff / "receipt.json")["events"][0]["data"]
+        self.assertEqual(
+            manifest["hashes"]["supplement_set_sha256"],
+            prepared["supplement_set_sha256"],
+        )
+        status = json.loads(
+            self.run_cli("status", "--handoff-dir", str(handoff), "--json").stdout
+        )
+        self.assertEqual(
+            [{"label": "requirements", "size": len(content), "sha256": entry["sha256"]}],
+            status["supplemental_documents"],
+        )
+        supplement.write_text("changed after prepare\n", encoding="utf-8")
+        self.run_cli("verify", "--handoff-dir", str(handoff))
+
+    def test_supplement_auto_uses_only_bounded_paste_and_rejects_other_transports(self) -> None:
+        self.configure_github_remote()
+        supplement = self.root / "notes.txt"
+        supplement.write_text("local-only note\n", encoding="utf-8")
+        supplement.chmod(0o600)
+
+        auto = self.prepare("ask", "--supplement", f"notes={supplement.resolve()}")
+        manifest = self.load(auto / "manifest.json")
+        self.assertEqual("paste", manifest["transport"]["resolved"])
+        self.assertNotIn("github", manifest["transport"])
+        self.assertTrue(any("supplemental" in item for item in manifest["warnings"]))
+
+        for transport in ("github", "text-file", "mcp-read"):
+            with self.subTest(transport=transport):
+                result = self.run_cli(
+                    "prepare",
+                    "--repo",
+                    str(self.repo),
+                    "--mode",
+                    "ask",
+                    "--task",
+                    "Reject an unsupported supplemental transport.",
+                    "--transport",
+                    transport,
+                    "--supplement",
+                    f"notes={supplement.resolve()}",
+                    "--output-root",
+                    str(self.root / f"rejected-{transport}"),
+                    expected=2,
+                )
+                self.assertIn("cannot represent this external document contract", result.stderr)
+
+        oversized = self.root / "oversized.txt"
+        oversized.write_bytes(b"x" * (GPTPRO.DEFAULT_MAX_PASTE_BYTES + 1))
+        oversized.chmod(0o600)
+        rejected = self.run_cli(
+            "prepare",
+            "--repo",
+            str(self.repo),
+            "--mode",
+            "ask",
+            "--task",
+            "Reject a browser upload fallback.",
+            "--supplement",
+            f"oversized={oversized.resolve()}",
+            "--output-root",
+            str(self.root / "oversized-output"),
+            expected=2,
+        )
+        self.assertIn("mcp-research", rejected.stderr)
+        self.assertFalse((self.root / "oversized-output").exists())
+
+    def test_supplement_rejects_unsafe_or_secret_external_inputs(self) -> None:
+        secret = self.root / "secret supplement.txt"
+        secret.write_text(f"OPENAI_API_KEY={self.secret_value}\n", encoding="utf-8")
+        secret.chmod(0o600)
+        invalid = self.root / "invalid.bin"
+        invalid.write_bytes(b"\xff\xfe\x00")
+        invalid.chmod(0o600)
+        symlink = self.root / "linked.txt"
+        symlink.symlink_to(invalid)
+
+        for label, specification, expected_text in (
+            ("secret", f"requirements={secret.resolve()}", "secret-like material"),
+            ("invalid", f"invalid={invalid.resolve()}", "NUL or binary data"),
+            ("symlink", f"linked={symlink}", "symlink traversal"),
+            ("relative", "relative=not-absolute.txt", "absolute path"),
+        ):
+            with self.subTest(case=label):
+                result = self.run_cli(
+                    "prepare",
+                    "--repo",
+                    str(self.repo),
+                    "--mode",
+                    "ask",
+                    "--task",
+                    "Reject unsafe supplemental input.",
+                    "--transport",
+                    "paste",
+                    "--supplement",
+                    specification,
+                    "--output-root",
+                    str(self.root / f"unsafe-{label}"),
+                    expected=2,
+                )
+                self.assertIn(expected_text, result.stderr)
+                self.assertNotIn(self.secret_value, result.stdout + result.stderr)
+
+    def test_supplement_source_path_cannot_be_reflected_into_outbound_task(self) -> None:
+        for index, filename in enumerate(("private-location.md", 'quoted"\nlocation.md')):
+            with self.subTest(filename=filename):
+                supplement = self.root / filename
+                supplement.write_text("approved body\n", encoding="utf-8")
+                supplement.chmod(0o600)
+                source_path = str(supplement.resolve())
+                output_root = self.root / f"reflected-path-output-{index}"
+                result = self.run_cli(
+                    "prepare",
+                    "--repo",
+                    str(self.repo),
+                    "--mode",
+                    "ask",
+                    "--task",
+                    f"Read the source at {source_path}.",
+                    "--transport",
+                    "paste",
+                    "--supplement",
+                    f"requirements={source_path}",
+                    "--output-root",
+                    str(output_root),
+                    expected=2,
+                )
+                self.assertIn("refer to the safe supplement LABEL", result.stderr)
+                self.assertNotIn(source_path, result.stdout + result.stderr)
+                self.assertFalse(output_root.exists())
+
+    def test_supplement_source_path_reflection_uses_case_and_unicode_normalization(self) -> None:
+        supplement = self.root / "Privaté-Requirements.md"
+        supplement.write_text("approved body\n", encoding="utf-8")
+        supplement.chmod(0o600)
+        source_path = str(supplement.resolve())
+        reflected_variants = {
+            source_path.swapcase(),
+            unicodedata.normalize("NFD", source_path),
+        }
+        self.assertTrue(any(value != source_path for value in reflected_variants))
+
+        for index, reflected in enumerate(sorted(reflected_variants)):
+            with self.subTest(reflected=reflected):
+                output_root = self.root / f"normalized-reflection-{index}"
+                result = self.run_cli(
+                    "prepare",
+                    "--repo",
+                    str(self.repo),
+                    "--mode",
+                    "ask",
+                    "--task",
+                    f"Read the source at {reflected}.",
+                    "--transport",
+                    "paste",
+                    "--supplement",
+                    f"requirements={source_path}",
+                    "--output-root",
+                    str(output_root),
+                    expected=2,
+                )
+                self.assertIn("safe supplement LABEL", result.stderr)
+                self.assertFalse(output_root.exists())
+
+    def test_supplement_input_requires_strict_utf8_owner_controlled_unlinked_regular_file(self) -> None:
+        invalid_utf8 = self.root / "invalid-utf8.txt"
+        invalid_utf8.write_bytes(b"plain-prefix-\xff\xfe")
+        invalid_utf8.chmod(0o600)
+        shared_writable = self.root / "shared-writable.txt"
+        shared_writable.write_text("approved body\n", encoding="utf-8")
+        shared_writable.chmod(0o620)
+        hardlinked = self.root / "hardlinked.txt"
+        hardlinked.write_text("approved body\n", encoding="utf-8")
+        hardlinked.chmod(0o600)
+        os.link(hardlinked, self.root / "hardlinked-copy.txt")
+
+        for label, source, message in (
+            ("invalid", invalid_utf8, "strict UTF-8"),
+            ("mode", shared_writable, "unsafe ownership"),
+            ("link", hardlinked, "unsafe ownership"),
+        ):
+            with self.subTest(case=label), self.assertRaisesRegex(
+                GPTPRO.HandoffError, message
+            ):
+                GPTPRO.read_supplements([f"{label}={source.resolve()}"])
+
+    def test_supplement_input_fails_closed_without_posix_owner_open_capabilities(self) -> None:
+        source = self.root / "platform-capability.txt"
+        source.write_text("approved body\n", encoding="utf-8")
+        source.chmod(0o600)
+        for patcher in (
+            mock.patch.object(GPTPRO, "_OPEN_SUPPORTS_DIR_FD", False),
+            mock.patch.object(GPTPRO.os, "getuid", None),
+        ):
+            with patcher, self.assertRaisesRegex(
+                GPTPRO.HandoffError, "POSIX owner and directory-fd support"
+            ):
+                GPTPRO.read_supplements([f"platform={source.resolve()}"])
+
+    def test_supplement_input_rejects_file_changed_during_descriptor_read(self) -> None:
+        source = self.root / "racing-input.txt"
+        source.write_bytes(b"approved body A\n")
+        source.chmod(0o600)
+        real_read = GPTPRO.os.read
+        changed = False
+
+        def racing_read(descriptor: int, maximum: int) -> bytes:
+            nonlocal changed
+            chunk = real_read(descriptor, maximum)
+            if chunk and not changed:
+                changed = True
+                source.write_bytes(b"approved body B\n")
+                source.chmod(0o600)
+            return chunk
+
+        with (
+            mock.patch.object(GPTPRO.os, "read", side_effect=racing_read),
+            self.assertRaisesRegex(GPTPRO.HandoffError, "changed while it was read"),
+        ):
+            GPTPRO.read_supplements([f"racing={source.resolve()}"])
+        self.assertTrue(changed)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires POSIX FIFO support")
+    def test_supplement_fifo_is_rejected_without_blocking(self) -> None:
+        fifo = self.root / "supplement.fifo"
+        os.mkfifo(fifo, 0o600)
+        arguments = [
+            sys.executable,
+            str(SCRIPT),
+            "prepare",
+            "--repo",
+            str(self.repo),
+            "--mode",
+            "ask",
+            "--task",
+            "Reject a non-regular supplemental input.",
+            "--transport",
+            "paste",
+            "--supplement",
+            f"fifo={fifo.resolve()}",
+            "--output-root",
+            str(self.root / "fifo-output"),
+        ]
+        try:
+            result = subprocess.run(
+                arguments,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=3,
+            )
+        except subprocess.TimeoutExpired as exc:
+            self.fail(f"FIFO open blocked past the bounded timeout: {exc}")
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn("unsafe ownership", result.stderr)
+
+    def test_supplement_missing_tilde_user_fails_without_traceback(self) -> None:
+        result = self.run_cli(
+            "prepare",
+            "--repo",
+            str(self.repo),
+            "--mode",
+            "ask",
+            "--task",
+            "Reject an unresolved home-directory reference.",
+            "--transport",
+            "paste",
+            "--supplement",
+            "requirements=~gptpro-user-that-must-not-exist/document.txt",
+            "--output-root",
+            str(self.root / "missing-home-output"),
+            expected=2,
+        )
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertNotIn(str(SCRIPT), result.stderr)
+        self.assertFalse((self.root / "missing-home-output").exists())
+
+    def test_supplement_count_file_and_total_byte_boundaries(self) -> None:
+        tiny_files: list[Path] = []
+        for index in range(GPTPRO.DEFAULT_MAX_SUPPLEMENT_FILES + 1):
+            path = self.root / f"tiny-{index:02d}.txt"
+            path.write_bytes(b"x")
+            path.chmod(0o600)
+            tiny_files.append(path)
+        accepted_tiny = [
+            f"tiny-{index}={path.resolve()}"
+            for index, path in enumerate(tiny_files[:-1])
+        ]
+        self.assertEqual(
+            GPTPRO.DEFAULT_MAX_SUPPLEMENT_FILES,
+            len(GPTPRO.read_supplements(accepted_tiny)),
+        )
+        with self.assertRaisesRegex(GPTPRO.HandoffError, "Too many"):
+            GPTPRO.read_supplements(
+                [
+                    f"tiny-{index}={path.resolve()}"
+                    for index, path in enumerate(tiny_files)
+                ]
+            )
+
+        full_files: list[Path] = []
+        for index in range(
+            GPTPRO.DEFAULT_MAX_SUPPLEMENT_TOTAL_BYTES
+            // GPTPRO.DEFAULT_MAX_SUPPLEMENT_FILE_BYTES
+        ):
+            path = self.root / f"full-{index}.txt"
+            path.write_bytes(b"x" * GPTPRO.DEFAULT_MAX_SUPPLEMENT_FILE_BYTES)
+            path.chmod(0o600)
+            full_files.append(path)
+        accepted_full = [
+            f"full-{index}={path.resolve()}"
+            for index, path in enumerate(full_files)
+        ]
+        self.assertEqual(
+            GPTPRO.DEFAULT_MAX_SUPPLEMENT_TOTAL_BYTES,
+            sum(item.size for item in GPTPRO.read_supplements(accepted_full)),
+        )
+
+        over_file = self.root / "over-file.txt"
+        over_file.write_bytes(b"x" * (GPTPRO.DEFAULT_MAX_SUPPLEMENT_FILE_BYTES + 1))
+        over_file.chmod(0o600)
+        with self.assertRaisesRegex(GPTPRO.HandoffError, "unsafe ownership"):
+            GPTPRO.read_supplements([f"over={over_file.resolve()}"])
+
+        over_total = self.root / "over-total.txt"
+        over_total.write_bytes(b"x")
+        over_total.chmod(0o600)
+        with self.assertRaisesRegex(GPTPRO.HandoffError, "total-byte limit"):
+            GPTPRO.read_supplements([*accepted_full, f"over={over_total.resolve()}"])
+
+    def test_supplement_archive_or_manifest_tampering_is_detected(self) -> None:
+        supplement = self.root / "review.txt"
+        supplement.write_text("immutable review notes\n", encoding="utf-8")
+        supplement.chmod(0o600)
+        handoff = self.prepare(
+            "review",
+            "--transport",
+            "paste",
+            "--supplement",
+            f"review={supplement.resolve()}",
+        )
+        manifest_path = handoff / "manifest.json"
+        manifest = self.load(manifest_path)
+        manifest["supplements"][0]["sha256"] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        rejected = self.run_cli("verify", "--handoff-dir", str(handoff), expected=2)
+        self.assertIn("supplemental document set hash mismatch", rejected.stderr)
+
+    def test_schema2_context_body_mismatch_rejects_after_integrity_rebinding(self) -> None:
+        supplement = self.root / "body-binding.txt"
+        original = b"archive body A\r\n"
+        replacement = b"context body B\r\n"
+        self.assertEqual(len(original), len(replacement))
+        supplement.write_bytes(original)
+        supplement.chmod(0o600)
+        handoff = self.prepare(
+            "review",
+            "--transport",
+            "paste",
+            "--supplement",
+            f"binding={supplement.resolve()}",
+        )
+        manifest = self.load(handoff / "manifest.json")
+        context_path = handoff / manifest["artifacts"]["context"]
+        context = context_path.read_bytes()
+        self.assertEqual(1, context.count(original))
+        context_path.write_bytes(context.replace(original, replacement, 1))
+        prompt = (handoff / manifest["artifacts"]["prompt"]).read_bytes().decode("utf-8")
+        changed_context = context_path.read_bytes().decode("utf-8")
+        paste_path = handoff / manifest["artifacts"]["paste_payload"]
+        paste_path.write_bytes(
+            GPTPRO.render_paste_payload(prompt, changed_context).encode("utf-8")
+        )
+        self.rebind_prepared_package(handoff)
+
+        rejected = self.run_cli("verify", "--handoff-dir", str(handoff), expected=2)
+        self.assertIn("context", rejected.stderr.lower())
+
+    def test_schema2_supplement_manifest_entry_rejects_extra_keys(self) -> None:
+        supplement = self.root / "exact-entry.txt"
+        supplement.write_text("exact manifest entry\n", encoding="utf-8")
+        supplement.chmod(0o600)
+        handoff = self.prepare(
+            "review",
+            "--transport",
+            "paste",
+            "--supplement",
+            f"exact={supplement.resolve()}",
+        )
+        manifest_path = handoff / "manifest.json"
+        manifest = self.load(manifest_path)
+        manifest["supplements"][0]["source_path"] = "/private/reflected.txt"
+        archive_path = handoff / manifest["artifacts"]["archive"]
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            internal = json.loads(
+                archive.read("_gptpro/file-manifest.json").decode("utf-8")
+            )
+        internal["supplements"][0]["source_path"] = "/private/reflected.txt"
+        internal_bytes = GPTPRO.pretty_json_bytes(internal)
+        self.replace_zip_member(
+            archive_path, "_gptpro/file-manifest.json", internal_bytes
+        )
+        manifest["hashes"]["internal_manifest_sha256"] = GPTPRO.sha256_bytes(
+            internal_bytes
+        )
+        self.write_json(manifest_path, manifest)
+        self.rebind_prepared_package(handoff)
+
+        rejected = self.run_cli("verify", "--handoff-dir", str(handoff), expected=2)
+        self.assertIn("supplement", rejected.stderr.lower())
+
+    def test_empty_schema2_package_rejects_tampered_supplement_totals_and_limits(self) -> None:
+        for field, value in (
+            ("supplemental_documents", 1),
+            ("supplemental_bytes", 1),
+            ("max_supplement_files", GPTPRO.DEFAULT_MAX_SUPPLEMENT_FILES - 1),
+            (
+                "max_supplement_file_bytes",
+                GPTPRO.DEFAULT_MAX_SUPPLEMENT_FILE_BYTES - 1,
+            ),
+            (
+                "max_supplement_total_bytes",
+                GPTPRO.DEFAULT_MAX_SUPPLEMENT_TOTAL_BYTES - 1,
+            ),
+        ):
+            with self.subTest(field=field):
+                handoff = self.prepare("review", "--transport", "paste")
+                manifest_path = handoff / "manifest.json"
+                manifest = self.load(manifest_path)
+                target = manifest["totals"] if field.startswith("supplemental_") else manifest["limits"]
+                target[field] = value
+                self.write_json(manifest_path, manifest)
+                self.rebind_prepared_package(handoff)
+                rejected = self.run_cli(
+                    "verify", "--handoff-dir", str(handoff), expected=2
+                )
+                self.assertIn("supplement", rejected.stderr.lower())
+
+    def test_schema2_supplement_approval_is_cross_bound_to_state_receipt_and_manifest(self) -> None:
+        supplement = self.root / "approval.txt"
+        supplement.write_text("approval-bound document\n", encoding="utf-8")
+        supplement.chmod(0o600)
+        handoff = self.prepare(
+            "review",
+            "--transport",
+            "paste",
+            "--supplement",
+            f"approval={supplement.resolve()}",
+        )
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(handoff),
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        state_path = handoff / "state.json"
+        receipt_path = handoff / "receipt.json"
+        original_state = self.load(state_path)
+        original_receipt = self.load(receipt_path)
+        self.run_cli("verify", "--handoff-dir", str(handoff))
+
+        def write(value: dict, path: Path) -> None:
+            path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+        for name, mutate, expected_error in (
+            (
+                "missing-state",
+                lambda state, receipt: state.__setitem__("approval", None),
+                "approval state is missing",
+            ),
+            (
+                "manifest-hash",
+                lambda state, receipt: state["approval"].__setitem__(
+                    "manifest_sha256", "0" * 64
+                ),
+                "differs from the manifest",
+            ),
+            (
+                "outbound-hash",
+                lambda state, receipt: state["approval"]["outbound_artifacts"][0].__setitem__(
+                    "sha256", "0" * 64
+                ),
+                "differs from the manifest",
+            ),
+            (
+                "receipt-state",
+                lambda state, receipt: receipt["events"][1]["data"].__setitem__(
+                    "approved_by", "different-user"
+                ),
+                "receipt chain",
+            ),
+        ):
+            with self.subTest(case=name):
+                state = copy.deepcopy(original_state)
+                receipt = copy.deepcopy(original_receipt)
+                mutate(state, receipt)
+                if name in {"manifest-hash", "outbound-hash"}:
+                    receipt["events"][1]["data"] = copy.deepcopy(state["approval"])
+                if name in {"manifest-hash", "outbound-hash", "receipt-state"}:
+                    receipt["events"][1]["event_hash"] = GPTPRO.event_hash(
+                        receipt["events"][1]
+                    )
+                write(state, state_path)
+                write(receipt, receipt_path)
+                result = self.run_cli(
+                    "verify", "--handoff-dir", str(handoff), expected=2
+                )
+                self.assertIn(expected_error, result.stderr)
+
+        write(original_state, state_path)
+        write(original_receipt, receipt_path)
+        self.run_cli("verify", "--handoff-dir", str(handoff))
 
     def test_json_boundaries_normalize_surrogates_and_excessive_depth(self) -> None:
         surrogate = json.loads(r'{"value":"\ud800"}')
@@ -197,7 +815,7 @@ class GptProCliTests(unittest.TestCase):
 
     def test_schema3_handoff_and_all_artifacts_are_owner_only_under_common_umasks(self) -> None:
         tunnel_id = self.root / "tunnel-id"
-        tunnel_id.write_text("tunnel_" + "permissiontest" * 2, encoding="utf-8")
+        tunnel_id.write_text("tunnel_" + "34567890abcdef12" * 2, encoding="utf-8")
         tunnel_id.chmod(0o600)
         for process_umask in (0o022, 0o002):
             with self.subTest(umask=oct(process_umask)):
@@ -477,6 +1095,10 @@ class GptProCliTests(unittest.TestCase):
         self.assertEqual("Chrome control is unavailable.", result["observed_blocker_details"])
         self.assertEqual(["sent", "not-sent", "unknown"], result["resume"]["allowed_outcomes"])
         self.assertFalse(result["resume"]["automatic_retry_allowed"])
+        instructions = "\n".join(result["human_steps"] + result["return_with"])
+        self.assertIn("zero prior user or assistant turns", instructions)
+        self.assertIn("empty new general Chat", instructions)
+        self.assertIn("--confirm-new-general-chat", result["resume"]["on_sent"])
         self.assertEqual(
             [manifest["transport"]["outbound_artifacts"][0]["sha256"]],
             [item["sha256"] for item in result["outbound_paths"]],
@@ -575,18 +1197,30 @@ class GptProCliTests(unittest.TestCase):
             result["resume"]["on_completed"],
         )
 
-    def test_response_monitor_plan_requires_exact_recorded_thread_url(self) -> None:
+    def test_submission_requires_exact_recorded_thread_url(self) -> None:
         handoff = self.prepare()
-        self.approve_and_submit(handoff)
-        result = self.run_cli(
-            "response-monitor-plan",
+        manifest = self.load(handoff / "manifest.json")
+        self.run_cli(
+            "approve",
             "--handoff-dir",
             str(handoff),
-            "--target-thread-id",
-            "019fe4c2-7b00-7213-964e-22607e752d7b",
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        result = self.run_cli(
+            "mark-submitted",
+            "--handoff-dir",
+            str(handoff),
+            "--observed-model",
+            manifest["requested_model"],
+            "--observed-transport",
+            manifest["transport"]["resolved"],
+            "--confirm-new-general-chat",
+            "--confirm-sent",
             expected=2,
         )
-        self.assertIn("RESPONSE_MONITOR_THREAD_URL_MISSING", result.stderr)
+        self.assertIn("--thread-url", result.stderr)
 
     def test_response_monitor_records_bounded_lifecycle_without_resend(self) -> None:
         handoff = self.prepare()
@@ -712,6 +1346,8 @@ class GptProCliTests(unittest.TestCase):
             "https://user:secret@chatgpt.com/c/12345678",
             "http://chatgpt.com/c/12345678",
             "https://chatgpt.com:443/c/12345678",
+            "https://chatgpt.com/c/12345678?token=secret",
+            "https://chatgpt.com/c/12345678#fragment",
             "https://chatgpt.com/",
         ):
             with self.subTest(url=url):
@@ -735,9 +1371,320 @@ class GptProCliTests(unittest.TestCase):
                     manifest["transport"]["resolved"],
                     "--thread-url",
                     url,
+                    "--confirm-new-general-chat",
                     "--confirm-sent",
                     expected=2,
                 )
+
+    def test_submission_requires_visible_empty_new_general_chat_confirmation(self) -> None:
+        handoff = self.prepare()
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(handoff),
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        manifest = self.load(handoff / "manifest.json")
+        result = self.run_cli(
+            "mark-submitted",
+            "--handoff-dir",
+            str(handoff),
+            "--observed-model",
+            manifest["requested_model"],
+            "--observed-transport",
+            manifest["transport"]["resolved"],
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-sent",
+            expected=2,
+        )
+        self.assertIn("--confirm-new-general-chat", result.stderr)
+        self.assertEqual("approved", self.load(handoff / "state.json")["phase"])
+
+    def test_submission_rejects_conversation_url_already_bound_to_sibling_package(self) -> None:
+        shared_url = "https://chatgpt.com/c/11111111-2222-3333-4444-555555555555"
+        first = self.prepare()
+        self.approve_and_submit(first, thread_url=shared_url)
+
+        second = self.prepare()
+        second_manifest = self.load(second / "manifest.json")
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(second),
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        result = self.run_cli(
+            "mark-submitted",
+            "--handoff-dir",
+            str(second),
+            "--observed-model",
+            second_manifest["requested_model"],
+            "--observed-transport",
+            second_manifest["transport"]["resolved"],
+            "--thread-url",
+            shared_url + "/",
+            "--confirm-new-general-chat",
+            "--confirm-sent",
+            expected=2,
+        )
+        self.assertIn("CHATGPT_THREAD_URL_REUSED", result.stderr)
+        self.assertIn(self.load(first / "manifest.json")["package_id"], result.stderr)
+        self.assertEqual("approved", self.load(second / "state.json")["phase"])
+
+    def test_concurrent_sibling_submissions_bind_canonical_url_once(self) -> None:
+        shared_url = "https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        handoffs = [self.prepare(), self.prepare()]
+        arguments: list[tuple[str, ...]] = []
+        for handoff in handoffs:
+            manifest = self.load(handoff / "manifest.json")
+            self.run_cli(
+                "approve",
+                "--handoff-dir",
+                str(handoff),
+                "--approved-by",
+                "user",
+                "--confirm-transmission",
+            )
+            arguments.append(
+                (
+                    "mark-submitted",
+                    "--handoff-dir",
+                    str(handoff),
+                    "--observed-model",
+                    manifest["requested_model"],
+                    "--observed-transport",
+                    manifest["transport"]["resolved"],
+                    "--thread-url",
+                    shared_url,
+                    "--confirm-new-general-chat",
+                    "--confirm-sent",
+                )
+            )
+
+        barrier_reader, barrier_writer = os.pipe()
+        processes: list[subprocess.Popen[str]] = []
+        barrier_program = (
+            "import os, sys\n"
+            "barrier = int(sys.argv[1])\n"
+            "script = sys.argv[2]\n"
+            "os.read(barrier, 1)\n"
+            "os.execv(sys.executable, [sys.executable, script, *sys.argv[3:]])\n"
+        )
+        try:
+            for command in arguments:
+                processes.append(
+                    subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-c",
+                            barrier_program,
+                            str(barrier_reader),
+                            str(SCRIPT),
+                            *command,
+                        ],
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        pass_fds=(barrier_reader,),
+                    )
+                )
+            os.close(barrier_reader)
+            barrier_reader = -1
+            os.write(barrier_writer, b"12")
+            os.close(barrier_writer)
+            barrier_writer = -1
+            results = [process.communicate(timeout=15) for process in processes]
+        finally:
+            if barrier_reader >= 0:
+                os.close(barrier_reader)
+            if barrier_writer >= 0:
+                os.close(barrier_writer)
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+
+        return_codes = [process.returncode for process in processes]
+        self.assertEqual([0, 2], sorted(return_codes), msg=str(results))
+        rejected_index = return_codes.index(2)
+        self.assertIn("CHATGPT_THREAD_URL_REUSED", results[rejected_index][1])
+        self.assertNotIn("CHATGPT_THREAD_HISTORY_BUSY", results[rejected_index][1])
+
+        states = [self.load(handoff / "state.json") for handoff in handoffs]
+        self.assertEqual(1, sum(state["phase"] == "submitted" for state in states))
+        self.assertEqual(1, sum(state["phase"] == "approved" for state in states))
+        submitted = next(state for state in states if state["phase"] == "submitted")
+        self.assertEqual(shared_url, submitted["submission"]["thread_url"])
+        submitted_events = [
+            event
+            for handoff in handoffs
+            for event in self.load(handoff / "receipt.json")["events"]
+            if event["type"] == "submitted"
+        ]
+        self.assertEqual(1, len(submitted_events))
+        self.assertEqual(shared_url, submitted_events[0]["data"]["thread_url"])
+
+    def test_submission_fails_closed_on_unsafe_sibling_conversation_history(self) -> None:
+        handoff = self.prepare()
+        unsafe = handoff.parent / "unsafe-history"
+        unsafe.mkdir(mode=0o700)
+        (unsafe / "state.json").symlink_to(handoff / "state.json")
+        manifest = self.load(handoff / "manifest.json")
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(handoff),
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        rejected = self.run_cli(
+            "mark-submitted",
+            "--handoff-dir",
+            str(handoff),
+            "--observed-model",
+            manifest["requested_model"],
+            "--observed-transport",
+            manifest["transport"]["resolved"],
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-new-general-chat",
+            "--confirm-sent",
+            expected=2,
+        )
+        self.assertIn("CHATGPT_THREAD_HISTORY_UNSAFE", rejected.stderr)
+        self.assertEqual("approved", self.load(handoff / "state.json")["phase"])
+
+    def test_submission_serializes_sibling_url_check_and_receipt_commit(self) -> None:
+        handoff = self.prepare()
+        manifest = self.load(handoff / "manifest.json")
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(handoff),
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        arguments = (
+            "mark-submitted",
+            "--handoff-dir",
+            str(handoff),
+            "--observed-model",
+            manifest["requested_model"],
+            "--observed-transport",
+            manifest["transport"]["resolved"],
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-new-general-chat",
+            "--confirm-sent",
+        )
+
+        with GPTPRO.package_lifecycle_lock(handoff.parent):
+            rejected = self.run_cli(*arguments, expected=2)
+        self.assertIn("CHATGPT_THREAD_HISTORY_BUSY", rejected.stderr)
+        self.assertIn("without resending", rejected.stderr)
+        self.assertEqual("approved", self.load(handoff / "state.json")["phase"])
+
+        self.run_cli(*arguments)
+        self.assertEqual("submitted", self.load(handoff / "state.json")["phase"])
+
+    def test_submitted_state_and_receipt_bind_new_chat_and_outbound_contract(self) -> None:
+        handoff = self.prepare()
+        self.approve_and_submit(handoff)
+        state_path = handoff / "state.json"
+        receipt_path = handoff / "receipt.json"
+        original_state = self.load(state_path)
+        original_receipt = self.load(receipt_path)
+
+        cases = (
+            ("conversation-contract", "conversation_contract", "wrong-contract"),
+            ("destination", "destination", "Wrong destination"),
+            ("observed-model", "observed_model", "Wrong model"),
+            ("transport", "transport", "text-file"),
+            ("github", "github", {"repository": "wrong/repository"}),
+        )
+        for name, field, value in cases:
+            with self.subTest(case=name):
+                state = copy.deepcopy(original_state)
+                receipt = copy.deepcopy(original_receipt)
+                state["submission"][field] = value
+                receipt["events"][-1]["data"] = copy.deepcopy(state["submission"])
+                receipt["events"][-1]["event_hash"] = GPTPRO.event_hash(
+                    receipt["events"][-1]
+                )
+                self.write_json(state_path, state)
+                self.write_json(receipt_path, receipt)
+                rejected = self.run_cli(
+                    "verify", "--handoff-dir", str(handoff), expected=2
+                )
+                self.assertIn("empty new general Chat", rejected.stderr)
+
+        self.write_json(state_path, original_state)
+        self.write_json(receipt_path, original_receipt)
+        self.run_cli("verify", "--handoff-dir", str(handoff))
+
+    def test_submission_waits_for_transient_web_url_to_normalize(self) -> None:
+        handoff = self.prepare()
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(handoff),
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        manifest = self.load(handoff / "manifest.json")
+        common_args = (
+            "mark-submitted",
+            "--handoff-dir",
+            str(handoff),
+            "--observed-model",
+            manifest["requested_model"],
+            "--observed-transport",
+            manifest["transport"]["resolved"],
+            "--confirm-new-general-chat",
+            "--confirm-sent",
+        )
+
+        transient = self.run_cli(
+            *common_args,
+            "--thread-url",
+            "https://chatgpt.com/c/WEB:6578523f-56df-475d-9a1a-5da4edf415ef",
+            expected=2,
+        )
+        self.assertIn("CHATGPT_THREAD_URL_TRANSIENT", transient.stderr)
+        self.assertIn("without resending", transient.stderr)
+        state = self.load(handoff / "state.json")
+        receipt = self.load(handoff / "receipt.json")
+        self.assertEqual("approved", state["phase"])
+        self.assertIsNone(state["submission"])
+        self.assertNotIn("submitted", [event["type"] for event in receipt["events"]])
+
+        canonical_url = "https://chatgpt.com/c/6a8eb5fa-5e50-83e8-bcf0-f198cf05ce49"
+        self.run_cli(*common_args, "--thread-url", canonical_url)
+        state = self.load(handoff / "state.json")
+        receipt = self.load(handoff / "receipt.json")
+        self.assertEqual("submitted", state["phase"])
+        self.assertEqual(canonical_url, state["submission"]["thread_url"])
+        self.assertEqual(
+            GPTPRO.CHATGPT_CONVERSATION_CONTRACT,
+            state["submission"]["conversation_contract"],
+        )
+        self.assertEqual(1, [event["type"] for event in receipt["events"]].count("submitted"))
+
+    def test_submission_canonicalizes_one_trailing_thread_url_slash(self) -> None:
+        handoff = self.prepare()
+        canonical_url = "https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        self.approve_and_submit(handoff, thread_url=canonical_url + "/")
+        state = self.load(handoff / "state.json")
+        self.assertEqual(canonical_url, state["submission"]["thread_url"])
+        self.run_cli("verify", "--handoff-dir", str(handoff))
 
     def test_auto_transport_uses_text_file_over_policy_threshold(self) -> None:
         handoff = self.prepare("review", "--max-paste-bytes", "1")
@@ -863,6 +1810,9 @@ class GptProCliTests(unittest.TestCase):
             github["repository"],
             "--observed-github-commit",
             "0" * 40,
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-new-general-chat",
             "--confirm-sent",
             expected=2,
         )
@@ -878,6 +1828,9 @@ class GptProCliTests(unittest.TestCase):
             github["repository"],
             "--observed-github-commit",
             github["commit_sha"],
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-new-general-chat",
             "--confirm-sent",
         )
         markers = manifest["response_markers"]
@@ -996,6 +1949,9 @@ class GptProCliTests(unittest.TestCase):
             "Pro",
             "--observed-transport",
             "paste",
+            "--thread-url",
+            "https://chatgpt.com/c/not-approved",
+            "--confirm-new-general-chat",
             "--confirm-sent",
             expected=2,
         )
@@ -1037,6 +1993,9 @@ class GptProCliTests(unittest.TestCase):
             "A fallback model",
             "--observed-transport",
             manifest["transport"]["resolved"],
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-new-general-chat",
             "--confirm-sent",
             expected=2,
         )
@@ -1048,6 +2007,9 @@ class GptProCliTests(unittest.TestCase):
             manifest["requested_model"],
             "--observed-transport",
             manifest["transport"]["resolved"],
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-new-general-chat",
             "--confirm-sent",
         )
 
@@ -1070,6 +2032,9 @@ class GptProCliTests(unittest.TestCase):
             manifest["requested_model"],
             "--observed-transport",
             "paste",
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-new-general-chat",
             "--confirm-sent",
             expected=2,
         )
@@ -1091,6 +2056,22 @@ class GptProCliTests(unittest.TestCase):
             str(response_file),
         )
         self.assertEqual("A bounded advisory answer.\n", (handoff / "response.md").read_text(encoding="utf-8"))
+        invalid_sha = self.run_cli(
+            "record-evaluation",
+            "--handoff-dir",
+            str(handoff),
+            "--verdict",
+            "partially-accepted",
+            "--summary",
+            "One claim was confirmed.",
+            "--evidence",
+            "manual source inspection",
+            "--applied-git-sha",
+            "deadbeef",
+            expected=2,
+        )
+        self.assertIn("full lowercase commit object ID", invalid_sha.stderr)
+        self.assertEqual("response_imported", self.load(handoff / "state.json")["phase"])
         self.run_cli(
             "record-evaluation",
             "--handoff-dir",
@@ -1107,6 +2088,57 @@ class GptProCliTests(unittest.TestCase):
             ["prepared", "approved", "submitted", "response_imported", "evaluated"],
             [event["type"] for event in receipt["events"]],
         )
+        self.run_cli("verify", "--handoff-dir", str(handoff))
+
+        prior_evaluation_sha256 = self.load(handoff / "state.json")["evaluation"][
+            "evaluation_sha256"
+        ]
+        self.run_cli(
+            "correct-evaluation",
+            "--handoff-dir",
+            str(handoff),
+            "--prior-evaluation-sha256",
+            prior_evaluation_sha256,
+            "--verdict",
+            "accepted",
+            "--summary",
+            "The evidence was corrected without rewriting receipt history.",
+            "--evidence",
+            "current source and test inspection",
+            "--applied-git-sha",
+            self.head,
+        )
+        corrected = self.load(handoff / "evaluation.json")
+        self.assertEqual("accepted", corrected["verdict"])
+        self.assertEqual(self.head, corrected["applied_git_sha"])
+        receipt = self.load(handoff / "receipt.json")
+        self.assertEqual(
+            [
+                "prepared",
+                "approved",
+                "submitted",
+                "response_imported",
+                "evaluated",
+                "evaluation_corrected",
+            ],
+            [event["type"] for event in receipt["events"]],
+        )
+        stale = self.run_cli(
+            "correct-evaluation",
+            "--handoff-dir",
+            str(handoff),
+            "--prior-evaluation-sha256",
+            prior_evaluation_sha256,
+            "--verdict",
+            "rejected",
+            "--summary",
+            "Stale correction must not apply.",
+            "--evidence",
+            "stale prior hash",
+            expected=2,
+        )
+        self.assertIn("Prior evaluation hash does not match", stale.stderr)
+        self.assertEqual(corrected, self.load(handoff / "evaluation.json"))
         self.run_cli("verify", "--handoff-dir", str(handoff))
 
     def test_foreign_or_unmarked_response_is_rejected(self) -> None:

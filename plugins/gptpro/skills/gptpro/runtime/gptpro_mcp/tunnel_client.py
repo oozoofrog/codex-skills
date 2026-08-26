@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .request_correlation import capture_request_correlation as _capture_request_correlation
+from .sensitive import OPENAI_TUNNEL_ID, OPENAI_TUNNEL_ID_TEXT
 from .runtime_state import (
     RuntimeStateError,
     ensure_private_directory,
@@ -37,12 +38,12 @@ from .runtime_state import (
 
 _PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,127}")
-_TUNNEL_ID = re.compile(r"tunnel_[A-Za-z0-9_-]{16,128}")
+_TUNNEL_ID = OPENAI_TUNNEL_ID
 _RUNTIME_KEY = re.compile(r"sk-[A-Za-z0-9_-]{16,}")
-_RAW_SECRET = re.compile(r"(?:\bsk-[A-Za-z0-9_-]{16,}|\btunnel_[A-Za-z0-9_-]{16,128}\b)")
+_RAW_SECRET = re.compile(rf"(?:\bsk-[A-Za-z0-9_-]{{16,}}|\b{OPENAI_TUNNEL_ID_TEXT}\b)")
 _SECRET_SHAPED_ENV_VALUE = re.compile(
     r"(?:\bsk-[A-Za-z0-9_-]{16,}|\bgh[pousr]_[A-Za-z0-9_]{16,}|"
-    r"\bgithub_pat_[A-Za-z0-9_]{16,}|\btunnel_[A-Za-z0-9_-]{16,128}\b)",
+    rf"\bgithub_pat_[A-Za-z0-9_]{{16,}}|\b{OPENAI_TUNNEL_ID_TEXT}\b)",
     re.IGNORECASE,
 )
 _SAFE_CHILD_ENV_NAMES = frozenset(

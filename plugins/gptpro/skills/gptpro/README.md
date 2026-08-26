@@ -14,7 +14,7 @@ From Codex, request a network installation without running Python directly:
 $skill-installer Install gptpro from https://github.com/oozoofrog/codex-skills/tree/main/gptpro
 ```
 
-Start a new Codex task after installation. Alternatively, register the repository Marketplace once and install `GPT Pro Collaborator` from the Plugins browser:
+Alternatively, register the repository Marketplace once and install `GPT Pro Collaborator` from the Plugins browser:
 
 ```bash
 codex plugin marketplace add oozoofrog/codex-skills --ref main
@@ -32,20 +32,22 @@ python3 scripts/manage_skills.py install gptpro --update
 
 ## Use
 
-For an ordinary GitHub-first consultation, invoke `$gptpro` with a mode and task:
+Invoke `$gptpro` with a mode and task:
 
 ```text
 $gptpro review 모드로 현재 변경의 정확성과 빠진 테스트를 검토해주세요.
 ```
 
-To let Pro explore an approved immutable local snapshot with the seven schema-4 read-only tools, request `mcp-research` explicitly and name a narrow scope:
+When that explicit project/repository consultation requires Pro to inspect, search, or navigate actual project context, the Skill-level workflow proposes `mcp-research` with a narrow scope by default:
 
 ```text
 $gptpro review 모드로 src와 tests를 Pro가 읽어가며 분석하도록 mcp-research로 진행해주세요.
 실제 수정은 Pro 응답을 현재 코드와 테스트로 검증한 뒤에만 해주세요.
 ```
 
-Do not request Web MCP merely because a repository is local. Start with the ordinary path unless the consultation benefits from iterative workspace mapping, multi-range reads, multiple searches, prepared diff/evidence, or the separately approved context-note ledger. Web MCP currently requires macOS, Python 3.11 or newer, a reviewed official `tunnel-client`, ChatGPT Developer Mode, and attended app/workspace selection.
+That routing is not transmission authority and does not make the CLI's `auto` transport select MCP. Codex must show the exact package, disclosure ceiling, tool catalog, expiry, and ledger policy, then pause for package-specific approval before activation or Send. Use the ordinary GitHub/text path when the user requests it or the task needs only a small fixed excerpt. Web MCP currently requires macOS, Python 3.11 or newer, a reviewed official `tunnel-client`, ChatGPT Developer Mode, and attended app/workspace selection.
+
+When the consultation needs exact text from a file outside the selected repository snapshot, ask Codex to include it as a supplemental document. Repeatable `--supplement LABEL=/ABSOLUTE/PATH` packages an owner-controlled, secret-scanned strict-UTF-8 snapshot without using browser file upload. The option path is local CLI input only: Codex writes the outbound task using the safe label, and preparation rejects copying that path into outbound metadata. Small packages use bounded `paste`; larger or exploratory documents use explicit Schema 4 `mcp-research` and `gptpro_artifact_read`. See [supplemental text documents](references/supplemental-documents.md).
 
 The user normally does not need to construct CLI commands. The Skill:
 
@@ -53,11 +55,11 @@ The user normally does not need to construct CLI commands. The Skill:
 2. prepares, scans, hashes, and verifies a package;
 3. shows the exact outbound prompt and maximum disclosure contract;
 4. stops for package-specific approval;
-5. guides or performs only the authorized attended delivery steps;
+5. creates an empty new ChatGPT general Chat with zero prior turns and guides or performs only the authorized attended delivery steps;
 6. creates one bounded same-task response monitor that checks only the recorded conversation and never resends;
 7. revokes/stops a Web MCP session, imports the marked response, independently evaluates the advice, and removes the monitor.
 
-Transmission is always a separate attended action. Login, Developer Mode, app/workspace selection, OAuth, model selection, and an ambiguous send state remain visible human checkpoints. A successful Tunnel activation is not permission to send the prompt, and a successful Pro response is not permission to modify the repository.
+Transmission is always a separate attended action. Every package uses a new general Chat, never an existing conversation, Work, Project, or custom GPT. `mark-submitted` requires the canonical conversation URL plus explicit confirmation that the Chat was empty immediately before the single Send, and rejects a URL already bound to another local handoff. Login, Developer Mode, app/workspace selection, OAuth, model selection, and an ambiguous send state remain visible human checkpoints. A successful Tunnel activation is not permission to send the prompt, and a successful Pro response is not permission to modify the repository.
 
 처음 사용하는 분은 설치부터 첫 상담, 승인, ChatGPT 화면 조작, 응답 검증, `.gptpro/` 관리와 문제 해결까지 설명한 [한국어 사용자 매뉴얼](references/user-manual.md)을 먼저 읽으세요.
 
@@ -87,13 +89,16 @@ The default `--transport auto` is GitHub-first:
 
 Auto records the exact GitHub fallback reason. Supplying `--github-pr-url` makes a verification mismatch fatal instead of falling back. The 128 KiB cutoff is a conservative Skill policy, not a published ChatGPT limit. Override it with `--max-paste-bytes`, require GitHub with `--transport github`, or avoid app access with `--transport paste|text-file`. A transport never changes after approval because approval binds the exact outbound bytes and repository disclosure.
 
+With `--supplement`, `auto` deliberately skips GitHub and text-file and resolves only to paste within the configured threshold. If the combined payload is too large, preparation fails and asks for a newly prepared `mcp-research` package; it never silently falls back to a browser attachment.
+
 Normal `auto|github|paste|text-file` handoffs continue to use manifest schema 2. Explicit `--transport mcp-read` uses schema 3. Explicit `--transport mcp-research` uses schema 4 and additionally binds research artifacts and the read-only context-note policy. Neither is inferred from `auto`, and neither approval may be reinterpreted as the other. A schema-1 ZIP-first handoff is not upgraded in place; prepare a new handoff so the transport and approval hashes are explicit.
 
 ## Local CLI
 
 ```bash
-python3 scripts/gptpro.py prepare --repo /path/to/repo --mode plan --transport auto --task "Plan the change."
-python3 scripts/gptpro.py prepare --repo /path/to/repo --mode review --transport github --github-pr-url https://github.com/owner/repo/pull/123 --task "Review the pinned PR."
+python3 scripts/gptpro.py prepare --repo /path/to/repo --mode plan --transport auto --include 'src/**' --include 'tests/**' --task "Plan the change."
+python3 scripts/gptpro.py prepare --repo /path/to/repo --mode review --transport paste --include 'src/**' --include 'tests/**' --supplement requirements=/absolute/private/requirements.md --task "Review against the supplemental requirements."
+python3 scripts/gptpro.py prepare --repo /path/to/repo --mode review --transport github --github-pr-url https://github.com/owner/repo/pull/123 --include 'src/**' --include 'tests/**' --task "Review the pinned PR."
 python3 scripts/gptpro.py verify --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
 python3 scripts/gptpro.py status --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
 python3 scripts/gptpro.py human-handoff --handoff-dir /path/to/repo/.gptpro/handoffs/<id> --reason manual-transport
@@ -102,7 +107,7 @@ python3 scripts/gptpro.py response-monitor-plan --handoff-dir /path/to/repo/.gpt
 
 `response-monitor-plan` is read-only and requires a submitted package with an exact recorded `chatgpt.com` conversation URL. Codex uses its output with the app's same-task heartbeat capability, then records the returned automation identity. See [response completion monitor](references/response-monitor.md); the monitor repeats response collection only and never prompt submission.
 
-Schema-3 preparation requires transient Tunnel identity input plus visible app/workspace labels. The raw Tunnel ID or its reference is not written to package artifacts:
+Schema-3 preparation requires transient Tunnel identity input plus visible app/workspace labels. The current official client contract is exactly `tunnel_[a-z0-9]{32}`; nonofficial legacy-shaped values fail before package creation. The raw Tunnel ID or its reference is not written to package artifacts:
 
 ```bash
 export GPTPRO_TUNNEL_ID="tunnel_<value>"
@@ -132,6 +137,7 @@ python3 scripts/gptpro.py prepare \
   --include "src/**" \
   --include "tests/**" \
   --evidence-file unit-tests=/private/path/test-output.txt \
+  --supplement specification=/private/path/specification.md \
   --task "Analyze the approved snapshot, prepared diff, and test evidence."
 
 python3 scripts/gptpro.py approve \
@@ -142,7 +148,7 @@ python3 scripts/gptpro.py approve \
   --confirm-analysis-ledger
 ```
 
-The seven static tools are `gptpro_package_info`, `gptpro_workspace_map`, `gptpro_repo_read`, `gptpro_repo_search`, `gptpro_repo_diff`, `gptpro_artifact_read`, and `gptpro_analysis_status`. Every tool advertises `readOnlyHint: true`; no MCP tool exposes repository or application-state mutation, while owner-only audit/runtime bookkeeping records governed calls. Pro findings return through the visible Chat response and the established response-import workflow. See [repository research](references/mcp-research.md) for the separately approved `analysis-note-prepare` / `analysis-note-approve` context flow.
+The seven static tools are `gptpro_package_info`, `gptpro_workspace_map`, `gptpro_repo_read`, `gptpro_repo_search`, `gptpro_repo_diff`, `gptpro_artifact_read`, and `gptpro_analysis_status`. Every tool advertises `readOnlyHint: true`; no MCP tool exposes repository or application-state mutation, while owner-only audit/runtime bookkeeping records governed calls. A Schema 4 supplement shares the bounded evidence contract and is visible only through package info and artifact read, not repository search/read. Pro findings return through the visible Chat response and the established response-import workflow. See [repository research](references/mcp-research.md) for the separately approved `analysis-note-prepare` / `analysis-note-approve` context flow.
 
 New schema-3/4 sessions use disclosure-audit schema 2 with `complete_model_visible_result_v1`, so the approved byte budget counts each complete model-visible success result rather than only its repository-text body. Audit versions are exact JSON integers. Existing schema-1 schema-3 chains remain verifiable/closable as `legacy_tool_body_estimate` but cannot accept new calls; compatibility requires the actual legacy audit and matching omitted package/global accounting bindings, not fields removed from a schema-2 chain. Schema-4 always requires the current pair. A well-formed unadvertised tool is never executed: after a durable zero-content rejection it consumes one call and returns JSON-RPC `-32602` with stable code `MCP_INVALID_ARGUMENT`. If an append may have committed, the runtime reconciles provable counters, latches that process session, and best-effort faults/closes persistent authorization; stop or recover instead of retrying automatically. Pre-publication recovery also compares the actual audit version/mode with its machine-global binding; a proven mismatch faults only that exact global authorization and does not rewrite the package/audit as a normal close, while an operational recovery failure is reported separately as unavailable rather than falsely labeled invalid. A completed package and its terminal receipt are rechecked against the actual audit footer's header/head, sequence, counters, footer flag, commit timestamp, and close reason. If the exact global authorization and audit became terminal immediately before the package commit failed, rerunning `mcp-recover` reconciles only that already-bound terminal evidence into the package receipt; it does not invent child-stop evidence or reopen authorization. `mcp-status` reports an already-closed audit with still-active global/package state as split-brain and never as effectively authorized.
 

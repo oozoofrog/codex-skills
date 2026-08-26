@@ -38,7 +38,7 @@ The static catalog is also the execution allowlist. After a session is normally 
 
 ## Prepare and approve
 
-Use the narrowest useful repository selection. Evidence must be explicit owner-controlled UTF-8 regular files and is secret-scanned before packaging.
+Use the narrowest useful repository selection. Evidence and supplemental documents must be explicit current-owner, single-link, non-group/world-writable UTF-8 regular files and are secret-scanned before packaging. Secure capture requires supported POSIX current-user and descriptor-relative/no-follow file-open capabilities; symlinks, hard links, FIFOs and other non-regular files fail closed. A supplement is an evidence artifact with an additional purpose label; it does not enter repository read/search paths.
 
 ```bash
 export GPTPRO_TUNNEL_ID='tunnel_<value>'
@@ -50,6 +50,7 @@ python3 <skill-dir>/scripts/gptpro.py prepare \
   --include 'src/**' \
   --include 'tests/**' \
   --evidence-file unit-tests=/absolute/path/to/test-output.txt \
+  --supplement requirements=/absolute/path/to/requirements.md \
   --tunnel-runtime-alias gptpro-web \
   --tunnel-id-ref env:GPTPRO_TUNNEL_ID \
   --chatgpt-app-name 'GPT Pro Repository Research' \
@@ -60,12 +61,12 @@ python3 <skill-dir>/scripts/gptpro.py verify --handoff-dir <dir>
 python3 <skill-dir>/scripts/gptpro.py status --handoff-dir <dir> --json
 ```
 
-Preparation fails closed if the Git index/worktree changes during schema-4 snapshot capture. Tracked deletions selected by the disclosure scope are represented explicitly in the prepared diff. HEAD blobs and internal research artifacts are size-checked before expensive reads or package publication.
+Preparation fails closed if the Git index/worktree changes during schema-4 snapshot capture. Tracked deletions selected by the disclosure scope are represented explicitly in the prepared diff. HEAD blobs and internal research artifacts are size-checked before expensive reads or package publication. `--supplement` shares safe-label, count, per-file, total-byte, and per-line readability limits with `--evidence-file`; a single UTF-8 line cannot exceed the package's `max_read_content_bytes` (currently 98,304 bytes by default). Option source locators are not persisted in gptpro artifacts, but can remain in shell/process/tool history; they are rejected if reflected into outbound metadata after case-folded Unicode normalization, and captured bytes are never refreshed in place.
 
 Before approval, show the user:
 
 - package ID, Git SHA, dirty summary, selected path/hash set, and maximum disclosure;
-- evidence IDs/sizes/hashes and workspace-index/diff hashes;
+- evidence and supplemental artifact IDs/sizes/hashes and workspace-index/diff hashes;
 - all seven exact tool names and every call/byte/result/time limit;
 - app/workspace labels, expiry, transport `mcp-research`, and delivery `browser`;
 - that Pro can only read the approved immutable snapshot and context-note ledger;
@@ -88,9 +89,11 @@ General permission to use `$gptpro`, a previous package approval, or approval of
 
 Use the secretless `mcp-probe`, profile check, exact binary-hash confirmation, official doctor preflight, foreground `mcp-activate`, visible ChatGPT app authorization, attended prompt send, cooperative stop, and recovery boundaries documented in [workflow.md](workflow.md) and [web-mcp.md](web-mcp.md).
 
+Create an empty new ChatGPT general Chat for this package and confirm zero prior user or assistant turns before selecting the approved app/model and sending once. Do not use an existing conversation, Work, Project, or custom GPT. After the matching turn and canonical `/c/<id>` URL are visible, record them with `mark-submitted --confirm-new-general-chat`; never reuse a conversation URL for another package.
+
 The prepared manifest's schema/profile/tool hash must match exactly. Never expose both schema-3 and schema-4 catalogs under one package, and never silently fall back to another transport after approval. Every durably audited physical call and every committed returned byte consumes budget; the runtime performs no deduplication. For each schema-3/4 committed success, audit schema 2 and `complete_model_visible_result_v1` meter the canonical UTF-8 size of the complete model-visible MCP tool result, including structured metadata, hashes, cursors, disclosure counters, and the fixed text envelope. Tool-specific `content_bytes` or `result_bytes` values remain diagnostic sub-counts rather than the approval boundary. Audit schema 1 is verification-only and is reported as `legacy_tool_body_estimate`, never as current full-result evidence.
 
-Ask Pro to start with `gptpro_package_info`, narrow exploration with `gptpro_workspace_map`, and cite paths, hashes, ranges, evidence IDs, or diff entries in its visible Chat response. Pro cannot persist findings through an MCP write tool. Import the completed visible response through the existing package-marker workflow.
+Ask Pro to start with `gptpro_package_info`, narrow exploration with `gptpro_workspace_map`, read named supplemental artifacts only through `gptpro_artifact_read`, and cite paths, hashes, ranges, evidence IDs, or diff entries in its visible Chat response. `gptpro_repo_read` and `gptpro_repo_search` cannot see external supplements. Pro cannot persist findings through an MCP write tool. Import the completed visible response through the existing package-marker workflow.
 
 ## Codex context-note ledger
 

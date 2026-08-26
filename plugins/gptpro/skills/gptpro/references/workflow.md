@@ -30,6 +30,8 @@ Initialization is idempotent. If `ready` is true and `actions` is empty, do not 
 
 ## Prepare
 
+Transport routing has two layers. At the Skill layer, an explicit `$gptpro` project/repository request that requires Pro to inspect, search, or navigate actual project context defaults to a proposed, narrowly directed `mcp-research` package. The proposal still stops before approval, activation, or transmission. At the CLI layer, `--transport auto` remains GitHub-first and never selects Web MCP. Use ordinary GitHub/text delivery when the user asks for it or the consultation needs only a small fixed excerpt.
+
 ```bash
 python3 <skill-dir>/scripts/gptpro.py prepare \
   --repo "$PWD" \
@@ -55,13 +57,16 @@ Useful safeguards:
 - `--transport mcp-read|mcp-research`: explicitly choose one experimental Web MCP contract; neither is an automatic fallback.
 - `--github-remote`: choose the GitHub remote verified by `auto` or `github`; default `origin`.
 - `--github-pr-url`: pin an optional GitHub PR whose remote head ref must equal current HEAD. A mismatch fails even under `auto`.
-- `--max-paste-bytes`: set the conservative fallback threshold when GitHub-first `auto` is unavailable; the default 128 KiB is Skill policy, not a published ChatGPT limit.
+- `--max-paste-bytes`: set the conservative fallback threshold when GitHub-first `auto` is unavailable; with any supplement it is also the hard limit for the complete explicit/auto paste payload. The default 128 KiB is Skill policy, not a published ChatGPT limit.
+- `--supplement safe-label=/absolute/private/document.md`: capture a repeatable current-owner, single-link, non-group/world-writable strict-UTF-8 regular file without browser upload. Secure capture requires POSIX descriptor-relative/no-follow opens and current-user identity; symlinks, hard links, FIFOs and unsupported capability sets fail closed. Use bounded `paste`, or explicit `mcp-research` for artifact reads; see [supplemental-documents.md](supplemental-documents.md).
 
 Preparation records both `git.head_sha` and a hash of the actual packaged file set. `auto` first attempts `github`; it succeeds only when every selected byte matches HEAD and that SHA is advertised by the chosen github.com remote. Otherwise it records the reason and resolves to `paste` or `text-file`. Explicit `github` never falls back. A dirty text package is not represented as the HEAD commit; dirty paths and the package tree hash remain explicit. Only valid UTF-8 files enter the text context. The generated ZIP remains local audit evidence and is not a default Pro upload. Read [github-transport.md](github-transport.md) for the remote and response-attestation contract.
 
+An external supplement is not part of the repository tree hash or Git identity. Preparation reads it once without following symlinks, secret-scans and hashes the exact bytes, then stores only its safe label/size/hash and packaged snapshot. Its option source locator is not persisted in gptpro artifacts, but can appear in shell history, process inspection, terminal capture, or orchestration logs; keep the locator itself non-sensitive. Preparation fails cleanly for an unresolvable `~user` and rejects a case-folded, Unicode-normalized locator reflected into outbound task/model/app/workspace metadata; refer to the label instead. With `auto`, any supplement suppresses GitHub/text-file selection and permits paste only when the complete prompt-plus-context payload fits `--max-paste-bytes`; otherwise preparation fails. Schema 2 verification reconstructs exact context and paste bytes from the archive. Schema 4 represents supplements inside the existing evidence allowlist and its shared limits, derives supplemental totals from that subset, and rejects an artifact with a UTF-8 line longer than `max_read_content_bytes`. Changing the source later does not change an existing package.
+
 When an in-repository output root is not ignored, `prepare` adds a warning pointing to `init`; it does not change Git configuration automatically.
 
-For a deliberate Web MCP package, use `--transport mcp-read` or `--transport mcp-research` plus `--tunnel-id-ref env:NAME` or an absolute owner-only mode-0600 `file:` reference, the intended app/workspace labels, and the smallest directed file set. Both create a prompt-only outbound list and a local immutable ZIP. Schema 4 may add repeated `--evidence-file safe-id=/absolute/private/artifact.txt` entries and research-specific bounds. It never uploads the ZIP and never makes MCP an `auto` fallback. The raw Tunnel ID/reference and evidence source paths are not written to package/runtime/receipt/audit artifacts. Approval and activation remain separate actions.
+For a deliberate Web MCP package, use `--transport mcp-read` or `--transport mcp-research` plus `--tunnel-id-ref env:NAME` or an absolute owner-only mode-0600 `file:` reference, the intended app/workspace labels, and the smallest directed file set. The current official Tunnel identity format is exactly `tunnel_[a-z0-9]{32}`; a nonofficial legacy-shaped value is rejected before a package is created. Both transports create a prompt-only outbound list and a local immutable ZIP. Schema 4 may add repeated `--evidence-file safe-id=/absolute/private/artifact.txt` and `--supplement safe-id=/absolute/private/document.md` entries under the same evidence count/per-file/total limits and per-line reader bound. It never uploads the ZIP and never makes MCP an `auto` fallback. The raw Tunnel ID/reference and external source paths are not written to package/runtime/receipt/audit artifacts. Approval and activation remain separate actions.
 
 ## Verify and inspect
 
@@ -83,7 +88,7 @@ python3 <skill-dir>/scripts/gptpro.py approve \
   --confirm-transmission
 ```
 
-Approval binds to the manifest, resolved transport, and exact outbound artifact hashes. For `github`, the manifest also binds the repository, immutable commit, optional PR locator, verified remote ref, and selected path set; only `prompt.md` is outbound. Any later artifact change makes verification fail and invalidates progression.
+Approval binds to the manifest, resolved transport, exact outbound artifact hashes, and any supplement labels/sizes/hashes. For `github`, the manifest also binds the repository, immutable commit, optional PR locator, verified remote ref, and selected path set; only `prompt.md` is outbound. Any later artifact change makes verification fail and invalidates progression.
 
 For schema-3 `mcp-read`, first show the exact maximum path/size/hash set, potential bytes, tool schema, limits, expiry, and connector/app/workspace labels, then require both flags:
 
@@ -257,6 +262,7 @@ Follow [browser-handoff.md](browser-handoff.md). After visible UI evidence confi
 python3 <skill-dir>/scripts/gptpro.py mark-submitted \
   --handoff-dir <dir> \
   --confirm-sent \
+  --confirm-new-general-chat \
   --observed-model "ChatGPT Pro / GPT-5.6 Sol / Intelligence: Pro" \
   --observed-transport text-file \
   --thread-url "https://chatgpt.com/c/<id>"
@@ -264,7 +270,11 @@ python3 <skill-dir>/scripts/gptpro.py mark-submitted \
 
 For `github`, use `--observed-transport github` and also provide the exact approved `--observed-github-repository owner/repo` and `--observed-github-commit <sha>`. The command rejects identity drift.
 
-Omit `--thread-url` if the user does not want the URL recorded, but automatic response monitoring then fails closed because it cannot prove which conversation to inspect. The URL must be credential-free HTTPS on the exact `chatgpt.com` host. Never mark an ambiguous or failed send as submitted. If a transport fails, prepare and approve a new handoff instead of silently falling back.
+Both `--confirm-new-general-chat` and `--thread-url` are mandatory. The flag means the visible destination was an empty new general Chat with zero prior user or assistant turns immediately before the single Send—not an existing conversation, Work, Project, or custom GPT. The URL must be credential-free HTTPS on the exact `chatgpt.com` host. One optional trailing slash is normalized away. The submission receipt binds the canonical URL, the `new-general-chat-empty-v1` contract, destination, model, transport, outbound artifacts, and any GitHub or MCP identity.
+
+The command rejects a canonical URL already stored by another handoff under the same local handoff root, including a trailing-slash spelling variant. The history scan and receipt commit share one bounded cross-process root lock so two concurrent submissions cannot both pass the check; `CHATGPT_THREAD_HISTORY_BUSY` leaves the package approved and permits rerunning only `mark-submitted` without resending. That local history check does not inspect another repository/output root, so attended zero-turn confirmation remains mandatory. Submitted packages created before this contract are not upgraded or accepted as current evidence; prepare, review, and approve a new package. Never mark an ambiguous or failed send as submitted. If a transport fails, prepare and approve a new handoff instead of silently falling back.
+
+Immediately after a successful send, ChatGPT may temporarily show `/c/WEB:<temporary-id>`. This route is not a canonical conversation identity and `mark-submitted` rejects it with `CHATGPT_THREAD_URL_TRANSIENT`. Keep the same visibly submitted Chat open and wait boundedly for `/c/<id>` to appear; do not remove or percent-encode the prefix, refresh, open a replacement Chat, or resend. The transient rejection leaves the package approved, so run `mark-submitted` again only after the canonical URL and matching user turn are both visible. Query strings and fragments are also rejected so credentials or unrelated state cannot enter the receipt or monitor prompt.
 
 ## Monitor response completion
 

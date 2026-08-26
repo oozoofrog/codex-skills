@@ -14,6 +14,7 @@
 
 ## Review Rules
 - Check trigger wording consistency between both `SKILL.md` copies, both UI metadata files, and `README.md`.
+- Check every copyable `gptpro.py prepare` example uses directed `--include` or `--file-list` selection unless whole-repository disclosure is explicit and explained.
 - Check local links and path references for breakage.
 - Check user-visible additions against `CHANGELOG.md`.
 - If a rule was missing and caused rework, update the relevant context document instead of fixing code only.

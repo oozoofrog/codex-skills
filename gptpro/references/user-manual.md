@@ -10,6 +10,7 @@ ChatGPT Pro는 조언을 제공하고, Codex는 저장소 확인, 코드 수정,
 - [누가 무엇을 하나요?](#누가-무엇을-하나요)
 - [설치](#설치)
 - [무엇을 선택해야 하나요?](#무엇을-선택해야-하나요)
+- [저장소 밖 문서를 함께 전달하기](#저장소-밖-문서를-함께-전달하기)
 - [Schema 4 상담을 실제로 진행하는 순서](#schema-4-상담을-실제로-진행하는-순서)
 - [처음 상담하는 전체 흐름](#처음-상담하는-전체-흐름)
 - [다섯 가지 상담 모드](#다섯-가지-상담-모드)
@@ -25,22 +26,22 @@ ChatGPT Pro는 조언을 제공하고, Codex는 저장소 확인, 코드 수정,
 
 ## 가장 짧은 사용법
 
-설치가 끝났다면 먼저 일반 상담으로 시작하세요.
+설치가 끝났다면 프로젝트에서 필요한 상담을 그대로 요청하세요.
 
 ```text
 $gptpro review 모드로 현재 변경의 정확성과 빠진 테스트를 검토해주세요.
 ```
 
-Codex가 GitHub-first `auto` 경로를 준비하고, 현재 commit을 안전하게 사용할 수 없으면 승인 전에만 paste 또는 text-file 경로를 제안합니다.
+이 요청이 Pro의 실제 프로젝트 파일 검색·읽기·탐색을 필요로 하면 Skill은 최소 범위의 `mcp-research` package를 기본 제안합니다. 제안만으로 공개되지는 않으며, Codex가 exact package와 공개 상한을 보여준 뒤 별도 승인을 기다립니다.
 
-ChatGPT Pro가 승인된 로컬 snapshot을 여러 번 검색하고 읽으면서 더 깊게 분석해야 한다면 `mcp-research`를 명시합니다.
+사용자가 GitHub/text 경로를 지정했거나 작은 고정 문맥만으로 충분한 질문이면 GitHub-first `auto`, `github`, `paste`, `text-file`을 사용할 수 있습니다. CLI의 `auto` 자체는 Web MCP를 선택하지 않습니다.
 
 ```text
 $gptpro review 모드로 src와 tests를 Pro가 읽어가며 분석하도록 mcp-research로 진행해주세요.
 공개 범위는 필요한 파일로 최소화하고, 실제 수정은 Pro 응답을 검증한 뒤에만 해주세요.
 ```
 
-`mcp-research`라는 말이 없으면 Web MCP는 자동으로 선택되지 않습니다. 처음부터 전체 repository를 공개하도록 요청하기보다 `src/**`, `tests/**`처럼 목적에 필요한 범위를 함께 말하는 편이 좋습니다.
+따라서 “프로젝트에 관해 `$gptpro`로 요청”하는 것과 “이미 공개를 승인함”은 다릅니다. 프로젝트 문맥 탐색이 필요한 요청은 `mcp-research` **제안**으로 라우팅되지만, 전송·MCP 공개·ledger 승인은 package마다 다시 받아야 합니다. 처음부터 전체 repository를 공개하기보다 `src/**`, `tests/**`처럼 목적에 필요한 범위를 함께 말하는 편이 좋습니다.
 
 이후 Codex가 다음을 순서대로 진행합니다.
 
@@ -74,8 +75,6 @@ Codex에 다음과 같이 요청합니다.
 $skill-installer Install gptpro from https://github.com/oozoofrog/codex-skills/tree/main/gptpro
 ```
 
-설치 후에는 **새 Codex 작업을 시작**해야 새 Skill이 안정적으로 발견됩니다.
-
 ### Plugin으로 설치
 
 저장소 Marketplace를 한 번 등록합니다.
@@ -90,13 +89,13 @@ codex plugin marketplace add oozoofrog/codex-skills --ref main
 
 ### 설치 확인
 
-새 Codex 작업에서 다음처럼 물어보면 됩니다.
+Codex에서 다음처럼 물어보면 됩니다.
 
 ```text
 $gptpro를 사용할 수 있는지 확인하고, 아직 전송하지 말고 준비 단계만 설명해주세요.
 ```
 
-Skill이 발견되지 않으면 먼저 새 작업을 열었는지 확인합니다. 그래도 보이지 않으면 설치 위치와 Plugin 활성 상태를 Codex에 점검해 달라고 요청하세요.
+Skill이 발견되지 않으면 설치 위치, 설치본 hash, Plugin 활성 상태를 Codex에 점검해 달라고 요청하세요.
 
 ## 무엇을 선택해야 하나요?
 
@@ -104,13 +103,33 @@ Skill이 발견되지 않으면 먼저 새 작업을 열었는지 확인합니�
 
 | 원하는 일 | 추천 경로 | 특징 |
 | --- | --- | --- |
-| 일반적인 코드 리뷰나 설계 상담 | `auto` | GitHub를 먼저 검증하고, 불가능하면 텍스트 전달로 전환합니다. |
+| 실제 프로젝트 문맥을 검색·읽기·탐색하는 코드 리뷰나 설계 상담 | `mcp-research` 제안 | `$gptpro` 요청을 최소 범위 package로 제안하지만, 공개·활성화·전송은 별도 승인 전까지 멈춥니다. |
+| 작은 고정 문맥 질문 또는 사용자가 일반 경로를 지정함 | `auto` | GitHub를 먼저 검증하고, 불가능하면 텍스트 전달로 전환합니다. CLI `auto`는 MCP를 선택하지 않습니다. |
 | 공개 범위를 특정 Git commit으로 고정 | `github` | 연결된 GitHub 저장소의 검증된 commit과 선택 경로만 요청합니다. |
 | GitHub App에 저장소 접근을 주고 싶지 않음 | `paste` 또는 `text-file` | 승인된 텍스트만 붙여넣거나 Markdown 파일 하나로 전달합니다. |
 | Pro가 승인된 로컬 스냅샷을 필요한 만큼 읽게 함 | `mcp-read` | 실험적 고급 경로입니다. 별도 Tunnel, Developer Mode, 이중 승인이 필요합니다. |
 | Pro가 저장소 구조·여러 범위·검색·diff·테스트 증거를 오가며 분석하게 함 | `mcp-research` | 실험적 읽기 전용 협업 경로입니다. Pro 결과는 Chat으로 받고, Codex context note만 별도 승인 후 ledger에 게시할 수 있습니다. |
 
-잘 모르겠다면 `auto`를 사용하세요. `mcp-read`와 `mcp-research`는 자동으로 선택되지 않으며, 사용자가 명시적으로 요청해야 합니다.
+`$gptpro`로 요청한 프로젝트 상담이 실제 파일 탐색을 요구하면 Skill이 `mcp-research`를 제안하도록 두고, 공개 범위와 승인을 확인하세요. 작은 고정 문맥이거나 MCP를 원하지 않으면 `auto`, `github`, `paste`, `text-file`을 명시하세요. 기존 3-tool `mcp-read`는 사용자가 그 계약을 직접 지정한 경우에만 선택합니다.
+
+## 저장소 밖 문서를 함께 전달하기
+
+요구사항, 회의록, 테스트 결과처럼 **현재 저장소에 들어 있지 않은 텍스트 파일**을 Pro가 함께 읽어야 할 수 있습니다. 이때 브라우저 파일 첨부를 시도하는 대신 다음처럼 요청하세요.
+
+```text
+$gptpro review 모드로 src와 tests를 검토하면서 /절대/경로/요구사항.md도 requirements라는 보충 문서로 함께 읽어주세요. 브라우저에는 파일을 직접 업로드하지 마세요.
+```
+
+Codex는 directed `--include` 또는 정확한 `--file-list`와 함께 `--supplement requirements=/절대/경로/요구사항.md`를 사용해 준비 시점의 내용을 한 번 복사하고, 비밀정보 검사와 해시를 거칩니다. 원본 경로는 package나 ChatGPT task에 저장되지 않는 로컬 CLI 입력이고, task에는 `requirements` 라벨만 씁니다. 다만 이 locator는 shell history, process list, 터미널 캡처 또는 명령을 실행한 도구의 로그에는 보일 수 있으므로 경로 이름 자체도 민감하게 다룹니다. 없는 `~user`는 traceback으로 새지 않고 안전하게 실패하며, CLI는 원본 경로의 대소문자·Unicode 정규화 변형까지 task·모델·앱/워크스페이스 메타데이터에 다시 들어가면 package 생성을 거절합니다. 문서 본문 자체에 적힌 경로 문자열까지 자동 삭제하지는 않으므로 승인 전에 실제 본문을 확인합니다.
+
+- 선택한 repository 문맥, prompt, 보충 문서를 합친 **complete payload**가 paste 한도 안이면 `paste` 메시지에 라벨과 해시가 붙은 텍스트로 포함됩니다. 보충 문서 하나가 작다는 사실만으로는 paste 가능하다고 판단하지 않습니다.
+- 크거나 여러 번 찾아 읽어야 하는 문서는 명시적 `mcp-research` package의 읽기 전용 artifact가 됩니다.
+- GitHub, text-file, 기존 schema-3 `mcp-read`에는 보충 문서를 섞지 않습니다.
+- PDF, 이미지, 바이너리는 직접 지원하지 않습니다. 필요한 부분을 검토된 UTF-8 텍스트로 내보낸 뒤 사용하세요.
+
+원본은 현재 사용자 소유의 single-link 일반 파일이어야 하고 symlink, hard link, FIFO/socket/device, group/world 쓰기 권한, 읽는 중 변경을 허용하지 않습니다. 이 안전한 열기에는 POSIX current-UID 및 descriptor-relative/no-follow 기능이 필요하며, 지원하지 않는 환경에서는 우회하지 않고 실패합니다. `mcp-research` artifact는 package의 `max_read_content_bytes`보다 긴 단일 UTF-8 line도 허용하지 않으므로, 현재 기본 98,304 bytes보다 긴 한 줄짜리 JSON/log는 미리 줄바꿈한 검토용 UTF-8 사본으로 만듭니다.
+
+원본 파일을 나중에 바꿔도 이미 만든 package는 바뀌지 않습니다. 최신 내용이 필요하면 새 package를 만들고, 새 라벨·크기·SHA-256과 전송/공개 범위를 다시 승인합니다. Schema 2 verifier는 archive의 document bytes로 context와 paste를 다시 만들어 byte-for-byte 비교하고 exact manifest keys/totals/limits를 확인합니다. Schema 4는 evidence allowlist와 supplement subset의 counts/bytes를 교차검증합니다. 상세 규칙과 한도는 [Supplemental text documents](supplemental-documents.md)를 참고하세요.
 
 ## Schema 4 상담을 실제로 진행하는 순서
 
@@ -159,7 +178,7 @@ Codex는 secret을 읽지 않는 probe와 profile 검사를 먼저 수행합니�
 
 ### 5. 사용자가 ChatGPT 화면의 신뢰 경계를 확인합니다
 
-새 일반 `Chat`에서 원하는 Pro 모델을 선택하고, 올바른 Personal/조직 workspace와 Schema 4 전용 앱이 도구 메뉴에 연결됐는지 확인합니다. 로그인, OAuth, Developer Mode, 앱 연결 또는 전송 버튼처럼 계정 권한이 걸린 단계는 사용자가 직접 수행할 수 있습니다.
+새 일반 `Chat`을 만들고 이전 user/assistant turn이 하나도 없는 빈 대화인지 확인합니다. 기존 대화, Work, Project, custom GPT는 사용하지 않습니다. 그 빈 Chat에서 원하는 Pro 모델을 선택하고, 올바른 Personal/조직 workspace와 Schema 4 전용 앱이 도구 메뉴에 연결됐는지 확인합니다. 로그인, OAuth, Developer Mode, 앱 연결 또는 전송 버튼처럼 계정 권한이 걸린 단계는 사용자가 직접 수행할 수 있습니다.
 
 ### 6. 승인된 prompt를 한 번만 보냅니다
 
@@ -278,10 +297,12 @@ $gptpro architecture 모드로 현재 구조와 event-driven 구조를 비교해
 
 `auto`는 먼저 GitHub 경로를 검증합니다. 선택한 모든 파일이 현재 HEAD와 같고 그 commit이 GitHub remote에 존재할 때만 `github`를 사용합니다.
 
-조건이 맞지 않으면 이유를 기록하고 다음 중 하나를 선택합니다.
+보충 문서가 없는 일반 저장소 문맥에서 조건이 맞지 않으면 이유를 기록하고 다음 중 하나를 선택합니다.
 
-- 작은 텍스트: `paste`
-- 큰 텍스트: `text-file`
+- complete prompt-plus-context payload가 paste 한도 안인 텍스트: `paste`
+- complete payload가 paste 한도를 넘는 텍스트: `text-file`
+
+`--supplement`가 있으면 예외입니다. `auto`는 GitHub와 `text-file`을 건너뛰고 전체 payload가 paste 한도 안일 때만 `paste`를 사용합니다. 한도를 넘으면 브라우저 첨부로 바꾸지 않고 실패하므로, 필요하면 새 explicit `mcp-research` package를 준비하고 다시 승인합니다.
 
 이 전환은 **승인 전에만** 일어납니다. 승인 후에는 전송 방식을 몰래 바꾸지 않습니다.
 
@@ -299,7 +320,7 @@ ChatGPT의 GitHub 연결이 검증된 repository와 immutable commit을 읽도�
 
 ### `paste`: 텍스트 붙여넣기
 
-작은 구조화 Markdown 문맥을 prompt와 함께 붙여넣습니다. GitHub 저장소 권한을 주지 않아도 되지만, 승인 화면에 표시된 텍스트 전체가 ChatGPT에 공개됩니다.
+구성된 complete Markdown payload가 paste 한도 안일 때 prompt와 context를 함께 붙여넣습니다. GitHub 저장소 권한을 주지 않아도 되지만, 승인 화면에 표시된 텍스트 전체가 ChatGPT에 공개됩니다. ChatGPT UI가 큰 직접 paste를 inline text 대신 **pasted text** 항목으로 표시할 수 있습니다. 이는 파일 upload나 `text-file` 전환이 아니므로, 승인된 전체 payload와 package marker가 보이는지만 확인하고 한 번만 전송합니다.
 
 ### `text-file`: Markdown 파일 첨부
 
@@ -377,7 +398,7 @@ Tunnel을 활성화하는 것과 prompt를 보내는 것은 별도 단계입니�
 - Personal/조직 workspace 선택
 - GitHub 또는 MCP 앱 연결과 repository scope 확인
 - Chrome 권한 또는 OS 파일 선택
-- 일반 Chat과 원하는 Pro 모델/추론 설정 확인
+- package마다 이전 turn이 없는 새 일반 Chat과 원하는 Pro 모델/추론 설정 확인
 - 전송 버튼을 한 번 눌렀는지 확인
 - 완성된 응답을 복사하거나 파일로 저장
 
@@ -389,7 +410,7 @@ Tunnel을 활성화하는 것과 prompt를 보내는 것은 별도 단계입니�
 지금 제가 해야 할 단계만 체크리스트로 알려주세요.
 ```
 
-Codex는 `human-handoff`의 read-only 결과를 바탕으로 정확한 경로, 기대 증거와 재시도 규칙을 알려줍니다. 사람이 “보냈다”고 말한 것만으로 receipt를 만들지 않고, 보이는 전송 결과를 확인한 후 기록합니다.
+Codex는 `human-handoff`의 read-only 결과를 바탕으로 정확한 경로, 빈 새 Chat 확인, 기대 증거와 재시도 규칙을 알려줍니다. 사람이 “보냈다”고 말한 것만으로 receipt를 만들지 않고, 전송 직전 zero-turn 상태와 보이는 전송 결과를 함께 확인한 후 기록합니다.
 
 ## 실험적 Web MCP 읽기 전용 상담
 
@@ -462,6 +483,7 @@ Pro의 분석·질문·제안은 MCP write가 아니라 보이는 Chat 응답으
 ### key와 profile 주의사항
 
 - Tunnel ID와 API key를 prompt, package, receipt, audit, log에 넣지 마세요.
+- 현재 공식 Tunnel ID 형식은 정확히 `tunnel_[a-z0-9]{32}`이며, 그 밖의 구형·합성 형식은 package 생성 전에 거부됩니다.
 - key는 지원되는 `env:NAME` 또는 권한 `0600`인 절대 `file:` reference로 전달합니다.
 - `~/.openai-tunnel-api-key` 같은 파일의 값을 다른 파일에 복사해 저장하지 않습니다.
 - Python/Homebrew 업데이트 후 interpreter 경로만 바뀌면 `mcp-profile-check`가 drift를 감지합니다.
@@ -485,7 +507,11 @@ Pro의 분석·질문·제안은 MCP write가 아니라 보이는 Chat 응답으
 
 ### 1. 전송을 기록합니다
 
-Codex는 보이는 UI에서 정확히 한 번 전송된 사실을 확인한 뒤 `mark-submitted`를 기록합니다. 자동 응답 감시를 사용하려면 이때 해당 ChatGPT 대화의 정확한 URL도 함께 기록합니다. 실패했거나 성공 여부가 모호하면 submitted로 표시하지 않습니다.
+Codex는 각 package가 이전 turn이 하나도 없는 새 일반 Chat에서 정확히 한 번 전송된 사실을 확인한 뒤 `mark-submitted --confirm-new-general-chat --thread-url <canonical-url>`을 기록합니다. 기존 대화, Work, Project, custom GPT는 제출 대상으로 인정하지 않습니다. 정확한 canonical ChatGPT URL과 새 Chat 확인은 선택 사항이 아니라 제출 receipt의 일부이며, 같은 로컬 handoff root의 다른 package에 이미 기록된 URL은 trailing slash 표기까지 정규화해 거부합니다. 다른 repository/output root까지 자동 조사하지는 못하므로, 사람이 보는 빈 대화 확인도 반드시 필요합니다. 실패했거나 성공 여부가 모호하면 submitted로 표시하지 않습니다.
+
+이 계약 이전에 제출된 구형 package를 현재 제출 증거로 업그레이드하지 않습니다. 필요한 상담은 현재 스키마로 새 package를 준비하고 정확한 범위를 다시 승인합니다.
+
+전송 직후 주소가 잠시 `/c/WEB:<임시-ID>`로 보일 수 있습니다. 이것은 기록 가능한 대화 URL이 아니므로 같은 채팅을 그대로 열어 둔 채 canonical `/c/<id>`로 바뀔 때까지 제한적으로 기다립니다. `WEB:`를 직접 지우거나 인코딩하지 않고, 새 채팅을 만들거나 새로고침하거나 prompt를 다시 보내지도 않습니다. `CHATGPT_THREAD_URL_TRANSIENT`가 나오면 package는 여전히 approved 상태이므로, canonical URL과 방금 보낸 사용자 turn이 함께 확인된 뒤에만 `mark-submitted`를 다시 실행합니다.
 
 ### 2. 같은 Codex 작업이 응답을 자동으로 기다립니다
 
@@ -556,9 +582,8 @@ Pro의 답변은 테스트 성공, 실제 기기 검증, release 승인 또는 �
 
 ### `$gptpro`가 보이지 않습니다
 
-1. 설치 후 새 Codex 작업을 열었는지 확인합니다.
-2. Plugin이 활성화되어 있는지 확인합니다.
-3. 설치본과 GitHub `main`이 다른지 Codex에 구조·hash 비교를 요청합니다.
+1. standalone 설치 위치 또는 Plugin 활성 상태를 확인합니다.
+2. 설치본과 기대한 release/commit이 다른지 Codex에 구조·hash 비교를 요청합니다.
 
 ### `.gptpro`가 Git 변경으로 보입니다
 
@@ -612,12 +637,14 @@ Developer Mode는 ChatGPT 설정 기능이며 브라우저 설정이 아닙니�
 상담 전에:
 
 - [ ] 필요한 파일만 선택했는가
+- [ ] `--include` 또는 `--file-list`로 repository 범위를 직접 지정했는가
 - [ ] secret/exclude 경고를 읽었는가
 - [ ] Git SHA와 dirty 상태가 기대와 같은가
 - [ ] 전송 방식과 외부로 나갈 path/hash를 확인했는가
 - [ ] 승인 문장에 정확한 package ID가 있는가
 - [ ] Web MCP라면 최대 파일/바이트/호출/시간 범위와 정확한 도구 목록을 확인했는가
 - [ ] `mcp-research`라면 evidence/diff와 읽기 전용 context-note ledger 정책을 확인했는가
+- [ ] 보충 문서 locator가 shell/process/tool log에 남을 수 있고, 원본과 한 줄 길이가 안전한 입력 계약을 만족하는가
 
 상담 중:
 
@@ -649,6 +676,8 @@ python3 <skill-dir>/scripts/gptpro.py prepare \
   --repo "$PWD" \
   --mode review \
   --transport auto \
+  --include "src/**" \
+  --include "tests/**" \
   --task "Review the current change."
 
 python3 <skill-dir>/scripts/gptpro.py verify --handoff-dir <dir>

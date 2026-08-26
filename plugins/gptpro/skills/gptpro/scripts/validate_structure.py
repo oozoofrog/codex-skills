@@ -28,6 +28,7 @@ REQUIRED_FILES = (
     "references/request-correlation.md",
     "references/response-monitor.md",
     "references/security.md",
+    "references/supplemental-documents.md",
     "references/user-manual.md",
     "references/web-mcp.md",
     "references/workflow.md",
@@ -594,6 +595,32 @@ def validate_research_documentation(skill_root: Path, errors: list[str]) -> None
         errors.append(f"Research documentation is missing required contract terms: {missing}")
 
 
+def validate_supplement_documentation(skill_root: Path, errors: list[str]) -> None:
+    """Keep the upload-free external-document boundary explicit and reviewable."""
+
+    reference = skill_root / "references/supplemental-documents.md"
+    try:
+        text = reference.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return
+    required = {
+        "--supplement",
+        "strict UTF-8",
+        "source path",
+        "browser file upload",
+        "mcp-research",
+        "gptpro_artifact_read",
+        "text-file",
+        "mcp-read",
+        "Snapshot and approval semantics",
+    }
+    missing = sorted(token for token in required if token not in text)
+    if missing:
+        errors.append(
+            f"Supplemental-document reference is missing required boundary terms: {missing}"
+        )
+
+
 def package_files(skill_root: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     for path in sorted(skill_root.rglob("*")):
@@ -645,6 +672,7 @@ def validate(skill_root: Path, mirror: Path | None) -> dict[str, object]:
             validate_mcp_runtime_dependencies(root, errors)
             validate_canonical_runtime_slot(root, errors)
             validate_research_documentation(root, errors)
+            validate_supplement_documentation(root, errors)
     if mirror is not None and root.is_dir():
         validate_mirror(root, mirror.expanduser().resolve(), errors)
     return {
@@ -661,6 +689,7 @@ def validate(skill_root: Path, mirror: Path | None) -> dict[str, object]:
             "web-mcp-stdlib-runtime",
             "web-mcp-canonical-runtime-slot",
             "web-mcp-research-documentation",
+            "supplemental-documentation",
             *(("standalone-plugin-mirror",) if mirror else ()),
         ],
         "errors": errors,

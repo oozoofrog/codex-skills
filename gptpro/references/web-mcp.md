@@ -4,6 +4,8 @@ The phase-3 runtime currently supports macOS with Python 3.11 or newer. Other pl
 
 This path lets a logged-in ChatGPT Web conversation inspect one explicitly approved immutable repository package through OpenAI Secure MCP Tunnel. It is experimental and attended. Schema 3 `mcp-read` is the original three-tool reader described below. Schema 4 `mcp-research` reuses the same Tunnel/lifecycle boundary with a broader seven-tool read-only research catalog and an owner-approved Codex context-note ledger; read [mcp-research.md](mcp-research.md) for its additive contract. Codex still owns repository edits, commands, tests, Git operations, and the final decision.
 
+When an explicit `$gptpro` project/repository request requires Pro to inspect, search, or navigate actual project context, the Skill-level route proposes a narrowly scoped `mcp-research` package by default. This does not grant disclosure authority, and the CLI's `auto` transport remains non-MCP. Package-specific approval, activation, and an attended single Send from an empty new general Chat remain separate gates.
+
 ## Evidence levels
 
 Keep these claims separate:
@@ -24,6 +26,8 @@ Passing a lower level does not prove a higher one. In particular, `doctor`, `/he
 | Connector | `secure-mcp-tunnel` | The official Tunnel connects ChatGPT to the local stdio server. |
 
 Changing any axis or switching between the two Web MCP schemas after approval requires revoking/stopping the current session, preparing a new package, and obtaining a new package-specific approval. Never silently fall back to GitHub, paste, text-file, manual, ZIP upload, or desktop-renderer automation.
+
+Each approved package must be sent in a new general Chat with zero prior user or assistant turns, never an existing conversation, Work, Project, or custom GPT. `mark-submitted` requires the canonical URL and explicit new-Chat confirmation; a URL already bound to another handoff under the same local handoff root is rejected.
 
 ## Approved immutable source
 
@@ -87,7 +91,7 @@ tunnel-client doctor --profile <name> --explain
 tunnel-client run --profile <name> ...
 ```
 
-The profile is user-owned. `gptpro` creates it during explicit attended init, then reads/hashes it for policy and drift checks. It does not delete, print, or silently replace the profile; the only post-init modification is the separately approved, interpreter-path-only `mcp-profile-refresh` flow below. Official v0.0.12 stores the raw Tunnel ID in that owner-only profile, and `init` necessarily receives the ID in its child argv; gptpro package/runtime/receipt/audit artifacts retain only the package-bound hash. Keep the runtime API key in the supported `env:` or owner-only `file:` reference supplied to `gptpro`; the adapter resolves it only for the child process and normalizes the official profile reference to `env:CONTROL_PLANE_API_KEY`. Never put the key value in a package, prompt, receipt, audit, log, state file, or command-line literal.
+The profile is user-owned. `gptpro` creates it during explicit attended init, then reads/hashes it for policy and drift checks. It does not delete, print, or silently replace the profile; the only post-init modification is the separately approved, interpreter-path-only `mcp-profile-refresh` flow below. Official v0.0.12 accepts the exact current identity shape `tunnel_[a-z0-9]{32}`; gptpro applies the same validation and does not accept earlier broad or synthetic identifier shapes. The client stores the raw Tunnel ID in that owner-only profile, and `init` necessarily receives the ID in its child argv; gptpro package/runtime/receipt/audit artifacts retain only the package-bound hash. Keep the runtime API key in the supported `env:` or owner-only `file:` reference supplied to `gptpro`; the adapter resolves it only for the child process and normalizes the official profile reference to `env:CONTROL_PLANE_API_KEY`. Never put the key value in a package, prompt, receipt, audit, log, state file, or command-line literal.
 
 Phase 1 accepts only the canonical `https://api.openai.com` control-plane origin with no userinfo, port, query, fragment, or non-root URL prefix. The adapter passes explicit canonical base/root-path and system-trust overrides to official `init`, `doctor`, and foreground `run`; proxy/custom-CA variables and PATH are not inherited. A profile with proxy, custom CA/client certificate, extra headers, remote MCP URLs, another command/channel, Harpoon/Cloudflared expansion, or raw HTTP logging fails before key-bearing `doctor` or `run`. The standalone `health` command reads only activation-owned URL/PID files whose URL must identify the exact owner-only Unix socket; it does not consume a remote control-plane endpoint.
 

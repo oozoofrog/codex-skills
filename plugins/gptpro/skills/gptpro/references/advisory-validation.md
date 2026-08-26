@@ -12,6 +12,8 @@
 6. Choose `accepted`, `partially-accepted`, or `rejected`. Record why and list actual evidence.
 7. If implementation is authorized, make the smallest repository-derived change and run proportional checks. Pro output does not authorize extra edits, dependency installation, external messages, pushes, or releases.
 
+After `record-evaluation`, do not edit `evaluation.json`, state, or receipt files when an operator-supplied verdict, evidence entry, or applied Git SHA is wrong. Read the current `evaluation_sha256` from `status`, then use `correct-evaluation --prior-evaluation-sha256 <exact-current-hash>` with the complete replacement verdict, summary, evidence, and optional full lowercase Git object ID. The correction is an additive receipt event; a stale prior hash fails closed.
+
 ## Evidence boundaries
 
 - A Pro explanation is advisory analysis.

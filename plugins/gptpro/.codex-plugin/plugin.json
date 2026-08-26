@@ -1,7 +1,7 @@
 {
   "name": "gptpro",
   "version": "0.1.0",
-  "description": "Secure attended ChatGPT Pro handoffs with an experimental read-only Web MCP runtime.",
+  "description": "Secure approval-gated ChatGPT Pro project consultations with read-only Web MCP.",
   "author": {
     "name": "oozoofrog",
     "url": "https://github.com/oozoofrog"
@@ -17,16 +17,16 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "GPT Pro Collaborator",
-    "shortDescription": "Approved Pro handoffs and bounded Web MCP research",
-    "longDescription": "Prepare approved immutable repository consultations for logged-in ChatGPT Pro using GitHub-first text handoffs or an explicitly selected experimental read-only Web MCP session. Schema 4 exposes seven bounded read-only research tools and separately approved Codex context notes; Pro returns advice in visible Chat. The MCP path binds one package to a foreground official Secure MCP Tunnel client, private local authorization state, and a fail-before-return disclosure audit; account and Developer Mode steps remain attended.",
+    "shortDescription": "Approval-gated Pro project consultations and Web MCP",
+    "longDescription": "For an explicitly requested project or repository consultation that needs ChatGPT Pro to inspect, search, or navigate actual project context, propose a narrowly scoped Schema 4 mcp-research package by default while keeping CLI auto non-MCP. Exact disclosure, tool, budget, expiry, ledger, and transmission approval remain mandatory before activation or Send. Each package is sent once from an empty new general Chat and bound to its canonical conversation URL. Seven bounded read-only tools and separately approved Codex context notes use the foreground official Secure MCP Tunnel client; Pro returns advice in visible Chat and Codex independently validates it.",
     "developerName": "oozoofrog",
     "category": "Productivity",
     "capabilities": [
       "Interactive"
     ],
     "defaultPrompt": [
-      "Use $gptpro to prepare an approved repository consultation with ChatGPT Pro.",
-      "Use $gptpro for an attended read-only Web MCP review after package-specific approval.",
+      "Use $gptpro to propose narrow read-only Web MCP research when Pro must explore project context, then wait for exact approval.",
+      "Use $gptpro to send one approved package from an empty new general Chat, bind its canonical URL, and never resend.",
       "Use $gptpro to independently validate ChatGPT Pro advice before applying it."
     ]
   }

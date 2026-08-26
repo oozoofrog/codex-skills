@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping
 
 from .clock import parse_utc, utc_text
+from .sensitive import OPENAI_TUNNEL_ID_TEXT
 
 RUNTIME_SCHEMA_VERSION = 1
 LIVE_STATUSES = frozenset({"activating", "active", "revoking"})
@@ -36,9 +37,9 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 _ERROR_CODE = re.compile(r"[A-Z][A-Z0-9_]{1,63}")
 _PACKAGE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _STOP_REASON = re.compile(r"[a-z][a-z0-9_-]{0,63}")
-_SECRET_VALUE = re.compile(r"(?:\bsk-[A-Za-z0-9_-]{16,}|\btunnel_[A-Za-z0-9_-]{16,128}\b)")
+_SECRET_VALUE = re.compile(rf"(?:\bsk-[A-Za-z0-9_-]{{16,}}|\b{OPENAI_TUNNEL_ID_TEXT}\b)")
 _SECRET_OBJECT_KEY = re.compile(
-    r"(?:sk-[A-Za-z0-9_-]{16,}|tunnel_[A-Za-z0-9_-]{16,128})", re.IGNORECASE
+    rf"(?:sk-[A-Za-z0-9_-]{{16,}}|{OPENAI_TUNNEL_ID_TEXT})", re.IGNORECASE
 )
 _SAFE_TUNNEL_OBJECT_KEYS = frozenset(
     {
@@ -160,15 +161,29 @@ def _open_directory_chain(path: Path, *, create: bool, final_mode: int | None = 
                     raise RuntimeStateError(
                         "RUNTIME_STATE_UNSAFE", "A private runtime directory is missing."
                     )
+                created = False
                 try:
                     os.mkdir(component, final_mode or 0o700, dir_fd=descriptor)
-                    child = os.open(component, flags | nofollow, dir_fd=descriptor)
-                    os.fchmod(child, final_mode or 0o700)
-                    os.fsync(descriptor)
+                    created = True
+                except FileExistsError:
+                    # Another cooperating process may have created the same
+                    # directory after the open above. Re-open and validate it
+                    # through the same no-follow descriptor path.
+                    pass
                 except OSError as exc:
                     raise RuntimeStateError(
                         "RUNTIME_STATE_UNSAFE", "Unable to create a private runtime directory."
                     ) from exc
+                try:
+                    child = os.open(component, flags | nofollow, dir_fd=descriptor)
+                except OSError as exc:
+                    raise RuntimeStateError(
+                        "RUNTIME_STATE_UNSAFE",
+                        "A private runtime path contains a symlink or non-directory component.",
+                    ) from exc
+                if created:
+                    os.fchmod(child, final_mode or 0o700)
+                    os.fsync(descriptor)
             except OSError as exc:
                 raise RuntimeStateError(
                     "RUNTIME_STATE_UNSAFE",

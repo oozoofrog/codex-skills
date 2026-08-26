@@ -94,7 +94,11 @@ from runtime.gptpro_mcp.runtime_state import (
     fsync_directory,
     open_private_regular,
 )
-from runtime.gptpro_mcp.sensitive import SECRET_PATTERNS, secret_detector_names
+from runtime.gptpro_mcp.sensitive import (
+    OPENAI_TUNNEL_ID,
+    SECRET_PATTERNS,
+    secret_detector_names,
+)
 from runtime.gptpro_mcp.supervisor import (
     _claim_and_unlink_control_socket_if_matches,
     request_cooperative_stop,
@@ -134,6 +138,7 @@ RESPONSE_MONITOR_EVENTS = (
     "response_monitor_started",
     "response_monitor_stopped",
 )
+EVALUATION_AUXILIARY_EVENTS = ("evaluation_corrected",)
 RESPONSE_MONITOR_STOP_REASONS = (
     "response_imported",
     "evaluated",
@@ -143,6 +148,8 @@ RESPONSE_MONITOR_STOP_REASONS = (
     "creation_failed",
 )
 DEFAULT_RESPONSE_MONITOR_INTERVAL_SECONDS = 120
+CHATGPT_CONVERSATION_CONTRACT = "new-general-chat-empty-v1"
+CHATGPT_THREAD_HISTORY_LOCK_TIMEOUT_SECONDS = 2.0
 DEFAULT_RESPONSE_MONITOR_MAX_RUNS = 15
 DEFAULT_RESPONSE_MONITOR_DURATION_SECONDS = 30 * 60
 MCP_SESSION_STATUSES = ("activating", "active", "revoking", "revoked", "expired", "faulted")
@@ -159,7 +166,7 @@ HUMAN_HANDOFF_REASONS = (
     "submission-uncertain",
     "response-export",
 )
-_OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
+_OPEN_SUPPORTS_DIR_FD = os.open in (getattr(os, "supports_dir_fd", ()) or ())
 DEFAULT_REQUESTED_MODEL = "ChatGPT Pro / GPT-5.6 Sol / Intelligence: Pro"
 DESTINATION = "https://chatgpt.com/"
 DEFAULT_MAX_FILES = 2_000
@@ -167,6 +174,9 @@ DEFAULT_MAX_BYTES = 25 * 1024 * 1024
 DEFAULT_MAX_FILE_BYTES = 2 * 1024 * 1024
 WEB_MCP_MINIMUM_PYTHON = (3, 11)
 DEFAULT_MAX_PASTE_BYTES = 128 * 1024
+DEFAULT_MAX_SUPPLEMENT_FILES = 16
+DEFAULT_MAX_SUPPLEMENT_FILE_BYTES = 2 * 1024 * 1024
+DEFAULT_MAX_SUPPLEMENT_TOTAL_BYTES = 8 * 1024 * 1024
 SCHEMA3_INTERNAL_MANIFEST_MAX_BYTES = 4 * 1024 * 1024
 SCHEMA3_CENTRAL_DIRECTORY_MAX_BYTES = 2 * 1024 * 1024
 RESEARCH_INTERNAL_ARTIFACT_MAX_BYTES = 4 * 1024 * 1024
@@ -398,6 +408,26 @@ class EvidenceFile:
         }
 
 
+@dataclass(frozen=True)
+class SupplementFile:
+    label: str
+    content: bytes
+    sha256: str
+    size: int
+
+    @property
+    def archive_path(self) -> str:
+        return f"_gptpro/supplements/{self.label}.txt"
+
+    def manifest_entry(self) -> dict[str, Any]:
+        return {
+            "label": self.label,
+            "archive_path": self.archive_path,
+            "size": self.size,
+            "sha256": self.sha256,
+        }
+
+
 def is_mcp_schema(schema_version: Any) -> bool:
     return schema_version in MCP_SCHEMA_VERSIONS
 
@@ -534,8 +564,10 @@ def read_tunnel_id_reference(reference: str) -> str:
                 os.close(descriptor)
     else:
         raise HandoffError("--tunnel-id-ref must use env:NAME or file:/absolute/path")
-    if re.fullmatch(r"tunnel_[A-Za-z0-9_-]{16,128}", value) is None:
-        raise HandoffError("Tunnel ID reference is missing or does not contain one valid tunnel_ identifier")
+    if OPENAI_TUNNEL_ID.fullmatch(value) is None:
+        raise HandoffError(
+            "Tunnel ID reference is missing or does not contain one current official tunnel_ identifier"
+        )
     return value
 
 
@@ -626,14 +658,22 @@ def validate_schema3_archive_plan(files: list[SelectedFile], internal_manifest: 
 def open_owner_input_file(raw: str, *, label: str) -> tuple[int, Path]:
     """Open one absolute input through a no-symlink directory-fd walk."""
 
-    candidate = Path(raw).expanduser()
+    if not _OPEN_SUPPORTS_DIR_FD or not callable(getattr(os, "getuid", None)):
+        raise HandoffError(f"{label} requires POSIX owner and directory-fd support")
+    try:
+        candidate = Path(raw).expanduser()
+    except (OSError, RuntimeError) as exc:
+        raise HandoffError(f"Unable to resolve {label} source path safely") from exc
     if not candidate.is_absolute():
         raise HandoffError(f"{label} must use an absolute path")
     lexical = Path(os.path.abspath(candidate))
     nofollow = getattr(os, "O_NOFOLLOW", None)
     directory = getattr(os, "O_DIRECTORY", None)
-    if nofollow is None or directory is None:
-        raise HandoffError(f"{label} requires O_NOFOLLOW and O_DIRECTORY support")
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    if nofollow is None or directory is None or nonblock is None:
+        raise HandoffError(
+            f"{label} requires O_NOFOLLOW, O_DIRECTORY, and O_NONBLOCK support"
+        )
     components = lexical.parts
     if len(components) < 2 or components[0] != os.sep:
         raise HandoffError(f"{label} has an invalid absolute path")
@@ -656,22 +696,29 @@ def open_owner_input_file(raw: str, *, label: str) -> tuple[int, Path]:
             directory_descriptor = next_descriptor
         descriptor = os.open(
             components[-1],
-            os.O_RDONLY | int(nofollow) | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY
+            | int(nofollow)
+            | int(nonblock)
+            | getattr(os, "O_CLOEXEC", 0),
             dir_fd=directory_descriptor,
         )
         return descriptor, lexical
-    except OSError as exc:
-        raise HandoffError(
-            f"Unable to open {label} without symlink traversal: {exc}"
-        ) from exc
+    except (OSError, TypeError, NotImplementedError) as exc:
+        raise HandoffError(f"Unable to open {label} without symlink traversal") from exc
     finally:
         if directory_descriptor >= 0:
             os.close(directory_descriptor)
 
 
-def read_research_evidence(specifications: list[str], limits: dict[str, int]) -> list[EvidenceFile]:
+def read_research_evidence(
+    specifications: list[str],
+    limits: dict[str, int],
+    *,
+    option_name: str = "--evidence-file",
+    kind_label: str = "Evidence file",
+) -> list[EvidenceFile]:
     if len(specifications) > limits["max_evidence_files"]:
-        raise HandoffError("Too many --evidence-file entries for the approved research limits")
+        raise HandoffError(f"Too many {option_name} entries for the approved limits")
     evidence: list[EvidenceFile] = []
     seen: set[str] = set()
     total = 0
@@ -682,15 +729,15 @@ def read_research_evidence(specifications: list[str], limits: dict[str, int]) ->
             or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", artifact_id) is None
             or artifact_id in seen
         ):
-            raise HandoffError("--evidence-file must use a unique safe LABEL=/path form")
+            raise HandoffError(f"{option_name} must use a unique safe LABEL=/absolute/path form")
         reject_secret_like_paths(
             [artifact_id],
-            label="Schema-4 evidence artifact IDs",
+            label="External artifact IDs",
         )
         descriptor = -1
         try:
             descriptor, _ = open_owner_input_file(
-                raw_path, label=f"Evidence file {artifact_id!r}"
+                raw_path, label=f"{kind_label} {artifact_id!r}"
             )
             before = os.fstat(descriptor)
             if (
@@ -700,7 +747,9 @@ def read_research_evidence(specifications: list[str], limits: dict[str, int]) ->
                 or before.st_mode & 0o022
                 or not 0 <= before.st_size <= limits["max_evidence_file_bytes"]
             ):
-                raise HandoffError(f"Evidence file {artifact_id!r} has unsafe ownership, mode, links, or size")
+                raise HandoffError(
+                    f"{kind_label} {artifact_id!r} has unsafe ownership, mode, links, or size"
+                )
             chunks: list[bytes] = []
             remaining = limits["max_evidence_file_bytes"] + 1
             while remaining:
@@ -711,32 +760,116 @@ def read_research_evidence(specifications: list[str], limits: dict[str, int]) ->
                 remaining -= len(chunk)
             after = os.fstat(descriptor)
         except OSError as exc:
-            raise HandoffError(f"Unable to read evidence file {artifact_id!r} safely: {exc}") from exc
+            raise HandoffError(
+                f"Unable to read {kind_label.lower()} {artifact_id!r} safely: {exc}"
+            ) from exc
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
         stable = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
         content = b"".join(chunks)
         if any(getattr(before, name) != getattr(after, name) for name in stable) or len(content) != before.st_size:
-            raise HandoffError(f"Evidence file {artifact_id!r} changed while it was read")
+            raise HandoffError(f"{kind_label} {artifact_id!r} changed while it was read")
         if b"\0" in content:
-            raise HandoffError(f"Evidence file {artifact_id!r} contains NUL or binary data")
+            raise HandoffError(f"{kind_label} {artifact_id!r} contains NUL or binary data")
         try:
             text = content.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise HandoffError(f"Evidence file {artifact_id!r} is not strict UTF-8") from exc
-        findings = secret_findings(f"evidence:{artifact_id}", text)
+            raise HandoffError(f"{kind_label} {artifact_id!r} is not strict UTF-8") from exc
+        read_limit = limits.get("max_read_content_bytes")
+        if read_limit is not None and any(
+            len(line) > read_limit for line in content.splitlines(keepends=True)
+        ):
+            raise HandoffError(
+                f"{kind_label} {artifact_id!r} contains a line longer than the approved read limit"
+            )
+        findings = secret_findings(f"external-text:{artifact_id}", text)
         if findings:
             detectors = ", ".join(sorted({str(item["detector"]) for item in findings}))
-            raise HandoffError(f"Evidence file {artifact_id!r} contains secret-like material: {detectors}")
+            raise HandoffError(
+                f"{kind_label} {artifact_id!r} contains secret-like material: {detectors}"
+            )
         total += len(content)
         if total > limits["max_evidence_total_bytes"]:
-            raise HandoffError("Evidence files exceed the approved total-byte limit")
+            raise HandoffError("External text artifacts exceed the approved total-byte limit")
         evidence.append(
             EvidenceFile(artifact_id, content, sha256_bytes(content), len(content))
         )
         seen.add(artifact_id)
     return sorted(evidence, key=lambda item: item.artifact_id)
+
+
+def read_supplements(specifications: list[str]) -> list[SupplementFile]:
+    limits = {
+        "max_evidence_files": DEFAULT_MAX_SUPPLEMENT_FILES,
+        "max_evidence_file_bytes": DEFAULT_MAX_SUPPLEMENT_FILE_BYTES,
+        "max_evidence_total_bytes": DEFAULT_MAX_SUPPLEMENT_TOTAL_BYTES,
+    }
+    artifacts = read_research_evidence(
+        specifications,
+        limits,
+        option_name="--supplement",
+        kind_label="Supplemental document",
+    )
+    return [
+        SupplementFile(
+            label=item.artifact_id,
+            content=item.content,
+            sha256=item.sha256,
+            size=item.size,
+        )
+        for item in artifacts
+    ]
+
+
+def reject_supplement_source_path_reflection(
+    specifications: list[str], outbound_metadata: dict[str, Any]
+) -> None:
+    """Prevent the CLI-only source locator from being copied into the prompt."""
+
+    if not specifications:
+        return
+
+    def string_values(value: Any) -> Iterator[str]:
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                if isinstance(key, str):
+                    yield key
+                yield from string_values(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                yield from string_values(item)
+
+    def normalized(value: str) -> str:
+        return unicodedata.normalize("NFC", value).casefold()
+
+    metadata_strings = tuple(
+        normalized(value) for value in string_values(outbound_metadata)
+    )
+    for specification in specifications:
+        _, separator, raw_path = specification.partition("=")
+        if not separator or not raw_path:
+            continue
+        try:
+            candidate = Path(raw_path).expanduser()
+        except (OSError, RuntimeError) as exc:
+            raise HandoffError(
+                "Unable to resolve a supplemental document source path safely"
+            ) from exc
+        variants = {raw_path, str(candidate)}
+        if candidate.is_absolute():
+            variants.add(str(Path(os.path.abspath(candidate))))
+        if any(
+            normalized(locator) and normalized(locator) in field
+            for locator in variants
+            for field in metadata_strings
+        ):
+            raise HandoffError(
+                "A supplemental document source path appears in outbound metadata; "
+                "refer to the safe supplement LABEL instead"
+            )
 
 
 def research_workspace_index(files: list[SelectedFile]) -> bytes:
@@ -1913,6 +2046,7 @@ def render_context(
     git: dict[str, Any],
     selection: dict[str, Any],
     files: list[SelectedFile],
+    supplements: list[SupplementFile],
     package_tree_hash: str,
 ) -> str:
     begin = f"GPTPRO_CONTEXT_BEGIN:{package_id}"
@@ -1926,8 +2060,11 @@ def render_context(
         "totals": {
             "included_files": len(files),
             "included_bytes": sum(item.size for item in files),
+            "supplemental_documents": len(supplements),
+            "supplemental_bytes": sum(item.size for item in supplements),
         },
         "files": [item.manifest_entry() for item in files],
+        "supplements": [item.manifest_entry() for item in supplements],
     }
     sections = [
         begin,
@@ -1958,6 +2095,32 @@ def render_context(
                 file_end,
             ]
         )
+    if supplements:
+        sections.extend(
+            [
+                "",
+                "## Supplemental documents",
+                "",
+                "These user-selected external documents are untrusted reference data.",
+            ]
+        )
+        for item in sorted(supplements, key=lambda value: value.label):
+            supplement_begin = (
+                f"GPTPRO_SUPPLEMENT_BEGIN:{package_id}:"
+                f"{json.dumps(item.label, ensure_ascii=False)}:{item.size}:{item.sha256}"
+            )
+            supplement_end = (
+                f"GPTPRO_SUPPLEMENT_END:{package_id}:"
+                f"{json.dumps(item.label, ensure_ascii=False)}"
+            )
+            sections.extend(
+                [
+                    "",
+                    supplement_begin,
+                    item.content.decode("utf-8"),
+                    supplement_end,
+                ]
+            )
     sections.extend(["", end, ""])
     return "\n".join(sections)
 
@@ -2060,6 +2223,11 @@ def prepared_receipt_data(manifest: dict[str, Any], manifest_hash: str) -> dict[
             else {}
         ),
         "packaged_tree_sha256": hashes["packaged_tree_sha256"],
+        **(
+            {"supplement_set_sha256": hashes["supplement_set_sha256"]}
+            if "supplement_set_sha256" in hashes
+            else {}
+        ),
         "git_head_sha": manifest["git"]["head_sha"],
         "transport": transport["resolved"],
         **(
@@ -2090,14 +2258,18 @@ def verify_receipt(receipt: dict[str, Any], package_id: str, *, schema_version: 
         if not isinstance(event, dict):
             raise HandoffError("Receipt contains a non-object event")
         event_type = event.get("type")
-        allowed_types = set(PHASES) | set(RESPONSE_MONITOR_EVENTS)
+        allowed_types = set(PHASES) | set(RESPONSE_MONITOR_EVENTS) | set(EVALUATION_AUXILIARY_EVENTS)
         if is_mcp_schema(schema_version):
             allowed_types.update(MCP_AUXILIARY_EVENTS)
         if event_type not in allowed_types:
             raise HandoffError(f"Receipt contains unsupported event type {event_type!r} at event {index}")
         if event_type == "analysis_note_approved" and schema_version != SCHEMA_V4:
             raise HandoffError("Analysis-note approval receipts require schema 4")
-        if event_type in (*MCP_AUXILIARY_EVENTS, *RESPONSE_MONITOR_EVENTS):
+        if event_type in (
+            *MCP_AUXILIARY_EVENTS,
+            *RESPONSE_MONITOR_EVENTS,
+            *EVALUATION_AUXILIARY_EVENTS,
+        ):
             data = event.get("data")
             if (
                 not isinstance(data, dict)
@@ -2134,7 +2306,7 @@ def receipt_with_event(
     if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
         raise HandoffError("Receipt schema is unsupported")
     verify_receipt(receipt, package_id, schema_version=int(schema_version))
-    allowed_types = set(PHASES) | set(RESPONSE_MONITOR_EVENTS)
+    allowed_types = set(PHASES) | set(RESPONSE_MONITOR_EVENTS) | set(EVALUATION_AUXILIARY_EVENTS)
     if is_mcp_schema(int(schema_version)):
         allowed_types.update(MCP_AUXILIARY_EVENTS)
     if event_type not in allowed_types:
@@ -2142,9 +2314,9 @@ def receipt_with_event(
     if event_type == "analysis_note_approved" and int(schema_version) != SCHEMA_V4:
         raise HandoffError("Analysis-note approval receipts require schema 4")
     auxiliary_events = (
-        (*MCP_AUXILIARY_EVENTS, *RESPONSE_MONITOR_EVENTS)
+        (*MCP_AUXILIARY_EVENTS, *RESPONSE_MONITOR_EVENTS, *EVALUATION_AUXILIARY_EVENTS)
         if is_mcp_schema(int(schema_version))
-        else RESPONSE_MONITOR_EVENTS
+        else (*RESPONSE_MONITOR_EVENTS, *EVALUATION_AUXILIARY_EVENTS)
     )
     if event_type in auxiliary_events and (
         data.get("phase_before") not in PHASES
@@ -2216,6 +2388,14 @@ def _response_monitor_identifier(raw: Any, *, label: str) -> str:
         or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", raw)
     ):
         raise HandoffError(f"{label} is invalid")
+    return raw
+
+
+def validated_applied_git_sha(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", raw) is None:
+        raise HandoffError("Applied Git SHA must be a full lowercase commit object ID")
     return raw
 
 
@@ -2935,6 +3115,11 @@ def create_package(args: argparse.Namespace) -> int:
         for flag, value, maximum in hard_package_limits:
             if value > maximum:
                 raise HandoffError(f"MCP {flag} must not exceed the hard limit {maximum}")
+    if args.supplement and args.transport not in {"auto", "paste", "mcp-research"}:
+        raise HandoffError(
+            "--supplement supports browser-upload-free auto/paste or mcp-research; "
+            "GitHub, text-file, and mcp-read cannot represent this external document contract"
+        )
     research_only_values = (
         args.evidence_file,
         args.max_workspace_depth,
@@ -2964,6 +3149,19 @@ def create_package(args: argparse.Namespace) -> int:
         exclude_patterns = sorted(set(exclude_patterns))
     file_list_path, file_list_entries = read_file_list(args.file_list)
     task = read_task(args)
+    reject_supplement_source_path_reflection(
+        args.supplement,
+        {
+            "task": task,
+            "requested_model": args.requested_model,
+            "chatgpt_app_name": args.chatgpt_app_name,
+            "chatgpt_workspace_label": args.chatgpt_workspace_label,
+        },
+    )
+    supplements: list[SupplementFile] = (
+        read_supplements(args.supplement) if schema_version == SCHEMA_V2 else []
+    )
+    supplement_bytes = sum(item.size for item in supplements)
     research_status_snapshot: bytes | None = None
     research_deleted_paths: list[str] = []
     if schema_version == SCHEMA_V4:
@@ -3034,7 +3232,9 @@ def create_package(args: argparse.Namespace) -> int:
     tunnel_id: str | None = None
     repository_identity: str | None = None
     research: dict[str, Any] | None = None
-    research_members: dict[str, bytes] = {}
+    research_members: dict[str, bytes] = {
+        item.archive_path: item.content for item in supplements
+    }
     if schema_version == SCHEMA_V2:
         context = render_context(
             schema_version=schema_version,
@@ -3042,6 +3242,7 @@ def create_package(args: argparse.Namespace) -> int:
             git=git,
             selection=selection,
             files=selected,
+            supplements=supplements,
             package_tree_hash=package_tree_hash,
         )
         paste_prompt = render_prompt(
@@ -3066,27 +3267,39 @@ def create_package(args: argparse.Namespace) -> int:
     github: dict[str, Any] | None = None
     if args.transport == "auto":
         assert candidate_paste_payload is not None
-        try:
-            github = github_transport_metadata(
-                root,
-                git=git,
-                selected=selected,
-                package_tree_hash=package_tree_hash,
-                remote=args.github_remote,
-                pr_url=args.github_pr_url,
-            )
-            resolved_transport = "github"
-        except HandoffError as exc:
-            if args.github_pr_url:
-                raise
-            resolved_transport = (
-                "paste"
-                if len(candidate_paste_payload.encode("utf-8")) <= args.max_paste_bytes
-                else "text-file"
-            )
+        if supplements:
+            paste_bytes = len(candidate_paste_payload.encode("utf-8"))
+            if paste_bytes > args.max_paste_bytes:
+                raise HandoffError(
+                    "Supplemental context exceeds --max-paste-bytes; use explicit "
+                    "--transport mcp-research instead of a browser file upload"
+                )
+            resolved_transport = "paste"
             scan["warnings"].append(
-                f"GitHub-first auto transport was unavailable ({exc}); resolved to {resolved_transport}"
+                "GitHub cannot represent local supplemental documents; auto resolved to paste"
             )
+        else:
+            try:
+                github = github_transport_metadata(
+                    root,
+                    git=git,
+                    selected=selected,
+                    package_tree_hash=package_tree_hash,
+                    remote=args.github_remote,
+                    pr_url=args.github_pr_url,
+                )
+                resolved_transport = "github"
+            except HandoffError as exc:
+                if args.github_pr_url:
+                    raise
+                resolved_transport = (
+                    "paste"
+                    if len(candidate_paste_payload.encode("utf-8")) <= args.max_paste_bytes
+                    else "text-file"
+                )
+                scan["warnings"].append(
+                    f"GitHub-first auto transport was unavailable ({exc}); resolved to {resolved_transport}"
+                )
     else:
         resolved_transport = args.transport
     if args.github_pr_url and resolved_transport != "github":
@@ -3102,6 +3315,10 @@ def create_package(args: argparse.Namespace) -> int:
         )
     if resolved_transport == "paste":
         assert paste_prompt is not None and candidate_paste_payload is not None
+        if supplements and len(candidate_paste_payload.encode("utf-8")) > args.max_paste_bytes:
+            raise HandoffError(
+                "Supplemental context exceeds --max-paste-bytes; use --transport mcp-research"
+            )
         prompt = paste_prompt
         paste_payload = candidate_paste_payload
     elif resolved_transport == "github":
@@ -3181,7 +3398,18 @@ def create_package(args: argparse.Namespace) -> int:
         ]
         file_set_sha256 = sha256_bytes(canonical_json_bytes(file_set))
         if schema_version == SCHEMA_V4:
-            evidence = read_research_evidence(args.evidence_file, mcp_limits)
+            evidence = read_research_evidence(
+                [*args.evidence_file, *args.supplement],
+                mcp_limits,
+                option_name="--evidence-file/--supplement",
+                kind_label="Research artifact",
+            )
+            supplement_labels = {
+                specification.partition("=")[0] for specification in args.supplement
+            }
+            supplement_bytes = sum(
+                item.size for item in evidence if item.artifact_id in supplement_labels
+            )
             workspace_index_bytes = research_workspace_index(selected)
             if set(research_deleted_paths) & {item.path for item in selected}:
                 raise HandoffError(
@@ -3210,6 +3438,11 @@ def create_package(args: argparse.Namespace) -> int:
             )
             research = {
                 "profile": "repository-research-v1",
+                **(
+                    {"supplement_artifact_ids": sorted(supplement_labels)}
+                    if supplement_labels
+                    else {}
+                ),
                 "workspace_index": {
                     "archive_path": "_gptpro/research/workspace-index.json",
                     "size": len(workspace_index_bytes),
@@ -3254,16 +3487,25 @@ def create_package(args: argparse.Namespace) -> int:
                 file_set_sha256=file_set_sha256,
                 limits=mcp_limits,
                 schema_version=schema_version,
+            )
+            + (
+                " Supplemental documents are exposed only as approved research artifact IDs "
+                f"{', '.join(sorted(supplement_labels))}; discover them with "
+                "`gptpro_package_info` and read them with `gptpro_artifact_read`."
+                if schema_version == SCHEMA_V4 and supplement_labels
+                else ""
             ),
         )
         paste_payload = None
     file_entries = [item.manifest_entry() for item in selected]
+    supplement_entries = [item.manifest_entry() for item in supplements]
     internal = {
         "schema_version": schema_version,
         "package_id": package_id,
         "git": public_git_identity(git),
         "selection": public_selection(selection),
         "files": file_entries,
+        **({"supplements": supplement_entries} if supplement_entries else {}),
         "totals": {"included_files": len(selected), "included_bytes": scan["total_bytes"]},
         "packaged_tree_sha256": package_tree_hash,
         **({"research": research} if research is not None else {}),
@@ -3285,6 +3527,8 @@ def create_package(args: argparse.Namespace) -> int:
         "clean": git["clean"],
         "included_files": len(selected),
         "included_bytes": scan["total_bytes"],
+        "supplemental_documents": len(args.supplement),
+        "supplemental_bytes": supplement_bytes,
         "excluded_files": len(scan["excluded"]),
         "omitted_files": len(scan["omitted"]),
         "security_findings": len(scan["security"]),
@@ -3310,6 +3554,10 @@ def create_package(args: argparse.Namespace) -> int:
                 "selection": public_selection(selection),
                 "selected_paths": [item.path for item in selected],
                 "selected_text": [item.content.decode("utf-8") for item in selected],
+                "research_members": {
+                    path: content.decode("utf-8")
+                    for path, content in research_members.items()
+                },
                 "scan_metadata": {
                     "excluded": scan["excluded"],
                     "omitted": scan["omitted"],
@@ -3383,6 +3631,15 @@ def create_package(args: argparse.Namespace) -> int:
         "archive_sha256": sha256_file(archive_path),
         "internal_manifest_sha256": sha256_bytes(internal_bytes),
     }
+    if supplement_entries:
+        hashes["supplement_set_sha256"] = sha256_bytes(
+            canonical_json_bytes(
+                [
+                    {"label": item.label, "size": item.size, "sha256": item.sha256}
+                    for item in supplements
+                ]
+            )
+        )
     if research is not None:
         hashes.update(
             {
@@ -3449,8 +3706,18 @@ def create_package(args: argparse.Namespace) -> int:
             "max_bytes": args.max_bytes,
             "max_file_bytes": args.max_file_bytes,
             "max_paste_bytes": args.max_paste_bytes,
+            **(
+                {
+                    "max_supplement_files": DEFAULT_MAX_SUPPLEMENT_FILES,
+                    "max_supplement_file_bytes": DEFAULT_MAX_SUPPLEMENT_FILE_BYTES,
+                    "max_supplement_total_bytes": DEFAULT_MAX_SUPPLEMENT_TOTAL_BYTES,
+                }
+                if schema_version == SCHEMA_V2
+                else {}
+            ),
         },
         "files": file_entries,
+        **({"supplements": supplement_entries} if supplement_entries else {}),
         "excluded": scan["excluded"],
         "omitted_by_selection": scan["omitted"],
         "security_findings": scan["security"],
@@ -3459,6 +3726,8 @@ def create_package(args: argparse.Namespace) -> int:
             "candidate_files": len(scan["candidates"]),
             "included_files": len(selected),
             "included_bytes": scan["total_bytes"],
+            "supplemental_documents": len(args.supplement),
+            "supplemental_bytes": supplement_bytes,
             "excluded_files": len(scan["excluded"]),
             "omitted_files": len(scan["omitted"]),
         },
@@ -3830,7 +4099,12 @@ def verify_mcp_manifest_contract(manifest: dict[str, Any]) -> None:
         seen: set[str] = set()
         total_evidence = 0
         for item in evidence:
-            if not isinstance(item, dict):
+            if not isinstance(item, dict) or set(item) != {
+                "artifact_id",
+                "archive_path",
+                "size",
+                "sha256",
+            }:
                 raise HandoffError("Schema-4 evidence entry is invalid")
             artifact_id = item.get("artifact_id")
             size = item.get("size")
@@ -3852,6 +4126,30 @@ def verify_mcp_manifest_contract(manifest: dict[str, Any]) -> None:
             total_evidence += size
         if len(evidence) > validated_limits["max_evidence_files"] or total_evidence > validated_limits["max_evidence_total_bytes"]:
             raise HandoffError("Schema-4 evidence exceeds the approved limits")
+        supplement_artifact_ids = research.get("supplement_artifact_ids", [])
+        if (
+            not isinstance(supplement_artifact_ids, list)
+            or supplement_artifact_ids != sorted(set(supplement_artifact_ids))
+            or not all(
+                isinstance(value, str) and value in seen
+                for value in supplement_artifact_ids
+            )
+        ):
+            raise HandoffError("Schema-4 supplemental artifact IDs are invalid")
+        evidence_by_id = {item["artifact_id"]: item for item in evidence}
+        supplemental_bytes = sum(
+            int(evidence_by_id[artifact_id]["size"])
+            for artifact_id in supplement_artifact_ids
+        )
+        totals = manifest.get("totals")
+        if (
+            not isinstance(totals, dict)
+            or type(totals.get("supplemental_documents")) is not int
+            or totals.get("supplemental_documents") != len(supplement_artifact_ids)
+            or type(totals.get("supplemental_bytes")) is not int
+            or totals.get("supplemental_bytes") != supplemental_bytes
+        ):
+            raise HandoffError("Schema-4 supplemental totals are invalid")
         evidence_hash = sha256_bytes(canonical_json_bytes(expected_evidence))
         if research.get("evidence_set_sha256") != evidence_hash or hashes.get("evidence_set_sha256") != evidence_hash:
             raise HandoffError("Schema-4 evidence-set hash mismatch")
@@ -3950,6 +4248,77 @@ def verify_package(
         or not isinstance(transport, dict)
     ):
         raise HandoffError("Manifest artifact, hash, file, or transport fields are invalid")
+    supplements_raw = manifest.get("supplements", [])
+    supplements: list[dict[str, Any]] = []
+    if schema_version == SCHEMA_V2:
+        if not isinstance(supplements_raw, list):
+            raise HandoffError("Schema-2 supplemental document contract is invalid")
+        seen_supplement_labels: set[str] = set()
+        for index, entry in enumerate(supplements_raw):
+            if not isinstance(entry, dict) or set(entry) != {
+                "label",
+                "archive_path",
+                "size",
+                "sha256",
+            }:
+                raise HandoffError(f"Supplemental document entry {index} is invalid")
+            label = entry.get("label")
+            size = entry.get("size")
+            if (
+                not isinstance(label, str)
+                or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", label) is None
+                or label in seen_supplement_labels
+                or entry.get("archive_path") != f"_gptpro/supplements/{label}.txt"
+                or isinstance(size, bool)
+                or not isinstance(size, int)
+                or not 0 <= size <= DEFAULT_MAX_SUPPLEMENT_FILE_BYTES
+            ):
+                raise HandoffError("Schema-2 supplemental document identity or size is invalid")
+            require_sha256(entry.get("sha256"), label=f"Supplemental document hash for {label}")
+            seen_supplement_labels.add(label)
+            supplements.append(entry)
+        if (
+            len(supplements) > DEFAULT_MAX_SUPPLEMENT_FILES
+            or sum(int(item["size"]) for item in supplements)
+            > DEFAULT_MAX_SUPPLEMENT_TOTAL_BYTES
+        ):
+            raise HandoffError("Schema-2 supplemental documents exceed the hard limits")
+        if supplements:
+            expected_supplement_hash = sha256_bytes(
+                canonical_json_bytes(
+                    [
+                        {
+                            "label": item["label"],
+                            "size": item["size"],
+                            "sha256": item["sha256"],
+                        }
+                        for item in supplements
+                    ]
+                )
+            )
+            if hashes.get("supplement_set_sha256") != expected_supplement_hash:
+                raise HandoffError("Schema-2 supplemental document set hash mismatch")
+        elif "supplement_set_sha256" in hashes:
+            raise HandoffError("Empty Schema-2 package must not declare a supplemental set hash")
+        totals = manifest.get("totals")
+        limits = manifest.get("limits")
+        if (
+            not isinstance(totals, dict)
+            or type(totals.get("supplemental_documents")) is not int
+            or totals.get("supplemental_documents") != len(supplements)
+            or type(totals.get("supplemental_bytes")) is not int
+            or totals.get("supplemental_bytes")
+            != sum(int(item["size"]) for item in supplements)
+            or not isinstance(limits, dict)
+            or limits.get("max_supplement_files") != DEFAULT_MAX_SUPPLEMENT_FILES
+            or limits.get("max_supplement_file_bytes")
+            != DEFAULT_MAX_SUPPLEMENT_FILE_BYTES
+            or limits.get("max_supplement_total_bytes")
+            != DEFAULT_MAX_SUPPLEMENT_TOTAL_BYTES
+        ):
+            raise HandoffError("Schema-2 supplemental totals or limits are invalid")
+    elif "supplements" in manifest:
+        raise HandoffError("MCP packages expose external documents only as approved research artifacts")
     requested_transport = transport.get("requested")
     resolved_transport = transport.get("resolved")
     legacy_transports = ("auto", "github", "paste", "text-file")
@@ -3957,6 +4326,11 @@ def verify_package(
         requested_transport not in legacy_transports or resolved_transport not in legacy_transports[1:]
     ):
         raise HandoffError("Manifest transport is invalid")
+    if supplements:
+        if requested_transport not in {"auto", "paste"} or resolved_transport != "paste":
+            raise HandoffError(
+                "Supplemental documents require browser-upload-free paste delivery in schema 2"
+            )
     if is_mcp_schema(schema_version):
         verify_mcp_manifest_contract(manifest)
     state_hashes = state.get("artifact_hashes")
@@ -3969,6 +4343,43 @@ def verify_package(
         "data"
     ) != prepared_receipt_data(manifest, manifest_hash):
         raise HandoffError("Prepared receipt data does not match the current package")
+    if schema_version == SCHEMA_V2:
+        if PHASES.index(state["phase"]) >= PHASES.index("approved"):
+            approval = state.get("approval")
+            if not isinstance(approval, dict):
+                raise HandoffError("Schema-2 approval state is missing")
+            approval_events = [
+                event for event in receipt["events"] if event.get("type") == "approved"
+            ]
+            if len(approval_events) != 1 or approval_events[0].get("data") != approval:
+                raise HandoffError("Schema-2 approval state does not match the receipt chain")
+            expected_approval = {
+                "approved_at": approval.get("approved_at"),
+                "approved_by": approval.get("approved_by"),
+                "destination": manifest["destination"],
+                "manifest_sha256": manifest_hash,
+                "transport": resolved_transport,
+                "outbound_artifacts": transport.get("outbound_artifacts"),
+                "github": transport.get("github"),
+            }
+            approval_time = parse_utc_timestamp(
+                approval.get("approved_at"), label="Schema-2 approval time"
+            )
+            creation_time = parse_utc_timestamp(
+                manifest.get("created_at"), label="Schema-2 creation time"
+            )
+            if (
+                not isinstance(approval.get("approved_by"), str)
+                or not approval["approved_by"].strip()
+                or approval_time < creation_time
+                or approval_time > datetime.now(timezone.utc) + timedelta(minutes=5)
+                or approval != expected_approval
+            ):
+                raise HandoffError(
+                    "Schema-2 approval record is incomplete or differs from the manifest"
+                )
+        elif state.get("approval") is not None:
+            raise HandoffError("Prepared Schema-2 package must not retain approval state")
     if is_mcp_schema(schema_version):
         if isinstance(state.get("revision"), bool) or not isinstance(state.get("revision"), int) or state["revision"] < 1:
             raise HandoffError("Schema-3 state revision is invalid")
@@ -4072,27 +4483,29 @@ def verify_package(
         raise HandoffError("State artifact hashes do not match current artifacts")
 
     try:
-        prompt_text = prompt_path.read_text(encoding="utf-8")
-        context_text = context_path.read_text(encoding="utf-8") if context_path is not None else None
+        prompt_bytes = prompt_path.read_bytes()
+        context_bytes = context_path.read_bytes() if context_path is not None else None
+        prompt_text = prompt_bytes.decode("utf-8")
+        context_text = context_bytes.decode("utf-8") if context_bytes is not None else None
     except (OSError, UnicodeDecodeError) as exc:
         raise HandoffError(f"Unable to read text transport artifacts: {exc}") from exc
     if schema_version == SCHEMA_V2:
         context_markers = manifest.get("context_markers")
-        if not isinstance(context_markers, dict) or context_text is None:
-            raise HandoffError("Context markers are missing")
-        for marker_name in ("begin", "end"):
-            marker = context_markers.get(marker_name)
-            if not isinstance(marker, str) or context_text.count(marker) != 1:
-                raise HandoffError(f"Context {marker_name} marker mismatch")
+        expected_context_markers = {
+            "begin": f"GPTPRO_CONTEXT_BEGIN:{package_id}",
+            "end": f"GPTPRO_CONTEXT_END:{package_id}",
+        }
+        if context_markers != expected_context_markers or context_text is None:
+            raise HandoffError("Context markers are missing or invalid")
     elif manifest.get("context_markers") is not None:
         raise HandoffError("Schema-3 MCP package must not declare plaintext context markers")
     if paste_payload_path is not None:
         try:
-            actual_paste = paste_payload_path.read_text(encoding="utf-8")
+            actual_paste = paste_payload_path.read_bytes()
         except (OSError, UnicodeDecodeError) as exc:
             raise HandoffError(f"Unable to read paste payload: {exc}") from exc
         assert context_text is not None
-        if actual_paste != render_paste_payload(prompt_text, context_text):
+        if actual_paste != render_paste_payload(prompt_text, context_text).encode("utf-8"):
             raise HandoffError("Paste payload does not match prompt and context artifacts")
 
     outbound = transport.get("outbound_artifacts")
@@ -4121,23 +4534,38 @@ def verify_package(
     elif github is not None:
         raise HandoffError("Non-GitHub transport must not declare GitHub metadata")
 
-    if is_mcp_schema(schema_version) and PHASES.index(state["phase"]) >= PHASES.index("submitted"):
+    if PHASES.index(state["phase"]) >= PHASES.index("submitted"):
         submission = state.get("submission")
         if not isinstance(submission, dict):
-            raise HandoffError("Schema-3 submission state is missing")
+            raise HandoffError("Submission state is missing")
         submission_events = [event for event in receipt["events"] if event.get("type") == "submitted"]
         if not submission_events or submission_events[-1].get("data") != submission:
-            raise HandoffError("Schema-3 submission state does not match the receipt chain")
+            raise HandoffError("Submission state does not match the receipt chain")
+        thread_url = submission.get("thread_url")
+        if (
+            not isinstance(thread_url, str)
+            or validate_chatgpt_thread_url(thread_url) != thread_url
+            or submission.get("conversation_contract")
+            != CHATGPT_CONVERSATION_CONTRACT
+            or submission.get("destination") != manifest.get("destination")
+            or submission.get("observed_model") != manifest.get("requested_model")
+            or submission.get("transport") != resolved_transport
+            or submission.get("outbound_artifacts") != outbound
+            or submission.get("github") != github
+        ):
+            raise HandoffError(
+                "Submission does not bind an empty new general Chat and the approved outbound contract"
+            )
+    if is_mcp_schema(schema_version) and PHASES.index(state["phase"]) >= PHASES.index("submitted"):
         connector = manifest["connector"]
         if (
-            submission.get("transport") != resolved_transport
-            or submission.get("delivery_channel") != "browser"
+            submission.get("delivery_channel") != "browser"
             or submission.get("observed_app_name") != connector.get("app_name")
             or submission.get("observed_workspace_label") != connector.get("workspace_label")
             or submission.get("mcp_session_id_sha256")
             != state.get("mcp_session", {}).get("session_id_sha256")
         ):
-            raise HandoffError("Schema-3 submission does not match the approved channel or connector labels")
+            raise HandoffError("Web MCP submission does not match the approved channel or connector labels")
 
     if PHASES.index(state["phase"]) >= PHASES.index("response_imported"):
         response_state = state.get("response")
@@ -4174,13 +4602,69 @@ def verify_package(
         if not isinstance(evaluation_state, dict):
             raise HandoffError("Evaluation state is missing")
         evaluation_path = handoff_dir / "evaluation.json"
-        if sha256_file(evaluation_path) != evaluation_state.get("evaluation_sha256"):
+        evaluation_hash = sha256_file(evaluation_path)
+        if evaluation_hash != evaluation_state.get("evaluation_sha256"):
             raise HandoffError("Evaluation hash mismatch")
         evaluation = load_json(evaluation_path)
-        if evaluation.get("package_id") != package_id:
+        if set(evaluation) != {
+            "schema_version",
+            "package_id",
+            "evaluated_at",
+            "verdict",
+            "summary",
+            "evidence",
+            "applied_git_sha",
+            "response_sha256",
+        } or evaluation.get("schema_version") != schema_version or evaluation.get("package_id") != package_id:
             raise HandoffError("Evaluation package identity mismatch")
         if evaluation.get("response_sha256") != state["response"]["response_sha256"]:
             raise HandoffError("Evaluation response identity mismatch")
+        evidence = evaluation.get("evidence")
+        if (
+            evaluation.get("verdict") not in {"accepted", "partially-accepted", "rejected"}
+            or not isinstance(evaluation.get("evaluated_at"), str)
+            or not isinstance(evaluation.get("summary"), str)
+            or not evaluation["summary"].strip()
+            or not isinstance(evidence, list)
+            or not evidence
+            or any(not isinstance(item, str) or not item.strip() for item in evidence)
+        ):
+            raise HandoffError("Evaluation content is invalid")
+        applied_git_sha = validated_applied_git_sha(evaluation.get("applied_git_sha"))
+        expected_evaluation_state = {
+            "evaluated_at": evaluation["evaluated_at"],
+            "verdict": evaluation["verdict"],
+            "evaluation_sha256": evaluation_hash,
+            "applied_git_sha": applied_git_sha,
+        }
+        if evaluation_state != expected_evaluation_state:
+            raise HandoffError("Evaluation state does not match the evaluation artifact")
+        evaluated_events = receipt_events(receipt, "evaluated")
+        if len(evaluated_events) != 1:
+            raise HandoffError("Evaluation receipt evidence is missing or duplicated")
+        receipt_evaluation = evaluated_events[0].get("data")
+        if not isinstance(receipt_evaluation, dict):
+            raise HandoffError("Evaluation receipt evidence is invalid")
+        for correction in receipt_events(receipt, "evaluation_corrected"):
+            data = correction.get("data")
+            if (
+                not isinstance(data, dict)
+                or set(data) != {
+                    "phase_before",
+                    "phase_after",
+                    "prior_evaluation_sha256",
+                    "evaluation",
+                }
+                or data.get("phase_before") != "evaluated"
+                or data.get("phase_after") != "evaluated"
+                or data.get("prior_evaluation_sha256")
+                != receipt_evaluation.get("evaluation_sha256")
+                or not isinstance(data.get("evaluation"), dict)
+            ):
+                raise HandoffError("Evaluation correction receipt evidence is invalid")
+            receipt_evaluation = data["evaluation"]
+        if receipt_evaluation != evaluation_state:
+            raise HandoffError("Evaluation state does not match the receipt correction chain")
 
     expected_members: dict[str, dict[str, Any] | None] = {}
     for index, entry in enumerate(files):
@@ -4204,12 +4688,20 @@ def verify_package(
         require_sha256(entry.get("sha256"), label=f"Manifest file hash for {path}")
         expected_members[archive_name] = entry
     expected_members["_gptpro/file-manifest.json"] = None
+    for item in supplements:
+        archive_name = item["archive_path"]
+        if archive_name in expected_members:
+            raise HandoffError(f"Duplicate supplemental archive member: {archive_name}")
+        expected_members[archive_name] = item
+    research_evidence_paths: set[str] = set()
     if schema_version == SCHEMA_V4:
         research = manifest["research"]
         for item in research["evidence"]:
             expected_members[item["archive_path"]] = item
+            research_evidence_paths.add(item["archive_path"])
         expected_members[research["diff"]["archive_path"]] = research["diff"]
         expected_members[research["workspace_index"]["archive_path"]] = research["workspace_index"]
+    archive_member_data: dict[str, bytes] = {}
     try:
         with zipfile.ZipFile(archive_path, "r") as archive:
             infos = archive.infolist()
@@ -4289,6 +4781,7 @@ def verify_package(
                 or internal.get("schema_version") != schema_version
                 or internal.get("package_id") != package_id
                 or internal.get("files") != files
+                or internal.get("supplements", []) != supplements
             ):
                 raise HandoffError("Internal manifest identity or file list mismatch")
             if internal.get("packaged_tree_sha256") != hashes.get("packaged_tree_sha256"):
@@ -4301,12 +4794,24 @@ def verify_package(
                 data = archive.read(name)
                 if len(data) != entry.get("size") or sha256_bytes(data) != entry.get("sha256"):
                     raise HandoffError(f"Archived file hash mismatch: {name}")
+                archive_member_data[name] = data
                 try:
                     text = data.decode("utf-8")
                 except UnicodeDecodeError as exc:
                     raise HandoffError(f"Archived file is not strict UTF-8: {name}") from exc
                 if is_mcp_schema(schema_version) and "\0" in text:
                     raise HandoffError(f"Archived file contains NUL bytes: {name}")
+                if schema_version == SCHEMA_V4 and name in research_evidence_paths:
+                    read_limit = manifest["mcp_disclosure"]["limits"][
+                        "max_read_content_bytes"
+                    ]
+                    if any(
+                        len(line) > read_limit
+                        for line in data.splitlines(keepends=True)
+                    ):
+                        raise HandoffError(
+                            f"Archived research artifact contains a line longer than the approved read limit: {name}"
+                        )
                 if schema_version == SCHEMA_V4 and name in {
                     "_gptpro/research/diff.json",
                     "_gptpro/research/workspace-index.json",
@@ -4323,6 +4828,46 @@ def verify_package(
         UnicodeDecodeError,
     ) as exc:
         raise HandoffError(f"Unable to verify archive: {exc}") from exc
+
+    if schema_version == SCHEMA_V2:
+        assert context_bytes is not None
+        try:
+            reconstructed_files = [
+                SelectedFile(
+                    path=item["path"],
+                    content=archive_member_data[item["archive_path"]],
+                    sha256=item["sha256"],
+                    size=item["size"],
+                )
+                for item in files
+            ]
+            reconstructed_supplements = [
+                SupplementFile(
+                    label=item["label"],
+                    content=archive_member_data[item["archive_path"]],
+                    sha256=item["sha256"],
+                    size=item["size"],
+                )
+                for item in supplements
+            ]
+            expected_context_bytes = render_context(
+                schema_version=SCHEMA_V2,
+                package_id=package_id,
+                git=manifest["git"],
+                selection=manifest["selection"],
+                files=reconstructed_files,
+                supplements=reconstructed_supplements,
+                package_tree_hash=require_sha256(
+                    hashes.get("packaged_tree_sha256"),
+                    label="Packaged tree hash",
+                ),
+            ).encode("utf-8")
+        except (KeyError, TypeError, UnicodeDecodeError) as exc:
+            raise HandoffError("Unable to reconstruct the Schema-2 context safely") from exc
+        if context_bytes != expected_context_bytes:
+            raise HandoffError(
+                "Schema-2 context bytes do not match the verified archive and manifest"
+            )
 
     verified_result = {
         "manifest": manifest,
@@ -4461,6 +5006,31 @@ def verify_package(
     return verified_result
 
 
+def supplemental_document_summary(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    if manifest.get("schema_version") == SCHEMA_V2:
+        return [
+            {
+                "label": item["label"],
+                "size": item["size"],
+                "sha256": item["sha256"],
+            }
+            for item in manifest.get("supplements", [])
+        ]
+    research = manifest.get("research")
+    if not isinstance(research, dict):
+        return []
+    supplement_ids = set(research.get("supplement_artifact_ids", []))
+    return [
+        {
+            "label": item["artifact_id"],
+            "size": item["size"],
+            "sha256": item["sha256"],
+        }
+        for item in research.get("evidence", [])
+        if item.get("artifact_id") in supplement_ids
+    ]
+
+
 def command_verify(args: argparse.Namespace) -> int:
     handoff_dir = validate_handoff_dir(args.handoff_dir)
     verified = verify_package(handoff_dir)
@@ -4475,6 +5045,7 @@ def command_verify(args: argparse.Namespace) -> int:
                 "phase": state["phase"],
                 "included_files": manifest["totals"]["included_files"],
                 "included_bytes": manifest["totals"]["included_bytes"],
+                "supplemental_documents": supplemental_document_summary(manifest),
                 "security_findings": len(manifest["security_findings"]),
                 "git_head_sha": manifest["git"]["head_sha"],
                 "git_clean": manifest["git"]["clean"],
@@ -7191,10 +7762,10 @@ def record_mcp_activation_stopped_fail_closed(
 
 def next_action(phase: str, transport: str = "paste") -> str:
     approved_action = (
-        "run the secretless mcp-probe, confirm its exact binary SHA-256 for any key-bearing profile/activation command, then use the attended foreground mcp-activate controller for this exact approved package; never switch channel without new approval"
+        "run the secretless mcp-probe, confirm its exact binary SHA-256 for any key-bearing profile/activation command, then use the attended foreground mcp-activate controller for this exact approved package and submit once from an empty new general Chat; never switch channel without new approval"
         if transport in {"mcp-read", "mcp-research"}
         else (
-            "perform the approved visible ChatGPT Pro general Chat transport; "
+            "perform the approved visible ChatGPT Pro transport once from an empty new general Chat; "
             "use human-handoff when a person must complete a trust or browser boundary"
         )
     )
@@ -7287,19 +7858,21 @@ def human_handoff_instructions(
             "A person may submit the approved prompt only while this exact package's foreground MCP authorization is visibly active.",
             [
                 "First confirm mcp-status identifies this exact package as active and the foreground controller is still live; otherwise do not paste or send anything.",
+                "Create a new general Chat and visibly confirm it has zero prior user or assistant turns; do not use Work, a Project, a custom GPT, or an existing conversation.",
                 f"In workspace `{connector['workspace_label']}`, select app `{connector['app_name']}` and exactly this model/reasoning setting: {requested_model}.",
                 f"Paste the complete contents of the one approved prompt file: {approved_paths[0]}. Do not upload the ZIP or attach any other file.",
                 "Verify the package ID and response-marker request, then send exactly once. If submission is uncertain, do not retry.",
             ],
             [
                 "result: sent, not-sent, or unknown",
+                "whether the destination was visibly an empty new general Chat immediately before the single send",
                 "the exact visible account, workspace, app, model, and reasoning labels",
                 "the ChatGPT conversation URL if a matching user turn is visibly present",
             ],
             {
                 "allowed_outcomes": ["sent", "not-sent", "unknown"],
                 "automatic_retry_allowed": False,
-                "on_sent": "run mark-submitted only after matching visible UI evidence",
+                "on_sent": "run mark-submitted with --confirm-new-general-chat and the canonical --thread-url only after matching visible UI evidence",
             },
         )
     if reason == "login":
@@ -7403,7 +7976,7 @@ def human_handoff_instructions(
         )
     if reason == "manual-transport":
         steps = [
-            "Open or reuse the approved unsent new ChatGPT general Chat in the intended account or workspace.",
+            "Create a new ChatGPT general Chat in the intended account or workspace and visibly confirm it has zero prior user or assistant turns; do not use Work, a Project, a custom GPT, or an existing conversation.",
             f"Select exactly this model and reasoning setting: {requested_model}.",
         ]
         if transport == "paste":
@@ -7439,13 +8012,14 @@ def human_handoff_instructions(
             steps,
             [
                 "result: sent, not-sent, or unknown",
+                "whether the destination was visibly an empty new general Chat immediately before the single send",
                 "the exact visible model and reasoning labels",
                 "the ChatGPT conversation URL if a matching user turn is visibly present",
             ],
             {
                 "allowed_outcomes": ["sent", "not-sent", "unknown"],
                 "automatic_retry_allowed": False,
-                "on_sent": "run mark-submitted only after matching visible UI evidence",
+                "on_sent": "run mark-submitted with --confirm-new-general-chat and the canonical --thread-url only after matching visible UI evidence",
             },
         )
     if reason == "submission-uncertain":
@@ -7755,6 +8329,7 @@ def command_status(args: argparse.Namespace) -> int:
         "mcp_session": state.get("mcp_session"),
         "mcp_protocol_trace": state.get("mcp_protocol_trace"),
         "research": manifest.get("research"),
+        "supplemental_documents": supplemental_document_summary(manifest),
         "analysis_collaboration": manifest.get("analysis_collaboration"),
         "git": manifest["git"],
         "totals": manifest["totals"],
@@ -10251,25 +10826,120 @@ def validate_chatgpt_thread_url(raw: str) -> str:
         port = parsed.port
     except ValueError as exc:
         raise HandoffError("--thread-url must be a valid https://chatgpt.com/ URL") from exc
-    if (
+    origin_invalid = (
         parsed.scheme != "https"
         or parsed.hostname != "chatgpt.com"
         or parsed.username is not None
         or parsed.password is not None
         or port is not None
+    )
+    if (
+        not origin_invalid
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+        and re.fullmatch(r"/c/WEB:[A-Za-z0-9-]+/?", parsed.path) is not None
+    ):
+        raise HandoffError(
+            "CHATGPT_THREAD_URL_TRANSIENT: keep the same visibly submitted Chat open, wait for "
+            "its URL to normalize to https://chatgpt.com/c/<id>, then rerun mark-submitted "
+            "without resending"
+        )
+    if (
+        origin_invalid
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
         or re.fullmatch(r"/c/[A-Za-z0-9-]+/?", parsed.path) is None
     ):
         raise HandoffError("--thread-url must be a credential-free https://chatgpt.com/ URL")
+    return f"https://chatgpt.com{parsed.path.rstrip('/')}"
+
+
+def _load_private_sibling_state(path: Path) -> dict[str, Any]:
+    """Read one sibling handoff state without following links or unsafe files."""
+
+    try:
+        descriptor = open_private_regular(path, flags=os.O_RDONLY)
+    except RuntimeStateError as exc:
+        if isinstance(exc.__cause__, FileNotFoundError):
+            raise FileNotFoundError(path) from exc
+        raise HandoffError(
+            "CHATGPT_THREAD_HISTORY_UNSAFE: unable to inspect a prior handoff state safely"
+        ) from exc
+    try:
+        with os.fdopen(descriptor, "r", encoding="utf-8", closefd=False) as handle:
+            try:
+                value = json.load(handle)
+            except (OSError, UnicodeError, ValueError, RecursionError) as exc:
+                raise HandoffError(
+                    "CHATGPT_THREAD_HISTORY_UNSAFE: a prior handoff state is not valid JSON"
+                ) from exc
+    finally:
+        os.close(descriptor)
+    if not isinstance(value, dict):
+        raise HandoffError(
+            "CHATGPT_THREAD_HISTORY_UNSAFE: a prior handoff state is not a JSON object"
+        )
+    validate_json_tree(value, label=f"Prior handoff state {path}")
     return value
+
+
+def recorded_thread_url_owner(handoff_dir: Path, thread_url: str) -> str | None:
+    """Return the sibling package already bound to one canonical conversation URL."""
+
+    try:
+        entries = list(os.scandir(handoff_dir.parent))
+    except OSError as exc:
+        raise HandoffError(
+            "CHATGPT_THREAD_HISTORY_UNSAFE: unable to inspect prior handoff conversations"
+        ) from exc
+    for entry in entries:
+        if entry.name == handoff_dir.name or entry.name.startswith("."):
+            continue
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+        except OSError as exc:
+            raise HandoffError(
+                "CHATGPT_THREAD_HISTORY_UNSAFE: unable to classify a prior handoff directory"
+            ) from exc
+        state_path = Path(entry.path) / "state.json"
+        try:
+            state = _load_private_sibling_state(state_path)
+        except FileNotFoundError:
+            continue
+        submission = state.get("submission")
+        recorded_url = submission.get("thread_url") if isinstance(submission, dict) else None
+        if not isinstance(recorded_url, str):
+            continue
+        try:
+            recorded_url = validate_chatgpt_thread_url(recorded_url)
+        except HandoffError:
+            continue
+        if recorded_url != thread_url:
+            continue
+        package_id = state.get("package_id")
+        return package_id if isinstance(package_id, str) and package_id else entry.name
+    return None
 
 
 @_with_package_lock(_command_handoff_arg)
 def command_mark_submitted(args: argparse.Namespace) -> int:
     if not args.confirm_sent:
         raise HandoffError("Submission recording requires --confirm-sent after visible UI confirmation")
+    if not args.confirm_new_general_chat:
+        raise HandoffError(
+            "Submission recording requires --confirm-new-general-chat after visibly confirming "
+            "an empty new general Chat before the single send"
+        )
     if not args.observed_model.strip():
         raise HandoffError("--observed-model must not be empty")
-    thread_url = validate_chatgpt_thread_url(args.thread_url) if args.thread_url else None
+    if not args.thread_url:
+        raise HandoffError(
+            "Submission recording requires the exact canonical --thread-url for the new general Chat"
+        )
+    thread_url = validate_chatgpt_thread_url(args.thread_url)
     handoff_dir = validate_handoff_dir(args.handoff_dir)
     verified = verify_package(handoff_dir)
     state = verified["state"]
@@ -10300,37 +10970,57 @@ def command_mark_submitted(args: argparse.Namespace) -> int:
     if is_mcp_schema(schema_version):
         connector = verified["manifest"]["connector"]
         if args.observed_delivery_channel != "browser":
-            raise HandoffError("Observed delivery channel does not match the approved schema-3 browser channel")
+            raise HandoffError("Observed delivery channel does not match the approved Web MCP browser channel")
         if args.observed_app_name != connector["app_name"]:
             raise HandoffError("Observed ChatGPT app does not match the approved connector")
         if args.observed_workspace_label != connector["workspace_label"]:
             raise HandoffError("Observed ChatGPT workspace does not match the approved connector")
         require_active_mcp_authorization(verified, runtime_store_for())
-    submission = {
-        "submitted_at": utc_now(),
-        "destination": verified["manifest"]["destination"],
-        "observed_model": requested_model,
-        "transport": approved_transport,
-        "outbound_artifacts": verified["outbound_artifacts"],
-        "thread_url": thread_url,
-        "github": github,
-        **(
-            {
-                "delivery_channel": "browser",
-                "observed_app_name": args.observed_app_name,
-                "observed_workspace_label": args.observed_workspace_label,
-                "mcp_session_id_sha256": state["mcp_session"]["session_id_sha256"],
+    try:
+        with package_lifecycle_lock(
+            handoff_dir.parent,
+            timeout=CHATGPT_THREAD_HISTORY_LOCK_TIMEOUT_SECONDS,
+        ):
+            reused_by = recorded_thread_url_owner(handoff_dir, thread_url)
+            if reused_by is not None:
+                raise HandoffError(
+                    "CHATGPT_THREAD_URL_REUSED: this canonical conversation URL is already bound to "
+                    f"package {reused_by}; keep this package approved and start a new general Chat "
+                    "without resending to the existing conversation"
+                )
+            submission = {
+                "submitted_at": utc_now(),
+                "destination": verified["manifest"]["destination"],
+                "observed_model": requested_model,
+                "transport": approved_transport,
+                "outbound_artifacts": verified["outbound_artifacts"],
+                "thread_url": thread_url,
+                "conversation_contract": CHATGPT_CONVERSATION_CONTRACT,
+                "github": github,
+                **(
+                    {
+                        "delivery_channel": "browser",
+                        "observed_app_name": args.observed_app_name,
+                        "observed_workspace_label": args.observed_workspace_label,
+                        "mcp_session_id_sha256": state["mcp_session"]["session_id_sha256"],
+                    }
+                    if is_mcp_schema(schema_version)
+                    else {}
+                ),
             }
-            if is_mcp_schema(schema_version)
-            else {}
-        ),
-    }
-    state["phase"] = "submitted"
-    state["updated_at"] = submission["submitted_at"]
-    state["submission"] = submission
-    if is_mcp_schema(schema_version):
-        state["revision"] += 1
-    commit_state_receipt_event(handoff_dir, state, "submitted", submission)
+            state["phase"] = "submitted"
+            state["updated_at"] = submission["submitted_at"]
+            state["submission"] = submission
+            if is_mcp_schema(schema_version):
+                state["revision"] += 1
+            commit_state_receipt_event(handoff_dir, state, "submitted", submission)
+    except RuntimeStateError as exc:
+        if exc.code == "LOCK_TIMEOUT":
+            raise HandoffError(
+                "CHATGPT_THREAD_HISTORY_BUSY: another submission is updating this handoff root; "
+                "rerun mark-submitted without resending after it finishes"
+            ) from exc
+        raise runtime_failure(exc) from exc
     print(json.dumps({"package_id": state["package_id"], "phase": "submitted"}, indent=2))
     return 0
 
@@ -10483,6 +11173,7 @@ def command_record_evaluation(args: argparse.Namespace) -> int:
     response_hash = sha256_file(response_path)
     if state.get("response", {}).get("response_sha256") != response_hash:
         raise HandoffError("Imported response hash no longer matches state")
+    applied_git_sha = validated_applied_git_sha(args.applied_git_sha)
     evaluation = {
         "schema_version": state["schema_version"],
         "package_id": state["package_id"],
@@ -10490,7 +11181,7 @@ def command_record_evaluation(args: argparse.Namespace) -> int:
         "verdict": args.verdict,
         "summary": args.summary.strip(),
         "evidence": args.evidence,
-        "applied_git_sha": args.applied_git_sha or None,
+        "applied_git_sha": applied_git_sha,
         "response_sha256": response_hash,
     }
     evaluation_path = handoff_dir / "evaluation.json"
@@ -10508,6 +11199,70 @@ def command_record_evaluation(args: argparse.Namespace) -> int:
         state["revision"] += 1
     commit_state_receipt_event(handoff_dir, state, "evaluated", evaluation_state)
     print(json.dumps({"package_id": state["package_id"], "phase": "evaluated", **evaluation_state}, indent=2))
+    return 0
+
+
+@_with_package_lock(_command_handoff_arg)
+def command_correct_evaluation(args: argparse.Namespace) -> int:
+    if not args.summary.strip() or any(not item.strip() for item in args.evidence):
+        raise HandoffError("Evaluation summary and evidence entries must not be empty")
+    prior_evaluation_sha256 = require_sha256(
+        args.prior_evaluation_sha256, label="Prior evaluation hash"
+    )
+    handoff_dir = validate_handoff_dir(args.handoff_dir)
+    verified = verify_package(handoff_dir)
+    state = verified["state"]
+    require_phase(state, "evaluated")
+    prior_state = state.get("evaluation")
+    if (
+        not isinstance(prior_state, dict)
+        or prior_state.get("evaluation_sha256") != prior_evaluation_sha256
+    ):
+        raise HandoffError("Prior evaluation hash does not match the current evaluated state")
+    response_hash = sha256_file(handoff_dir / "response.md")
+    applied_git_sha = validated_applied_git_sha(args.applied_git_sha)
+    evaluation = {
+        "schema_version": state["schema_version"],
+        "package_id": state["package_id"],
+        "evaluated_at": utc_now(),
+        "verdict": args.verdict,
+        "summary": args.summary.strip(),
+        "evidence": args.evidence,
+        "applied_git_sha": applied_git_sha,
+        "response_sha256": response_hash,
+    }
+    evaluation_path = handoff_dir / "evaluation.json"
+    write_json(evaluation_path, evaluation)
+    evaluation_state = {
+        "evaluated_at": evaluation["evaluated_at"],
+        "verdict": evaluation["verdict"],
+        "evaluation_sha256": sha256_file(evaluation_path),
+        "applied_git_sha": applied_git_sha,
+    }
+    state["evaluation"] = evaluation_state
+    state["updated_at"] = evaluation["evaluated_at"]
+    if is_mcp_schema(state["schema_version"]):
+        state["revision"] += 1
+    event_data = {
+        "phase_before": "evaluated",
+        "phase_after": "evaluated",
+        "prior_evaluation_sha256": prior_evaluation_sha256,
+        "evaluation": evaluation_state,
+    }
+    commit_state_receipt_event(
+        handoff_dir, state, "evaluation_corrected", event_data
+    )
+    print(
+        json.dumps(
+            {
+                "package_id": state["package_id"],
+                "phase": "evaluated",
+                "corrected": True,
+                **evaluation_state,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -10557,7 +11312,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=TRANSPORTS,
         default="auto",
         help=(
-            "Pro context transport; auto remains GitHub-first with text fallback, while Web MCP transports must be explicit"
+            "Pro context transport; auto is normally GitHub-first with text fallback, "
+            "but --supplement makes it bounded paste-only; Web MCP transports must be explicit"
         ),
     )
     prepare.add_argument(
@@ -10578,6 +11334,16 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--include", action="append", default=[], help="Workspace-relative glob; repeatable")
     prepare.add_argument("--exclude", action="append", default=[], help="Workspace-relative glob; repeatable")
     prepare.add_argument("--file-list", help="UTF-8 file containing exact workspace-relative paths")
+    prepare.add_argument(
+        "--supplement",
+        action="append",
+        default=[],
+        metavar="LABEL=/ABSOLUTE/PATH",
+        help=(
+            "Package an owner-controlled strict UTF-8 external document for upload-free paste "
+            "or mcp-research delivery; repeatable"
+        ),
+    )
     prepare.add_argument("--output-root", help="Handoff parent directory; defaults to <repo>/.gptpro/handoffs")
     prepare.add_argument("--max-files", type=positive_int, default=DEFAULT_MAX_FILES)
     prepare.add_argument("--max-bytes", type=positive_int, default=DEFAULT_MAX_BYTES)
@@ -10586,7 +11352,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-paste-bytes",
         type=positive_int,
         default=DEFAULT_MAX_PASTE_BYTES,
-        help="Fallback threshold used when GitHub-first --transport auto is unavailable",
+        help=(
+            "Fallback threshold when GitHub-first auto is unavailable, and a hard limit on "
+            "the complete paste payload whenever --supplement is present"
+        ),
     )
     prepare.add_argument("--require-clean", action="store_true")
     prepare.add_argument("--tunnel-runtime-alias", default="gptpro-web")
@@ -10896,7 +11665,15 @@ def build_parser() -> argparse.ArgumentParser:
     submitted.add_argument("--observed-delivery-channel", choices=DELIVERY_CHANNELS, default="browser")
     submitted.add_argument("--observed-app-name")
     submitted.add_argument("--observed-workspace-label")
-    submitted.add_argument("--thread-url")
+    submitted.add_argument("--thread-url", required=True)
+    submitted.add_argument(
+        "--confirm-new-general-chat",
+        action="store_true",
+        help=(
+            "Confirm that immediately before the single send the visible destination was an "
+            "empty new general Chat, not an existing conversation, Work, Project, or custom GPT"
+        ),
+    )
     submitted.add_argument("--confirm-sent", action="store_true")
     submitted.set_defaults(func=command_mark_submitted)
 
@@ -10912,6 +11689,20 @@ def build_parser() -> argparse.ArgumentParser:
     evaluation.add_argument("--evidence", action="append", required=True)
     evaluation.add_argument("--applied-git-sha")
     evaluation.set_defaults(func=command_record_evaluation)
+
+    correction = subparsers.add_parser(
+        "correct-evaluation",
+        help="Append an exact-prior-hash correction to an evaluated advisory record",
+    )
+    correction.add_argument("--handoff-dir", required=True)
+    correction.add_argument("--prior-evaluation-sha256", required=True)
+    correction.add_argument(
+        "--verdict", choices=("accepted", "partially-accepted", "rejected"), required=True
+    )
+    correction.add_argument("--summary", required=True)
+    correction.add_argument("--evidence", action="append", required=True)
+    correction.add_argument("--applied-git-sha")
+    correction.set_defaults(func=command_correct_evaluation)
     return parser
 
 

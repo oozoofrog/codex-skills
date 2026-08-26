@@ -72,6 +72,37 @@ class PluginDistributionTests(unittest.TestCase):
     def test_plugin_skill_mirrors_standalone_package(self) -> None:
         self.assertEqual(tree_files(STANDALONE_SKILL), tree_files(PLUGIN_SKILL))
 
+    def test_integrated_project_route_and_new_chat_contract_are_aligned(self) -> None:
+        skill = (STANDALONE_SKILL / "SKILL.md").read_text(encoding="utf-8")
+        ui = (STANDALONE_SKILL / "agents" / "openai.yaml").read_text(encoding="utf-8")
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        manifest = json.loads(
+            (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+        plugin_text = json.dumps(manifest, ensure_ascii=False)
+
+        for label, text in (
+            ("standalone Skill", skill),
+            ("standalone UI metadata", ui),
+            ("repository README", readme),
+            ("Plugin manifest", plugin_text),
+        ):
+            with self.subTest(surface=label):
+                self.assertIn("$gptpro", text)
+                self.assertIn("mcp-research", text)
+
+        self.assertIn("defaults to a proposed `mcp-research` package", skill)
+        self.assertIn("propose a narrowly scoped mcp-research package by default", ui)
+        self.assertIn("mcp-research` package를 기본 제안", readme)
+        self.assertIn(
+            "propose a narrowly scoped Schema 4 mcp-research package by default",
+            manifest["interface"]["longDescription"],
+        )
+        self.assertIn("empty new general Chat", skill)
+        self.assertIn("empty new general Chat", ui)
+        self.assertIn("비어 있는 새 general Chat", readme)
+        self.assertIn("empty new general Chat", plugin_text)
+
 
 if __name__ == "__main__":
     unittest.main()
