@@ -269,6 +269,8 @@ For `github`, use `--observed-transport github` and also provide the exact appro
 
 Omit `--thread-url` if the user does not want the URL recorded, but automatic response monitoring then fails closed because it cannot prove which conversation to inspect. The URL must be credential-free HTTPS on the exact `chatgpt.com` host. Never mark an ambiguous or failed send as submitted. If a transport fails, prepare and approve a new handoff instead of silently falling back.
 
+Immediately after a successful send, ChatGPT may temporarily show `/c/WEB:<temporary-id>`. This route is not a canonical conversation identity and `mark-submitted` rejects it with `CHATGPT_THREAD_URL_TRANSIENT`. Keep the same visibly submitted Chat open and wait boundedly for `/c/<id>` to appear; do not remove or percent-encode the prefix, refresh, open a replacement Chat, or resend. The transient rejection leaves the package approved, so run `mark-submitted` again only after the canonical URL and matching user turn are both visible. Query strings and fragments are also rejected so credentials or unrelated state cannot enter the receipt or monitor prompt.
+
 ## Monitor response completion
 
 After a submitted package records its exact conversation URL, generate a read-only same-task heartbeat plan:

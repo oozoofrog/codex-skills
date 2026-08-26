@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- `gptpro` now treats ChatGPT's immediate `/c/WEB:<temporary-id>` post-submit route as transient rather than a recordable conversation identity, tells the operator to keep the same Chat open until canonical `/c/<id>` appears without resending, preserves the approved phase after rejection, and rejects URL query strings or fragments so they cannot enter receipts or response-monitor prompts
+
 ### Added
 - `gptpro` supplemental text documents: repeatable `--supplement LABEL=/ABSOLUTE/PATH` captures owner-controlled, no-symlink, secret-scanned strict-UTF-8 snapshots without requiring browser file upload. The source locator is local-only and cannot be reflected into outbound task/model/app/workspace metadata. Schema 2 supports bounded paste with independent supplement-set hashing and now cross-checks approval state against the exact receipt/manifest/outbound contract; Schema 4 reuses the approved evidence/artifact-read contract and shared limits without expanding repository paths or the seven-tool read-only catalog. GitHub, text-file, and schema-3 `mcp-read` combinations fail closed, and standalone/Plugin structure validation covers the new reference
 - `gptpro` bounded response-completion monitor: after one visibly confirmed submission records the exact ChatGPT conversation URL, Codex can attach a same-task heartbeat that checks only that conversation every two minutes for at most 15 runs/30 minutes. Monitor creation and terminal cleanup are additive hash-chain receipt events for schema 2/3/4; status distinguishes response collection retry from the always-forbidden prompt resend, prevents duplicate automatic monitors, and supports one-shot `send_message_to_thread` recovery when the original Codex task ended before collection

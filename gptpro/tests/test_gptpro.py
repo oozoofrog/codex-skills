@@ -1326,6 +1326,8 @@ class GptProCliTests(unittest.TestCase):
             "https://user:secret@chatgpt.com/c/12345678",
             "http://chatgpt.com/c/12345678",
             "https://chatgpt.com:443/c/12345678",
+            "https://chatgpt.com/c/12345678?token=secret",
+            "https://chatgpt.com/c/12345678#fragment",
             "https://chatgpt.com/",
         ):
             with self.subTest(url=url):
@@ -1352,6 +1354,50 @@ class GptProCliTests(unittest.TestCase):
                     "--confirm-sent",
                     expected=2,
                 )
+
+    def test_submission_waits_for_transient_web_url_to_normalize(self) -> None:
+        handoff = self.prepare()
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(handoff),
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        manifest = self.load(handoff / "manifest.json")
+        common_args = (
+            "mark-submitted",
+            "--handoff-dir",
+            str(handoff),
+            "--observed-model",
+            manifest["requested_model"],
+            "--observed-transport",
+            manifest["transport"]["resolved"],
+            "--confirm-sent",
+        )
+
+        transient = self.run_cli(
+            *common_args,
+            "--thread-url",
+            "https://chatgpt.com/c/WEB:6578523f-56df-475d-9a1a-5da4edf415ef",
+            expected=2,
+        )
+        self.assertIn("CHATGPT_THREAD_URL_TRANSIENT", transient.stderr)
+        self.assertIn("without resending", transient.stderr)
+        state = self.load(handoff / "state.json")
+        receipt = self.load(handoff / "receipt.json")
+        self.assertEqual("approved", state["phase"])
+        self.assertIsNone(state["submission"])
+        self.assertNotIn("submitted", [event["type"] for event in receipt["events"]])
+
+        canonical_url = "https://chatgpt.com/c/6a8eb5fa-5e50-83e8-bcf0-f198cf05ce49"
+        self.run_cli(*common_args, "--thread-url", canonical_url)
+        state = self.load(handoff / "state.json")
+        receipt = self.load(handoff / "receipt.json")
+        self.assertEqual("submitted", state["phase"])
+        self.assertEqual(canonical_url, state["submission"]["thread_url"])
+        self.assertEqual(1, [event["type"] for event in receipt["events"]].count("submitted"))
 
     def test_auto_transport_uses_text_file_over_policy_threshold(self) -> None:
         handoff = self.prepare("review", "--max-paste-bytes", "1")

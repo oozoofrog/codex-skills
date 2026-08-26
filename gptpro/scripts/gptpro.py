@@ -10731,12 +10731,30 @@ def validate_chatgpt_thread_url(raw: str) -> str:
         port = parsed.port
     except ValueError as exc:
         raise HandoffError("--thread-url must be a valid https://chatgpt.com/ URL") from exc
-    if (
+    origin_invalid = (
         parsed.scheme != "https"
         or parsed.hostname != "chatgpt.com"
         or parsed.username is not None
         or parsed.password is not None
         or port is not None
+    )
+    if (
+        not origin_invalid
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+        and re.fullmatch(r"/c/WEB:[A-Za-z0-9-]+/?", parsed.path) is not None
+    ):
+        raise HandoffError(
+            "CHATGPT_THREAD_URL_TRANSIENT: keep the same visibly submitted Chat open, wait for "
+            "its URL to normalize to https://chatgpt.com/c/<id>, then rerun mark-submitted "
+            "without resending"
+        )
+    if (
+        origin_invalid
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
         or re.fullmatch(r"/c/[A-Za-z0-9-]+/?", parsed.path) is None
     ):
         raise HandoffError("--thread-url must be a credential-free https://chatgpt.com/ URL")

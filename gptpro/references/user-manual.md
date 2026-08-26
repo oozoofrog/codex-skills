@@ -509,6 +509,8 @@ Pro의 분석·질문·제안은 MCP write가 아니라 보이는 Chat 응답으
 
 Codex는 보이는 UI에서 정확히 한 번 전송된 사실을 확인한 뒤 `mark-submitted`를 기록합니다. 자동 응답 감시를 사용하려면 이때 해당 ChatGPT 대화의 정확한 URL도 함께 기록합니다. 실패했거나 성공 여부가 모호하면 submitted로 표시하지 않습니다.
 
+전송 직후 주소가 잠시 `/c/WEB:<임시-ID>`로 보일 수 있습니다. 이것은 기록 가능한 대화 URL이 아니므로 같은 채팅을 그대로 열어 둔 채 canonical `/c/<id>`로 바뀔 때까지 제한적으로 기다립니다. `WEB:`를 직접 지우거나 인코딩하지 않고, 새 채팅을 만들거나 새로고침하거나 prompt를 다시 보내지도 않습니다. `CHATGPT_THREAD_URL_TRANSIENT`가 나오면 package는 여전히 approved 상태이므로, canonical URL과 방금 보낸 사용자 turn이 함께 확인된 뒤에만 `mark-submitted`를 다시 실행합니다.
+
 ### 2. 같은 Codex 작업이 응답을 자동으로 기다립니다
 
 응답이 현재 Codex 실행보다 오래 걸릴 수 있으므로, 제출이 확인되면 같은 작업에 `gptpro response monitor`가 만들어집니다.
