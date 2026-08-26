@@ -138,6 +138,7 @@ RESPONSE_MONITOR_EVENTS = (
     "response_monitor_started",
     "response_monitor_stopped",
 )
+EVALUATION_AUXILIARY_EVENTS = ("evaluation_corrected",)
 RESPONSE_MONITOR_STOP_REASONS = (
     "response_imported",
     "evaluated",
@@ -2257,14 +2258,18 @@ def verify_receipt(receipt: dict[str, Any], package_id: str, *, schema_version: 
         if not isinstance(event, dict):
             raise HandoffError("Receipt contains a non-object event")
         event_type = event.get("type")
-        allowed_types = set(PHASES) | set(RESPONSE_MONITOR_EVENTS)
+        allowed_types = set(PHASES) | set(RESPONSE_MONITOR_EVENTS) | set(EVALUATION_AUXILIARY_EVENTS)
         if is_mcp_schema(schema_version):
             allowed_types.update(MCP_AUXILIARY_EVENTS)
         if event_type not in allowed_types:
             raise HandoffError(f"Receipt contains unsupported event type {event_type!r} at event {index}")
         if event_type == "analysis_note_approved" and schema_version != SCHEMA_V4:
             raise HandoffError("Analysis-note approval receipts require schema 4")
-        if event_type in (*MCP_AUXILIARY_EVENTS, *RESPONSE_MONITOR_EVENTS):
+        if event_type in (
+            *MCP_AUXILIARY_EVENTS,
+            *RESPONSE_MONITOR_EVENTS,
+            *EVALUATION_AUXILIARY_EVENTS,
+        ):
             data = event.get("data")
             if (
                 not isinstance(data, dict)
@@ -2301,7 +2306,7 @@ def receipt_with_event(
     if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
         raise HandoffError("Receipt schema is unsupported")
     verify_receipt(receipt, package_id, schema_version=int(schema_version))
-    allowed_types = set(PHASES) | set(RESPONSE_MONITOR_EVENTS)
+    allowed_types = set(PHASES) | set(RESPONSE_MONITOR_EVENTS) | set(EVALUATION_AUXILIARY_EVENTS)
     if is_mcp_schema(int(schema_version)):
         allowed_types.update(MCP_AUXILIARY_EVENTS)
     if event_type not in allowed_types:
@@ -2309,9 +2314,9 @@ def receipt_with_event(
     if event_type == "analysis_note_approved" and int(schema_version) != SCHEMA_V4:
         raise HandoffError("Analysis-note approval receipts require schema 4")
     auxiliary_events = (
-        (*MCP_AUXILIARY_EVENTS, *RESPONSE_MONITOR_EVENTS)
+        (*MCP_AUXILIARY_EVENTS, *RESPONSE_MONITOR_EVENTS, *EVALUATION_AUXILIARY_EVENTS)
         if is_mcp_schema(int(schema_version))
-        else RESPONSE_MONITOR_EVENTS
+        else (*RESPONSE_MONITOR_EVENTS, *EVALUATION_AUXILIARY_EVENTS)
     )
     if event_type in auxiliary_events and (
         data.get("phase_before") not in PHASES
@@ -2383,6 +2388,14 @@ def _response_monitor_identifier(raw: Any, *, label: str) -> str:
         or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", raw)
     ):
         raise HandoffError(f"{label} is invalid")
+    return raw
+
+
+def validated_applied_git_sha(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", raw) is None:
+        raise HandoffError("Applied Git SHA must be a full lowercase commit object ID")
     return raw
 
 
@@ -4589,13 +4602,69 @@ def verify_package(
         if not isinstance(evaluation_state, dict):
             raise HandoffError("Evaluation state is missing")
         evaluation_path = handoff_dir / "evaluation.json"
-        if sha256_file(evaluation_path) != evaluation_state.get("evaluation_sha256"):
+        evaluation_hash = sha256_file(evaluation_path)
+        if evaluation_hash != evaluation_state.get("evaluation_sha256"):
             raise HandoffError("Evaluation hash mismatch")
         evaluation = load_json(evaluation_path)
-        if evaluation.get("package_id") != package_id:
+        if set(evaluation) != {
+            "schema_version",
+            "package_id",
+            "evaluated_at",
+            "verdict",
+            "summary",
+            "evidence",
+            "applied_git_sha",
+            "response_sha256",
+        } or evaluation.get("schema_version") != schema_version or evaluation.get("package_id") != package_id:
             raise HandoffError("Evaluation package identity mismatch")
         if evaluation.get("response_sha256") != state["response"]["response_sha256"]:
             raise HandoffError("Evaluation response identity mismatch")
+        evidence = evaluation.get("evidence")
+        if (
+            evaluation.get("verdict") not in {"accepted", "partially-accepted", "rejected"}
+            or not isinstance(evaluation.get("evaluated_at"), str)
+            or not isinstance(evaluation.get("summary"), str)
+            or not evaluation["summary"].strip()
+            or not isinstance(evidence, list)
+            or not evidence
+            or any(not isinstance(item, str) or not item.strip() for item in evidence)
+        ):
+            raise HandoffError("Evaluation content is invalid")
+        applied_git_sha = validated_applied_git_sha(evaluation.get("applied_git_sha"))
+        expected_evaluation_state = {
+            "evaluated_at": evaluation["evaluated_at"],
+            "verdict": evaluation["verdict"],
+            "evaluation_sha256": evaluation_hash,
+            "applied_git_sha": applied_git_sha,
+        }
+        if evaluation_state != expected_evaluation_state:
+            raise HandoffError("Evaluation state does not match the evaluation artifact")
+        evaluated_events = receipt_events(receipt, "evaluated")
+        if len(evaluated_events) != 1:
+            raise HandoffError("Evaluation receipt evidence is missing or duplicated")
+        receipt_evaluation = evaluated_events[0].get("data")
+        if not isinstance(receipt_evaluation, dict):
+            raise HandoffError("Evaluation receipt evidence is invalid")
+        for correction in receipt_events(receipt, "evaluation_corrected"):
+            data = correction.get("data")
+            if (
+                not isinstance(data, dict)
+                or set(data) != {
+                    "phase_before",
+                    "phase_after",
+                    "prior_evaluation_sha256",
+                    "evaluation",
+                }
+                or data.get("phase_before") != "evaluated"
+                or data.get("phase_after") != "evaluated"
+                or data.get("prior_evaluation_sha256")
+                != receipt_evaluation.get("evaluation_sha256")
+                or not isinstance(data.get("evaluation"), dict)
+            ):
+                raise HandoffError("Evaluation correction receipt evidence is invalid")
+            receipt_evaluation = data["evaluation"]
+        if receipt_evaluation != evaluation_state:
+            raise HandoffError("Evaluation state does not match the receipt correction chain")
 
     expected_members: dict[str, dict[str, Any] | None] = {}
     for index, entry in enumerate(files):
@@ -11104,6 +11173,7 @@ def command_record_evaluation(args: argparse.Namespace) -> int:
     response_hash = sha256_file(response_path)
     if state.get("response", {}).get("response_sha256") != response_hash:
         raise HandoffError("Imported response hash no longer matches state")
+    applied_git_sha = validated_applied_git_sha(args.applied_git_sha)
     evaluation = {
         "schema_version": state["schema_version"],
         "package_id": state["package_id"],
@@ -11111,7 +11181,7 @@ def command_record_evaluation(args: argparse.Namespace) -> int:
         "verdict": args.verdict,
         "summary": args.summary.strip(),
         "evidence": args.evidence,
-        "applied_git_sha": args.applied_git_sha or None,
+        "applied_git_sha": applied_git_sha,
         "response_sha256": response_hash,
     }
     evaluation_path = handoff_dir / "evaluation.json"
@@ -11129,6 +11199,70 @@ def command_record_evaluation(args: argparse.Namespace) -> int:
         state["revision"] += 1
     commit_state_receipt_event(handoff_dir, state, "evaluated", evaluation_state)
     print(json.dumps({"package_id": state["package_id"], "phase": "evaluated", **evaluation_state}, indent=2))
+    return 0
+
+
+@_with_package_lock(_command_handoff_arg)
+def command_correct_evaluation(args: argparse.Namespace) -> int:
+    if not args.summary.strip() or any(not item.strip() for item in args.evidence):
+        raise HandoffError("Evaluation summary and evidence entries must not be empty")
+    prior_evaluation_sha256 = require_sha256(
+        args.prior_evaluation_sha256, label="Prior evaluation hash"
+    )
+    handoff_dir = validate_handoff_dir(args.handoff_dir)
+    verified = verify_package(handoff_dir)
+    state = verified["state"]
+    require_phase(state, "evaluated")
+    prior_state = state.get("evaluation")
+    if (
+        not isinstance(prior_state, dict)
+        or prior_state.get("evaluation_sha256") != prior_evaluation_sha256
+    ):
+        raise HandoffError("Prior evaluation hash does not match the current evaluated state")
+    response_hash = sha256_file(handoff_dir / "response.md")
+    applied_git_sha = validated_applied_git_sha(args.applied_git_sha)
+    evaluation = {
+        "schema_version": state["schema_version"],
+        "package_id": state["package_id"],
+        "evaluated_at": utc_now(),
+        "verdict": args.verdict,
+        "summary": args.summary.strip(),
+        "evidence": args.evidence,
+        "applied_git_sha": applied_git_sha,
+        "response_sha256": response_hash,
+    }
+    evaluation_path = handoff_dir / "evaluation.json"
+    write_json(evaluation_path, evaluation)
+    evaluation_state = {
+        "evaluated_at": evaluation["evaluated_at"],
+        "verdict": evaluation["verdict"],
+        "evaluation_sha256": sha256_file(evaluation_path),
+        "applied_git_sha": applied_git_sha,
+    }
+    state["evaluation"] = evaluation_state
+    state["updated_at"] = evaluation["evaluated_at"]
+    if is_mcp_schema(state["schema_version"]):
+        state["revision"] += 1
+    event_data = {
+        "phase_before": "evaluated",
+        "phase_after": "evaluated",
+        "prior_evaluation_sha256": prior_evaluation_sha256,
+        "evaluation": evaluation_state,
+    }
+    commit_state_receipt_event(
+        handoff_dir, state, "evaluation_corrected", event_data
+    )
+    print(
+        json.dumps(
+            {
+                "package_id": state["package_id"],
+                "phase": "evaluated",
+                "corrected": True,
+                **evaluation_state,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -11555,6 +11689,20 @@ def build_parser() -> argparse.ArgumentParser:
     evaluation.add_argument("--evidence", action="append", required=True)
     evaluation.add_argument("--applied-git-sha")
     evaluation.set_defaults(func=command_record_evaluation)
+
+    correction = subparsers.add_parser(
+        "correct-evaluation",
+        help="Append an exact-prior-hash correction to an evaluated advisory record",
+    )
+    correction.add_argument("--handoff-dir", required=True)
+    correction.add_argument("--prior-evaluation-sha256", required=True)
+    correction.add_argument(
+        "--verdict", choices=("accepted", "partially-accepted", "rejected"), required=True
+    )
+    correction.add_argument("--summary", required=True)
+    correction.add_argument("--evidence", action="append", required=True)
+    correction.add_argument("--applied-git-sha")
+    correction.set_defaults(func=command_correct_evaluation)
     return parser
 
 

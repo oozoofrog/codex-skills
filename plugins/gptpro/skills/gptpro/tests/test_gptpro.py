@@ -2056,6 +2056,22 @@ class GptProCliTests(unittest.TestCase):
             str(response_file),
         )
         self.assertEqual("A bounded advisory answer.\n", (handoff / "response.md").read_text(encoding="utf-8"))
+        invalid_sha = self.run_cli(
+            "record-evaluation",
+            "--handoff-dir",
+            str(handoff),
+            "--verdict",
+            "partially-accepted",
+            "--summary",
+            "One claim was confirmed.",
+            "--evidence",
+            "manual source inspection",
+            "--applied-git-sha",
+            "deadbeef",
+            expected=2,
+        )
+        self.assertIn("full lowercase commit object ID", invalid_sha.stderr)
+        self.assertEqual("response_imported", self.load(handoff / "state.json")["phase"])
         self.run_cli(
             "record-evaluation",
             "--handoff-dir",
@@ -2072,6 +2088,57 @@ class GptProCliTests(unittest.TestCase):
             ["prepared", "approved", "submitted", "response_imported", "evaluated"],
             [event["type"] for event in receipt["events"]],
         )
+        self.run_cli("verify", "--handoff-dir", str(handoff))
+
+        prior_evaluation_sha256 = self.load(handoff / "state.json")["evaluation"][
+            "evaluation_sha256"
+        ]
+        self.run_cli(
+            "correct-evaluation",
+            "--handoff-dir",
+            str(handoff),
+            "--prior-evaluation-sha256",
+            prior_evaluation_sha256,
+            "--verdict",
+            "accepted",
+            "--summary",
+            "The evidence was corrected without rewriting receipt history.",
+            "--evidence",
+            "current source and test inspection",
+            "--applied-git-sha",
+            self.head,
+        )
+        corrected = self.load(handoff / "evaluation.json")
+        self.assertEqual("accepted", corrected["verdict"])
+        self.assertEqual(self.head, corrected["applied_git_sha"])
+        receipt = self.load(handoff / "receipt.json")
+        self.assertEqual(
+            [
+                "prepared",
+                "approved",
+                "submitted",
+                "response_imported",
+                "evaluated",
+                "evaluation_corrected",
+            ],
+            [event["type"] for event in receipt["events"]],
+        )
+        stale = self.run_cli(
+            "correct-evaluation",
+            "--handoff-dir",
+            str(handoff),
+            "--prior-evaluation-sha256",
+            prior_evaluation_sha256,
+            "--verdict",
+            "rejected",
+            "--summary",
+            "Stale correction must not apply.",
+            "--evidence",
+            "stale prior hash",
+            expected=2,
+        )
+        self.assertIn("Prior evaluation hash does not match", stale.stderr)
+        self.assertEqual(corrected, self.load(handoff / "evaluation.json"))
         self.run_cli("verify", "--handoff-dir", str(handoff))
 
     def test_foreign_or_unmarked_response_is_rejected(self) -> None:
