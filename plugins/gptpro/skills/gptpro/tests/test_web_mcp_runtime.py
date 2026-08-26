@@ -22,7 +22,7 @@ from unittest import mock
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "gptpro.py"
 TUNNEL_ENV_NAME = "GPTPRO_RUNTIME_TEST_TUNNEL_ID"
 TUNNEL_REFERENCE = f"env:{TUNNEL_ENV_NAME}"
-RAW_TUNNEL_ID = "tunnel_" + "runtimetest" * 2
+RAW_TUNNEL_ID = "tunnel_" + "234567890abcdef1" * 2
 TUNNEL_PROFILE = "runtime-test"
 APP_NAME = "GPT Pro Repository Reader"
 WORKSPACE_LABEL = "Runtime Test Workspace"

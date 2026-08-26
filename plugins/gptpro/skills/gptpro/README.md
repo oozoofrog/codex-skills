@@ -107,7 +107,7 @@ python3 scripts/gptpro.py response-monitor-plan --handoff-dir /path/to/repo/.gpt
 
 `response-monitor-plan` is read-only and requires a submitted package with an exact recorded `chatgpt.com` conversation URL. Codex uses its output with the app's same-task heartbeat capability, then records the returned automation identity. See [response completion monitor](references/response-monitor.md); the monitor repeats response collection only and never prompt submission.
 
-Schema-3 preparation requires transient Tunnel identity input plus visible app/workspace labels. The raw Tunnel ID or its reference is not written to package artifacts:
+Schema-3 preparation requires transient Tunnel identity input plus visible app/workspace labels. The current official client contract is exactly `tunnel_[a-z0-9]{32}`; nonofficial legacy-shaped values fail before package creation. The raw Tunnel ID or its reference is not written to package artifacts:
 
 ```bash
 export GPTPRO_TUNNEL_ID="tunnel_<value>"

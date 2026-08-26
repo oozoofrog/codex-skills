@@ -20,7 +20,7 @@ VALIDATOR = Path(__file__).resolve().parents[1] / "scripts" / "validate_structur
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 TUNNEL_ENV_NAME = "GPTPRO_TEST_TUNNEL_ID"
 TUNNEL_REFERENCE = f"env:{TUNNEL_ENV_NAME}"
-RAW_TUNNEL_ID = "tunnel_" + "foundationtest" * 2
+RAW_TUNNEL_ID = "tunnel_" + "0123456789abcdef" * 2
 APP_NAME = "GPT Pro Repository Reader"
 WORKSPACE_LABEL = "Test Workspace"
 EXPECTED_TOOLS = [
@@ -715,6 +715,63 @@ class WebMcpFoundationTests(unittest.TestCase):
         )
         self.assertIn("Resolved Tunnel ID appears in schema-3 package data", rejected_path.stderr)
         self.assertFalse(rejected_path_root.exists())
+
+    def test_tunnel_detector_uses_current_official_identity_shape_without_code_identifier_false_positives(self) -> None:
+        module = self.load_cli_module()
+        for safe_identifier in (
+            "tunnel_client_binary_sha256",
+            "tunnel_id_binding_sha256",
+            "tunnel_profile_sha256",
+        ):
+            with self.subTest(identifier=safe_identifier):
+                self.assertEqual([], module.secret_findings("safe.py", safe_identifier))
+
+        findings = module.secret_findings("unsafe.txt", RAW_TUNNEL_ID)
+        self.assertEqual(1, len(findings))
+        self.assertEqual("openai-tunnel-id", findings[0]["detector"])
+
+    def test_current_web_mcp_implementation_sources_remain_packageable(self) -> None:
+        module = self.load_cli_module()
+        paths = (
+            "README.md",
+            "references/workflow.md",
+            "scripts/gptpro.py",
+            "tests/test_mcp_research.py",
+            "tests/test_web_mcp_foundation.py",
+            "tests/test_web_mcp_runtime.py",
+        )
+        for relative_path in paths:
+            with self.subTest(path=relative_path):
+                source = (SKILL_ROOT / relative_path).read_text(encoding="utf-8")
+                self.assertEqual([], module.secret_findings(relative_path, source))
+
+    def test_tunnel_reference_rejects_nonofficial_legacy_shaped_identifier(self) -> None:
+        legacy_id = "tunnel_" + "legacyformat" * 2
+        self.env[TUNNEL_ENV_NAME] = legacy_id
+        rejected = self.run_cli(
+            "prepare",
+            "--repo",
+            str(self.repo),
+            "--mode",
+            "ask",
+            "--transport",
+            "mcp-read",
+            "--task",
+            "Inspect the approved files.",
+            "--output-root",
+            str(self.root / "legacy-shaped-handoffs"),
+            "--tunnel-runtime-alias",
+            "foundation-test",
+            "--tunnel-id-ref",
+            TUNNEL_REFERENCE,
+            "--chatgpt-app-name",
+            APP_NAME,
+            "--chatgpt-workspace-label",
+            WORKSPACE_LABEL,
+            expected=2,
+        )
+        self.assertIn("one current official tunnel_ identifier", rejected.stderr)
+        self.assertFalse((self.root / "legacy-shaped-handoffs").exists())
 
     def test_tunnel_id_file_reference_is_nofollow_owner_only_and_nonpersistent(self) -> None:
         reference_file = self.root / "tunnel-id.txt"

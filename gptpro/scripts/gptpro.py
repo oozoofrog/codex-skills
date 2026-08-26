@@ -94,7 +94,11 @@ from runtime.gptpro_mcp.runtime_state import (
     fsync_directory,
     open_private_regular,
 )
-from runtime.gptpro_mcp.sensitive import SECRET_PATTERNS, secret_detector_names
+from runtime.gptpro_mcp.sensitive import (
+    OPENAI_TUNNEL_ID,
+    SECRET_PATTERNS,
+    secret_detector_names,
+)
 from runtime.gptpro_mcp.supervisor import (
     _claim_and_unlink_control_socket_if_matches,
     request_cooperative_stop,
@@ -559,8 +563,10 @@ def read_tunnel_id_reference(reference: str) -> str:
                 os.close(descriptor)
     else:
         raise HandoffError("--tunnel-id-ref must use env:NAME or file:/absolute/path")
-    if re.fullmatch(r"tunnel_[A-Za-z0-9_-]{16,128}", value) is None:
-        raise HandoffError("Tunnel ID reference is missing or does not contain one valid tunnel_ identifier")
+    if OPENAI_TUNNEL_ID.fullmatch(value) is None:
+        raise HandoffError(
+            "Tunnel ID reference is missing or does not contain one current official tunnel_ identifier"
+        )
     return value
 
 

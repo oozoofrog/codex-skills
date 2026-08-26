@@ -483,6 +483,7 @@ Pro의 분석·질문·제안은 MCP write가 아니라 보이는 Chat 응답으
 ### key와 profile 주의사항
 
 - Tunnel ID와 API key를 prompt, package, receipt, audit, log에 넣지 마세요.
+- 현재 공식 Tunnel ID 형식은 정확히 `tunnel_[a-z0-9]{32}`이며, 그 밖의 구형·합성 형식은 package 생성 전에 거부됩니다.
 - key는 지원되는 `env:NAME` 또는 권한 `0600`인 절대 `file:` reference로 전달합니다.
 - `~/.openai-tunnel-api-key` 같은 파일의 값을 다른 파일에 복사해 저장하지 않습니다.
 - Python/Homebrew 업데이트 후 interpreter 경로만 바뀌면 `mcp-profile-check`가 drift를 감지합니다.

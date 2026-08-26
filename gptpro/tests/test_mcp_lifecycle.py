@@ -521,8 +521,8 @@ class RuntimeStateTests(unittest.TestCase):
             "\ud800",
             "sk-" + "k" * 32,
             "prefix:sk-" + "k" * 32,
-            "tunnel_" + "Z" * 20,
-            "prefix:tunnel_" + "id_with_underscores_1234",
+            "tunnel_" + "4" * 32,
+            "prefix:tunnel_" + "5" * 32,
         ):
             candidate = state_candidate(self.session, self.handoff)
             candidate[unsafe_key] = "value"
@@ -864,7 +864,7 @@ class AuditTests(unittest.TestCase):
         clean = AuditLog(clean_path, self.binding)
         clean.create_header()
         metadata = self.read_metadata()
-        metadata["path"] = "tunnel_" + "x" * 20
+        metadata["path"] = "tunnel_" + "6" * 32
         with self.assertRaises(ToolError) as secret:
             clean.commit_before_return(
                 grant=self.grant(),

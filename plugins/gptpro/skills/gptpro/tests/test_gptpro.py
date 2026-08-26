@@ -815,7 +815,7 @@ class GptProCliTests(unittest.TestCase):
 
     def test_schema3_handoff_and_all_artifacts_are_owner_only_under_common_umasks(self) -> None:
         tunnel_id = self.root / "tunnel-id"
-        tunnel_id.write_text("tunnel_" + "permissiontest" * 2, encoding="utf-8")
+        tunnel_id.write_text("tunnel_" + "34567890abcdef12" * 2, encoding="utf-8")
         tunnel_id.chmod(0o600)
         for process_umask in (0o022, 0o002):
             with self.subTest(umask=oct(process_umask)):

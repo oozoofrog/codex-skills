@@ -31,7 +31,7 @@ from runtime.gptpro_mcp.tools import ToolRuntime
 
 TUNNEL_ENV_NAME = "GPTPRO_RESEARCH_TEST_TUNNEL_ID"
 TUNNEL_REFERENCE = f"env:{TUNNEL_ENV_NAME}"
-RAW_TUNNEL_ID = "tunnel_" + "researchtest" * 2
+RAW_TUNNEL_ID = "tunnel_" + "1234567890abcdef" * 2
 TUNNEL_PROFILE = "research-test"
 APP_NAME = "GPT Pro Repository Research"
 WORKSPACE_LABEL = "Research Test Workspace"
@@ -840,7 +840,7 @@ class McpResearchTests(unittest.TestCase):
             self.module.research_workspace_index(files)
 
     def test_secret_like_evidence_is_rejected_without_persisting_the_secret(self) -> None:
-        secret = "sk-abcdefghijklmnopqrstuvwx"
+        secret = "sk-" + "abcdefghijklmnopqrstuvwx"
         unsafe = self.root / "unsafe.txt"
         unsafe.write_text(f"OPENAI_API_KEY={secret}\n", encoding="utf-8")
         unsafe.chmod(0o600)
