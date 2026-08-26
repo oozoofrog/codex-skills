@@ -44,6 +44,7 @@ from runtime.gptpro_mcp.runtime_state import (
     RuntimeStateError,
     RuntimeStateStore,
     default_runtime_root,
+    ensure_private_directory,
     validate_active_state,
 )
 from runtime.gptpro_mcp.schema import DEFAULT_LIMITS, PROTOCOL_PROFILE, tool_schema_sha256
@@ -347,6 +348,41 @@ class RuntimeStateTests(unittest.TestCase):
         link.symlink_to(target, target_is_directory=True)
         with self.assertRaises(RuntimeStateError) as raised:
             RuntimeStateStore(link / "runtime")
+        self.assertEqual("RUNTIME_STATE_UNSAFE", raised.exception.code)
+
+    def test_private_directory_creation_reopens_same_directory_race(self) -> None:
+        target = self.base / "shared" / "runtime"
+        runtime_state_module = sys.modules[RuntimeStateStore.__module__]
+        original_mkdir = runtime_state_module.os.mkdir
+
+        def racing_mkdir(path, mode=0o777, *, dir_fd=None):
+            original_mkdir(path, mode, dir_fd=dir_fd)
+            if path == "runtime":
+                raise FileExistsError("simulated same-directory creation race")
+
+        with mock.patch.object(runtime_state_module.os, "mkdir", side_effect=racing_mkdir):
+            self.assertEqual(target, ensure_private_directory(target))
+
+        metadata = target.stat()
+        self.assertEqual(os.getuid(), metadata.st_uid)
+        self.assertEqual(0o700, stat.S_IMODE(metadata.st_mode))
+
+    def test_private_directory_creation_race_rejects_symlink_winner(self) -> None:
+        target = self.base / "shared-link" / "runtime"
+        decoy = self.base / "decoy"
+        decoy.mkdir(mode=0o700)
+        runtime_state_module = sys.modules[RuntimeStateStore.__module__]
+        original_mkdir = runtime_state_module.os.mkdir
+
+        def racing_mkdir(path, mode=0o777, *, dir_fd=None):
+            if path == "runtime":
+                os.symlink(decoy, path, dir_fd=dir_fd, target_is_directory=True)
+                raise FileExistsError("simulated symlink creation race")
+            original_mkdir(path, mode, dir_fd=dir_fd)
+
+        with mock.patch.object(runtime_state_module.os, "mkdir", side_effect=racing_mkdir):
+            with self.assertRaises(RuntimeStateError) as raised:
+                ensure_private_directory(target)
         self.assertEqual("RUNTIME_STATE_UNSAFE", raised.exception.code)
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS canonical runtime root")

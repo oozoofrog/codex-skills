@@ -1436,6 +1436,99 @@ class GptProCliTests(unittest.TestCase):
         self.assertIn(self.load(first / "manifest.json")["package_id"], result.stderr)
         self.assertEqual("approved", self.load(second / "state.json")["phase"])
 
+    def test_concurrent_sibling_submissions_bind_canonical_url_once(self) -> None:
+        shared_url = "https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        handoffs = [self.prepare(), self.prepare()]
+        arguments: list[tuple[str, ...]] = []
+        for handoff in handoffs:
+            manifest = self.load(handoff / "manifest.json")
+            self.run_cli(
+                "approve",
+                "--handoff-dir",
+                str(handoff),
+                "--approved-by",
+                "user",
+                "--confirm-transmission",
+            )
+            arguments.append(
+                (
+                    "mark-submitted",
+                    "--handoff-dir",
+                    str(handoff),
+                    "--observed-model",
+                    manifest["requested_model"],
+                    "--observed-transport",
+                    manifest["transport"]["resolved"],
+                    "--thread-url",
+                    shared_url,
+                    "--confirm-new-general-chat",
+                    "--confirm-sent",
+                )
+            )
+
+        barrier_reader, barrier_writer = os.pipe()
+        processes: list[subprocess.Popen[str]] = []
+        barrier_program = (
+            "import os, sys\n"
+            "barrier = int(sys.argv[1])\n"
+            "script = sys.argv[2]\n"
+            "os.read(barrier, 1)\n"
+            "os.execv(sys.executable, [sys.executable, script, *sys.argv[3:]])\n"
+        )
+        try:
+            for command in arguments:
+                processes.append(
+                    subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-c",
+                            barrier_program,
+                            str(barrier_reader),
+                            str(SCRIPT),
+                            *command,
+                        ],
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        pass_fds=(barrier_reader,),
+                    )
+                )
+            os.close(barrier_reader)
+            barrier_reader = -1
+            os.write(barrier_writer, b"12")
+            os.close(barrier_writer)
+            barrier_writer = -1
+            results = [process.communicate(timeout=15) for process in processes]
+        finally:
+            if barrier_reader >= 0:
+                os.close(barrier_reader)
+            if barrier_writer >= 0:
+                os.close(barrier_writer)
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+
+        return_codes = [process.returncode for process in processes]
+        self.assertEqual([0, 2], sorted(return_codes), msg=str(results))
+        rejected_index = return_codes.index(2)
+        self.assertIn("CHATGPT_THREAD_URL_REUSED", results[rejected_index][1])
+        self.assertNotIn("CHATGPT_THREAD_HISTORY_BUSY", results[rejected_index][1])
+
+        states = [self.load(handoff / "state.json") for handoff in handoffs]
+        self.assertEqual(1, sum(state["phase"] == "submitted" for state in states))
+        self.assertEqual(1, sum(state["phase"] == "approved" for state in states))
+        submitted = next(state for state in states if state["phase"] == "submitted")
+        self.assertEqual(shared_url, submitted["submission"]["thread_url"])
+        submitted_events = [
+            event
+            for handoff in handoffs
+            for event in self.load(handoff / "receipt.json")["events"]
+            if event["type"] == "submitted"
+        ]
+        self.assertEqual(1, len(submitted_events))
+        self.assertEqual(shared_url, submitted_events[0]["data"]["thread_url"])
+
     def test_submission_fails_closed_on_unsafe_sibling_conversation_history(self) -> None:
         handoff = self.prepare()
         unsafe = handoff.parent / "unsafe-history"

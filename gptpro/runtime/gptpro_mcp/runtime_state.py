@@ -161,15 +161,29 @@ def _open_directory_chain(path: Path, *, create: bool, final_mode: int | None = 
                     raise RuntimeStateError(
                         "RUNTIME_STATE_UNSAFE", "A private runtime directory is missing."
                     )
+                created = False
                 try:
                     os.mkdir(component, final_mode or 0o700, dir_fd=descriptor)
-                    child = os.open(component, flags | nofollow, dir_fd=descriptor)
-                    os.fchmod(child, final_mode or 0o700)
-                    os.fsync(descriptor)
+                    created = True
+                except FileExistsError:
+                    # Another cooperating process may have created the same
+                    # directory after the open above. Re-open and validate it
+                    # through the same no-follow descriptor path.
+                    pass
                 except OSError as exc:
                     raise RuntimeStateError(
                         "RUNTIME_STATE_UNSAFE", "Unable to create a private runtime directory."
                     ) from exc
+                try:
+                    child = os.open(component, flags | nofollow, dir_fd=descriptor)
+                except OSError as exc:
+                    raise RuntimeStateError(
+                        "RUNTIME_STATE_UNSAFE",
+                        "A private runtime path contains a symlink or non-directory component.",
+                    ) from exc
+                if created:
+                    os.fchmod(child, final_mode or 0o700)
+                    os.fsync(descriptor)
             except OSError as exc:
                 raise RuntimeStateError(
                     "RUNTIME_STATE_UNSAFE",
