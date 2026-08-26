@@ -1,6 +1,6 @@
 # Response completion monitor
 
-Use this procedure after one approved prompt is visibly submitted and `mark-submitted` records the exact `https://chatgpt.com/` conversation URL. The monitor collects the existing response; it never authorizes another submission.
+Use this procedure after one approved prompt is visibly submitted from an empty new general Chat and `mark-submitted` records the `new-general-chat-empty-v1` contract plus exact canonical `https://chatgpt.com/` conversation URL. The monitor collects the existing response; it never authorizes another submission.
 
 ## Boundary
 

@@ -315,8 +315,12 @@ class McpResearchTests(unittest.TestCase):
                 SimpleNamespace(
                     handoff_dir=str(handoff),
                     confirm_sent=True,
+                    confirm_new_general_chat=True,
                     observed_model=verified["manifest"]["requested_model"],
-                    thread_url=None,
+                    thread_url=(
+                        "https://chatgpt.com/c/"
+                        + verified["manifest"]["package_id"]
+                    ),
                     observed_transport="mcp-research",
                     observed_github_repository=None,
                     observed_github_commit=None,

@@ -10,7 +10,7 @@ Ask Codex to use its bundled installer:
 $skill-installer Install gptpro from https://github.com/oozoofrog/codex-skills/tree/main/gptpro
 ```
 
-The installer downloads only the selected Skill into the Codex skills directory. Start a new Codex task after installation so discovery uses the new package.
+The installer downloads only the selected Skill into the Codex skills directory. If discovery is uncertain, ask Codex to verify the installed path and package hash.
 
 설치 후 첫 상담을 시작하는 방법과 승인·브라우저·`.gptpro/` 관리가 궁금하면 [`gptpro` 한국어 사용자 매뉴얼](../gptpro/references/user-manual.md)을 참고하세요.
 

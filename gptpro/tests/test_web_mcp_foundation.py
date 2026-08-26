@@ -834,6 +834,9 @@ class WebMcpFoundationTests(unittest.TestCase):
             manifest["requested_model"],
             "--observed-transport",
             "paste",
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-new-general-chat",
             "--confirm-sent",
         )
         verified = json.loads(
@@ -900,6 +903,9 @@ class WebMcpFoundationTests(unittest.TestCase):
             manifest["requested_model"],
             "--observed-transport",
             "paste",
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-new-general-chat",
             "--confirm-sent",
         )
         markers = manifest["response_markers"]
@@ -953,6 +959,9 @@ class WebMcpFoundationTests(unittest.TestCase):
             APP_NAME,
             "--observed-workspace-label",
             WORKSPACE_LABEL,
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-new-general-chat",
             "--confirm-sent",
             expected=2,
         )
@@ -981,7 +990,12 @@ class WebMcpFoundationTests(unittest.TestCase):
         instructions = "\n".join(payload["human_steps"])
         self.assertIn("this exact package as active", instructions)
         self.assertIn("foreground controller is still live", instructions)
+        self.assertIn("zero prior user or assistant turns", instructions)
         self.assertIn("Do not upload the ZIP", instructions)
+        self.assertTrue(
+            any("empty new general Chat" in item for item in payload["return_with"])
+        )
+        self.assertIn("--confirm-new-general-chat", payload["resume"]["on_sent"])
         self.assertEqual(
             ["sent", "not-sent", "unknown"], payload["resume"]["allowed_outcomes"]
         )

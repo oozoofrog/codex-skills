@@ -1920,6 +1920,9 @@ class WebMcpRuntimeTests(unittest.TestCase):
             APP_NAME,
             "--observed-workspace-label",
             WORKSPACE_LABEL,
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-new-general-chat",
             "--confirm-sent",
         ]
         rejected = self.run_cli(*common, expected=2)

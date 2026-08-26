@@ -143,6 +143,8 @@ RESPONSE_MONITOR_STOP_REASONS = (
     "creation_failed",
 )
 DEFAULT_RESPONSE_MONITOR_INTERVAL_SECONDS = 120
+CHATGPT_CONVERSATION_CONTRACT = "new-general-chat-empty-v1"
+CHATGPT_THREAD_HISTORY_LOCK_TIMEOUT_SECONDS = 2.0
 DEFAULT_RESPONSE_MONITOR_MAX_RUNS = 15
 DEFAULT_RESPONSE_MONITOR_DURATION_SECONDS = 30 * 60
 MCP_SESSION_STATUSES = ("activating", "active", "revoking", "revoked", "expired", "faulted")
@@ -4513,23 +4515,38 @@ def verify_package(
     elif github is not None:
         raise HandoffError("Non-GitHub transport must not declare GitHub metadata")
 
-    if is_mcp_schema(schema_version) and PHASES.index(state["phase"]) >= PHASES.index("submitted"):
+    if PHASES.index(state["phase"]) >= PHASES.index("submitted"):
         submission = state.get("submission")
         if not isinstance(submission, dict):
-            raise HandoffError("Schema-3 submission state is missing")
+            raise HandoffError("Submission state is missing")
         submission_events = [event for event in receipt["events"] if event.get("type") == "submitted"]
         if not submission_events or submission_events[-1].get("data") != submission:
-            raise HandoffError("Schema-3 submission state does not match the receipt chain")
+            raise HandoffError("Submission state does not match the receipt chain")
+        thread_url = submission.get("thread_url")
+        if (
+            not isinstance(thread_url, str)
+            or validate_chatgpt_thread_url(thread_url) != thread_url
+            or submission.get("conversation_contract")
+            != CHATGPT_CONVERSATION_CONTRACT
+            or submission.get("destination") != manifest.get("destination")
+            or submission.get("observed_model") != manifest.get("requested_model")
+            or submission.get("transport") != resolved_transport
+            or submission.get("outbound_artifacts") != outbound
+            or submission.get("github") != github
+        ):
+            raise HandoffError(
+                "Submission does not bind an empty new general Chat and the approved outbound contract"
+            )
+    if is_mcp_schema(schema_version) and PHASES.index(state["phase"]) >= PHASES.index("submitted"):
         connector = manifest["connector"]
         if (
-            submission.get("transport") != resolved_transport
-            or submission.get("delivery_channel") != "browser"
+            submission.get("delivery_channel") != "browser"
             or submission.get("observed_app_name") != connector.get("app_name")
             or submission.get("observed_workspace_label") != connector.get("workspace_label")
             or submission.get("mcp_session_id_sha256")
             != state.get("mcp_session", {}).get("session_id_sha256")
         ):
-            raise HandoffError("Schema-3 submission does not match the approved channel or connector labels")
+            raise HandoffError("Web MCP submission does not match the approved channel or connector labels")
 
     if PHASES.index(state["phase"]) >= PHASES.index("response_imported"):
         response_state = state.get("response")
@@ -7670,10 +7687,10 @@ def record_mcp_activation_stopped_fail_closed(
 
 def next_action(phase: str, transport: str = "paste") -> str:
     approved_action = (
-        "run the secretless mcp-probe, confirm its exact binary SHA-256 for any key-bearing profile/activation command, then use the attended foreground mcp-activate controller for this exact approved package; never switch channel without new approval"
+        "run the secretless mcp-probe, confirm its exact binary SHA-256 for any key-bearing profile/activation command, then use the attended foreground mcp-activate controller for this exact approved package and submit once from an empty new general Chat; never switch channel without new approval"
         if transport in {"mcp-read", "mcp-research"}
         else (
-            "perform the approved visible ChatGPT Pro general Chat transport; "
+            "perform the approved visible ChatGPT Pro transport once from an empty new general Chat; "
             "use human-handoff when a person must complete a trust or browser boundary"
         )
     )
@@ -7766,19 +7783,21 @@ def human_handoff_instructions(
             "A person may submit the approved prompt only while this exact package's foreground MCP authorization is visibly active.",
             [
                 "First confirm mcp-status identifies this exact package as active and the foreground controller is still live; otherwise do not paste or send anything.",
+                "Create a new general Chat and visibly confirm it has zero prior user or assistant turns; do not use Work, a Project, a custom GPT, or an existing conversation.",
                 f"In workspace `{connector['workspace_label']}`, select app `{connector['app_name']}` and exactly this model/reasoning setting: {requested_model}.",
                 f"Paste the complete contents of the one approved prompt file: {approved_paths[0]}. Do not upload the ZIP or attach any other file.",
                 "Verify the package ID and response-marker request, then send exactly once. If submission is uncertain, do not retry.",
             ],
             [
                 "result: sent, not-sent, or unknown",
+                "whether the destination was visibly an empty new general Chat immediately before the single send",
                 "the exact visible account, workspace, app, model, and reasoning labels",
                 "the ChatGPT conversation URL if a matching user turn is visibly present",
             ],
             {
                 "allowed_outcomes": ["sent", "not-sent", "unknown"],
                 "automatic_retry_allowed": False,
-                "on_sent": "run mark-submitted only after matching visible UI evidence",
+                "on_sent": "run mark-submitted with --confirm-new-general-chat and the canonical --thread-url only after matching visible UI evidence",
             },
         )
     if reason == "login":
@@ -7882,7 +7901,7 @@ def human_handoff_instructions(
         )
     if reason == "manual-transport":
         steps = [
-            "Open or reuse the approved unsent new ChatGPT general Chat in the intended account or workspace.",
+            "Create a new ChatGPT general Chat in the intended account or workspace and visibly confirm it has zero prior user or assistant turns; do not use Work, a Project, a custom GPT, or an existing conversation.",
             f"Select exactly this model and reasoning setting: {requested_model}.",
         ]
         if transport == "paste":
@@ -7918,13 +7937,14 @@ def human_handoff_instructions(
             steps,
             [
                 "result: sent, not-sent, or unknown",
+                "whether the destination was visibly an empty new general Chat immediately before the single send",
                 "the exact visible model and reasoning labels",
                 "the ChatGPT conversation URL if a matching user turn is visibly present",
             ],
             {
                 "allowed_outcomes": ["sent", "not-sent", "unknown"],
                 "automatic_retry_allowed": False,
-                "on_sent": "run mark-submitted only after matching visible UI evidence",
+                "on_sent": "run mark-submitted with --confirm-new-general-chat and the canonical --thread-url only after matching visible UI evidence",
             },
         )
     if reason == "submission-uncertain":
@@ -10758,16 +10778,93 @@ def validate_chatgpt_thread_url(raw: str) -> str:
         or re.fullmatch(r"/c/[A-Za-z0-9-]+/?", parsed.path) is None
     ):
         raise HandoffError("--thread-url must be a credential-free https://chatgpt.com/ URL")
+    return f"https://chatgpt.com{parsed.path.rstrip('/')}"
+
+
+def _load_private_sibling_state(path: Path) -> dict[str, Any]:
+    """Read one sibling handoff state without following links or unsafe files."""
+
+    try:
+        descriptor = open_private_regular(path, flags=os.O_RDONLY)
+    except RuntimeStateError as exc:
+        if isinstance(exc.__cause__, FileNotFoundError):
+            raise FileNotFoundError(path) from exc
+        raise HandoffError(
+            "CHATGPT_THREAD_HISTORY_UNSAFE: unable to inspect a prior handoff state safely"
+        ) from exc
+    try:
+        with os.fdopen(descriptor, "r", encoding="utf-8", closefd=False) as handle:
+            try:
+                value = json.load(handle)
+            except (OSError, UnicodeError, ValueError, RecursionError) as exc:
+                raise HandoffError(
+                    "CHATGPT_THREAD_HISTORY_UNSAFE: a prior handoff state is not valid JSON"
+                ) from exc
+    finally:
+        os.close(descriptor)
+    if not isinstance(value, dict):
+        raise HandoffError(
+            "CHATGPT_THREAD_HISTORY_UNSAFE: a prior handoff state is not a JSON object"
+        )
+    validate_json_tree(value, label=f"Prior handoff state {path}")
     return value
+
+
+def recorded_thread_url_owner(handoff_dir: Path, thread_url: str) -> str | None:
+    """Return the sibling package already bound to one canonical conversation URL."""
+
+    try:
+        entries = list(os.scandir(handoff_dir.parent))
+    except OSError as exc:
+        raise HandoffError(
+            "CHATGPT_THREAD_HISTORY_UNSAFE: unable to inspect prior handoff conversations"
+        ) from exc
+    for entry in entries:
+        if entry.name == handoff_dir.name or entry.name.startswith("."):
+            continue
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+        except OSError as exc:
+            raise HandoffError(
+                "CHATGPT_THREAD_HISTORY_UNSAFE: unable to classify a prior handoff directory"
+            ) from exc
+        state_path = Path(entry.path) / "state.json"
+        try:
+            state = _load_private_sibling_state(state_path)
+        except FileNotFoundError:
+            continue
+        submission = state.get("submission")
+        recorded_url = submission.get("thread_url") if isinstance(submission, dict) else None
+        if not isinstance(recorded_url, str):
+            continue
+        try:
+            recorded_url = validate_chatgpt_thread_url(recorded_url)
+        except HandoffError:
+            continue
+        if recorded_url != thread_url:
+            continue
+        package_id = state.get("package_id")
+        return package_id if isinstance(package_id, str) and package_id else entry.name
+    return None
 
 
 @_with_package_lock(_command_handoff_arg)
 def command_mark_submitted(args: argparse.Namespace) -> int:
     if not args.confirm_sent:
         raise HandoffError("Submission recording requires --confirm-sent after visible UI confirmation")
+    if not args.confirm_new_general_chat:
+        raise HandoffError(
+            "Submission recording requires --confirm-new-general-chat after visibly confirming "
+            "an empty new general Chat before the single send"
+        )
     if not args.observed_model.strip():
         raise HandoffError("--observed-model must not be empty")
-    thread_url = validate_chatgpt_thread_url(args.thread_url) if args.thread_url else None
+    if not args.thread_url:
+        raise HandoffError(
+            "Submission recording requires the exact canonical --thread-url for the new general Chat"
+        )
+    thread_url = validate_chatgpt_thread_url(args.thread_url)
     handoff_dir = validate_handoff_dir(args.handoff_dir)
     verified = verify_package(handoff_dir)
     state = verified["state"]
@@ -10798,37 +10895,57 @@ def command_mark_submitted(args: argparse.Namespace) -> int:
     if is_mcp_schema(schema_version):
         connector = verified["manifest"]["connector"]
         if args.observed_delivery_channel != "browser":
-            raise HandoffError("Observed delivery channel does not match the approved schema-3 browser channel")
+            raise HandoffError("Observed delivery channel does not match the approved Web MCP browser channel")
         if args.observed_app_name != connector["app_name"]:
             raise HandoffError("Observed ChatGPT app does not match the approved connector")
         if args.observed_workspace_label != connector["workspace_label"]:
             raise HandoffError("Observed ChatGPT workspace does not match the approved connector")
         require_active_mcp_authorization(verified, runtime_store_for())
-    submission = {
-        "submitted_at": utc_now(),
-        "destination": verified["manifest"]["destination"],
-        "observed_model": requested_model,
-        "transport": approved_transport,
-        "outbound_artifacts": verified["outbound_artifacts"],
-        "thread_url": thread_url,
-        "github": github,
-        **(
-            {
-                "delivery_channel": "browser",
-                "observed_app_name": args.observed_app_name,
-                "observed_workspace_label": args.observed_workspace_label,
-                "mcp_session_id_sha256": state["mcp_session"]["session_id_sha256"],
+    try:
+        with package_lifecycle_lock(
+            handoff_dir.parent,
+            timeout=CHATGPT_THREAD_HISTORY_LOCK_TIMEOUT_SECONDS,
+        ):
+            reused_by = recorded_thread_url_owner(handoff_dir, thread_url)
+            if reused_by is not None:
+                raise HandoffError(
+                    "CHATGPT_THREAD_URL_REUSED: this canonical conversation URL is already bound to "
+                    f"package {reused_by}; keep this package approved and start a new general Chat "
+                    "without resending to the existing conversation"
+                )
+            submission = {
+                "submitted_at": utc_now(),
+                "destination": verified["manifest"]["destination"],
+                "observed_model": requested_model,
+                "transport": approved_transport,
+                "outbound_artifacts": verified["outbound_artifacts"],
+                "thread_url": thread_url,
+                "conversation_contract": CHATGPT_CONVERSATION_CONTRACT,
+                "github": github,
+                **(
+                    {
+                        "delivery_channel": "browser",
+                        "observed_app_name": args.observed_app_name,
+                        "observed_workspace_label": args.observed_workspace_label,
+                        "mcp_session_id_sha256": state["mcp_session"]["session_id_sha256"],
+                    }
+                    if is_mcp_schema(schema_version)
+                    else {}
+                ),
             }
-            if is_mcp_schema(schema_version)
-            else {}
-        ),
-    }
-    state["phase"] = "submitted"
-    state["updated_at"] = submission["submitted_at"]
-    state["submission"] = submission
-    if is_mcp_schema(schema_version):
-        state["revision"] += 1
-    commit_state_receipt_event(handoff_dir, state, "submitted", submission)
+            state["phase"] = "submitted"
+            state["updated_at"] = submission["submitted_at"]
+            state["submission"] = submission
+            if is_mcp_schema(schema_version):
+                state["revision"] += 1
+            commit_state_receipt_event(handoff_dir, state, "submitted", submission)
+    except RuntimeStateError as exc:
+        if exc.code == "LOCK_TIMEOUT":
+            raise HandoffError(
+                "CHATGPT_THREAD_HISTORY_BUSY: another submission is updating this handoff root; "
+                "rerun mark-submitted without resending after it finishes"
+            ) from exc
+        raise runtime_failure(exc) from exc
     print(json.dumps({"package_id": state["package_id"], "phase": "submitted"}, indent=2))
     return 0
 
@@ -11408,7 +11525,15 @@ def build_parser() -> argparse.ArgumentParser:
     submitted.add_argument("--observed-delivery-channel", choices=DELIVERY_CHANNELS, default="browser")
     submitted.add_argument("--observed-app-name")
     submitted.add_argument("--observed-workspace-label")
-    submitted.add_argument("--thread-url")
+    submitted.add_argument("--thread-url", required=True)
+    submitted.add_argument(
+        "--confirm-new-general-chat",
+        action="store_true",
+        help=(
+            "Confirm that immediately before the single send the visible destination was an "
+            "empty new general Chat, not an existing conversation, Work, Project, or custom GPT"
+        ),
+    )
     submitted.add_argument("--confirm-sent", action="store_true")
     submitted.set_defaults(func=command_mark_submitted)
 

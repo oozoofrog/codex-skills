@@ -30,6 +30,8 @@ Initialization is idempotent. If `ready` is true and `actions` is empty, do not 
 
 ## Prepare
 
+Transport routing has two layers. At the Skill layer, an explicit `$gptpro` project/repository request that requires Pro to inspect, search, or navigate actual project context defaults to a proposed, narrowly directed `mcp-research` package. The proposal still stops before approval, activation, or transmission. At the CLI layer, `--transport auto` remains GitHub-first and never selects Web MCP. Use ordinary GitHub/text delivery when the user asks for it or the consultation needs only a small fixed excerpt.
+
 ```bash
 python3 <skill-dir>/scripts/gptpro.py prepare \
   --repo "$PWD" \
@@ -260,6 +262,7 @@ Follow [browser-handoff.md](browser-handoff.md). After visible UI evidence confi
 python3 <skill-dir>/scripts/gptpro.py mark-submitted \
   --handoff-dir <dir> \
   --confirm-sent \
+  --confirm-new-general-chat \
   --observed-model "ChatGPT Pro / GPT-5.6 Sol / Intelligence: Pro" \
   --observed-transport text-file \
   --thread-url "https://chatgpt.com/c/<id>"
@@ -267,7 +270,9 @@ python3 <skill-dir>/scripts/gptpro.py mark-submitted \
 
 For `github`, use `--observed-transport github` and also provide the exact approved `--observed-github-repository owner/repo` and `--observed-github-commit <sha>`. The command rejects identity drift.
 
-Omit `--thread-url` if the user does not want the URL recorded, but automatic response monitoring then fails closed because it cannot prove which conversation to inspect. The URL must be credential-free HTTPS on the exact `chatgpt.com` host. Never mark an ambiguous or failed send as submitted. If a transport fails, prepare and approve a new handoff instead of silently falling back.
+Both `--confirm-new-general-chat` and `--thread-url` are mandatory. The flag means the visible destination was an empty new general Chat with zero prior user or assistant turns immediately before the single Send—not an existing conversation, Work, Project, or custom GPT. The URL must be credential-free HTTPS on the exact `chatgpt.com` host. One optional trailing slash is normalized away. The submission receipt binds the canonical URL, the `new-general-chat-empty-v1` contract, destination, model, transport, outbound artifacts, and any GitHub or MCP identity.
+
+The command rejects a canonical URL already stored by another handoff under the same local handoff root, including a trailing-slash spelling variant. The history scan and receipt commit share one bounded cross-process root lock so two concurrent submissions cannot both pass the check; `CHATGPT_THREAD_HISTORY_BUSY` leaves the package approved and permits rerunning only `mark-submitted` without resending. That local history check does not inspect another repository/output root, so attended zero-turn confirmation remains mandatory. Submitted packages created before this contract are not upgraded or accepted as current evidence; prepare, review, and approve a new package. Never mark an ambiguous or failed send as submitted. If a transport fails, prepare and approve a new handoff instead of silently falling back.
 
 Immediately after a successful send, ChatGPT may temporarily show `/c/WEB:<temporary-id>`. This route is not a canonical conversation identity and `mark-submitted` rejects it with `CHATGPT_THREAD_URL_TRANSIENT`. Keep the same visibly submitted Chat open and wait boundedly for `/c/<id>` to appear; do not remove or percent-encode the prefix, refresh, open a replacement Chat, or resend. The transient rejection leaves the package approved, so run `mark-submitted` again only after the canonical URL and matching user turn are both visible. Query strings and fragments are also rejected so credentials or unrelated state cannot enter the receipt or monitor prompt.
 

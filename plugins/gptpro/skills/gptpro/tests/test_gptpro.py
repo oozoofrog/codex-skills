@@ -169,6 +169,8 @@ class GptProCliTests(unittest.TestCase):
 
     def approve_and_submit(self, handoff: Path, *, thread_url: str | None = None) -> dict:
         manifest = self.load(handoff / "manifest.json")
+        if thread_url is None:
+            thread_url = f"https://chatgpt.com/c/{manifest['package_id']}"
         self.run_cli(
             "approve",
             "--handoff-dir",
@@ -196,8 +198,10 @@ class GptProCliTests(unittest.TestCase):
             manifest["requested_model"],
             "--observed-transport",
             manifest["transport"]["resolved"],
+            "--thread-url",
+            thread_url,
+            "--confirm-new-general-chat",
             "--confirm-sent",
-            *(["--thread-url", thread_url] if thread_url else []),
             *github_args,
         )
         return manifest
@@ -1091,6 +1095,10 @@ class GptProCliTests(unittest.TestCase):
         self.assertEqual("Chrome control is unavailable.", result["observed_blocker_details"])
         self.assertEqual(["sent", "not-sent", "unknown"], result["resume"]["allowed_outcomes"])
         self.assertFalse(result["resume"]["automatic_retry_allowed"])
+        instructions = "\n".join(result["human_steps"] + result["return_with"])
+        self.assertIn("zero prior user or assistant turns", instructions)
+        self.assertIn("empty new general Chat", instructions)
+        self.assertIn("--confirm-new-general-chat", result["resume"]["on_sent"])
         self.assertEqual(
             [manifest["transport"]["outbound_artifacts"][0]["sha256"]],
             [item["sha256"] for item in result["outbound_paths"]],
@@ -1189,18 +1197,30 @@ class GptProCliTests(unittest.TestCase):
             result["resume"]["on_completed"],
         )
 
-    def test_response_monitor_plan_requires_exact_recorded_thread_url(self) -> None:
+    def test_submission_requires_exact_recorded_thread_url(self) -> None:
         handoff = self.prepare()
-        self.approve_and_submit(handoff)
-        result = self.run_cli(
-            "response-monitor-plan",
+        manifest = self.load(handoff / "manifest.json")
+        self.run_cli(
+            "approve",
             "--handoff-dir",
             str(handoff),
-            "--target-thread-id",
-            "019fe4c2-7b00-7213-964e-22607e752d7b",
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        result = self.run_cli(
+            "mark-submitted",
+            "--handoff-dir",
+            str(handoff),
+            "--observed-model",
+            manifest["requested_model"],
+            "--observed-transport",
+            manifest["transport"]["resolved"],
+            "--confirm-new-general-chat",
+            "--confirm-sent",
             expected=2,
         )
-        self.assertIn("RESPONSE_MONITOR_THREAD_URL_MISSING", result.stderr)
+        self.assertIn("--thread-url", result.stderr)
 
     def test_response_monitor_records_bounded_lifecycle_without_resend(self) -> None:
         handoff = self.prepare()
@@ -1351,9 +1371,170 @@ class GptProCliTests(unittest.TestCase):
                     manifest["transport"]["resolved"],
                     "--thread-url",
                     url,
+                    "--confirm-new-general-chat",
                     "--confirm-sent",
                     expected=2,
                 )
+
+    def test_submission_requires_visible_empty_new_general_chat_confirmation(self) -> None:
+        handoff = self.prepare()
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(handoff),
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        manifest = self.load(handoff / "manifest.json")
+        result = self.run_cli(
+            "mark-submitted",
+            "--handoff-dir",
+            str(handoff),
+            "--observed-model",
+            manifest["requested_model"],
+            "--observed-transport",
+            manifest["transport"]["resolved"],
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-sent",
+            expected=2,
+        )
+        self.assertIn("--confirm-new-general-chat", result.stderr)
+        self.assertEqual("approved", self.load(handoff / "state.json")["phase"])
+
+    def test_submission_rejects_conversation_url_already_bound_to_sibling_package(self) -> None:
+        shared_url = "https://chatgpt.com/c/11111111-2222-3333-4444-555555555555"
+        first = self.prepare()
+        self.approve_and_submit(first, thread_url=shared_url)
+
+        second = self.prepare()
+        second_manifest = self.load(second / "manifest.json")
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(second),
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        result = self.run_cli(
+            "mark-submitted",
+            "--handoff-dir",
+            str(second),
+            "--observed-model",
+            second_manifest["requested_model"],
+            "--observed-transport",
+            second_manifest["transport"]["resolved"],
+            "--thread-url",
+            shared_url + "/",
+            "--confirm-new-general-chat",
+            "--confirm-sent",
+            expected=2,
+        )
+        self.assertIn("CHATGPT_THREAD_URL_REUSED", result.stderr)
+        self.assertIn(self.load(first / "manifest.json")["package_id"], result.stderr)
+        self.assertEqual("approved", self.load(second / "state.json")["phase"])
+
+    def test_submission_fails_closed_on_unsafe_sibling_conversation_history(self) -> None:
+        handoff = self.prepare()
+        unsafe = handoff.parent / "unsafe-history"
+        unsafe.mkdir(mode=0o700)
+        (unsafe / "state.json").symlink_to(handoff / "state.json")
+        manifest = self.load(handoff / "manifest.json")
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(handoff),
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        rejected = self.run_cli(
+            "mark-submitted",
+            "--handoff-dir",
+            str(handoff),
+            "--observed-model",
+            manifest["requested_model"],
+            "--observed-transport",
+            manifest["transport"]["resolved"],
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-new-general-chat",
+            "--confirm-sent",
+            expected=2,
+        )
+        self.assertIn("CHATGPT_THREAD_HISTORY_UNSAFE", rejected.stderr)
+        self.assertEqual("approved", self.load(handoff / "state.json")["phase"])
+
+    def test_submission_serializes_sibling_url_check_and_receipt_commit(self) -> None:
+        handoff = self.prepare()
+        manifest = self.load(handoff / "manifest.json")
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(handoff),
+            "--approved-by",
+            "user",
+            "--confirm-transmission",
+        )
+        arguments = (
+            "mark-submitted",
+            "--handoff-dir",
+            str(handoff),
+            "--observed-model",
+            manifest["requested_model"],
+            "--observed-transport",
+            manifest["transport"]["resolved"],
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-new-general-chat",
+            "--confirm-sent",
+        )
+
+        with GPTPRO.package_lifecycle_lock(handoff.parent):
+            rejected = self.run_cli(*arguments, expected=2)
+        self.assertIn("CHATGPT_THREAD_HISTORY_BUSY", rejected.stderr)
+        self.assertIn("without resending", rejected.stderr)
+        self.assertEqual("approved", self.load(handoff / "state.json")["phase"])
+
+        self.run_cli(*arguments)
+        self.assertEqual("submitted", self.load(handoff / "state.json")["phase"])
+
+    def test_submitted_state_and_receipt_bind_new_chat_and_outbound_contract(self) -> None:
+        handoff = self.prepare()
+        self.approve_and_submit(handoff)
+        state_path = handoff / "state.json"
+        receipt_path = handoff / "receipt.json"
+        original_state = self.load(state_path)
+        original_receipt = self.load(receipt_path)
+
+        cases = (
+            ("conversation-contract", "conversation_contract", "wrong-contract"),
+            ("destination", "destination", "Wrong destination"),
+            ("observed-model", "observed_model", "Wrong model"),
+            ("transport", "transport", "text-file"),
+            ("github", "github", {"repository": "wrong/repository"}),
+        )
+        for name, field, value in cases:
+            with self.subTest(case=name):
+                state = copy.deepcopy(original_state)
+                receipt = copy.deepcopy(original_receipt)
+                state["submission"][field] = value
+                receipt["events"][-1]["data"] = copy.deepcopy(state["submission"])
+                receipt["events"][-1]["event_hash"] = GPTPRO.event_hash(
+                    receipt["events"][-1]
+                )
+                self.write_json(state_path, state)
+                self.write_json(receipt_path, receipt)
+                rejected = self.run_cli(
+                    "verify", "--handoff-dir", str(handoff), expected=2
+                )
+                self.assertIn("empty new general Chat", rejected.stderr)
+
+        self.write_json(state_path, original_state)
+        self.write_json(receipt_path, original_receipt)
+        self.run_cli("verify", "--handoff-dir", str(handoff))
 
     def test_submission_waits_for_transient_web_url_to_normalize(self) -> None:
         handoff = self.prepare()
@@ -1374,6 +1555,7 @@ class GptProCliTests(unittest.TestCase):
             manifest["requested_model"],
             "--observed-transport",
             manifest["transport"]["resolved"],
+            "--confirm-new-general-chat",
             "--confirm-sent",
         )
 
@@ -1397,7 +1579,19 @@ class GptProCliTests(unittest.TestCase):
         receipt = self.load(handoff / "receipt.json")
         self.assertEqual("submitted", state["phase"])
         self.assertEqual(canonical_url, state["submission"]["thread_url"])
+        self.assertEqual(
+            GPTPRO.CHATGPT_CONVERSATION_CONTRACT,
+            state["submission"]["conversation_contract"],
+        )
         self.assertEqual(1, [event["type"] for event in receipt["events"]].count("submitted"))
+
+    def test_submission_canonicalizes_one_trailing_thread_url_slash(self) -> None:
+        handoff = self.prepare()
+        canonical_url = "https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        self.approve_and_submit(handoff, thread_url=canonical_url + "/")
+        state = self.load(handoff / "state.json")
+        self.assertEqual(canonical_url, state["submission"]["thread_url"])
+        self.run_cli("verify", "--handoff-dir", str(handoff))
 
     def test_auto_transport_uses_text_file_over_policy_threshold(self) -> None:
         handoff = self.prepare("review", "--max-paste-bytes", "1")
@@ -1523,6 +1717,9 @@ class GptProCliTests(unittest.TestCase):
             github["repository"],
             "--observed-github-commit",
             "0" * 40,
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-new-general-chat",
             "--confirm-sent",
             expected=2,
         )
@@ -1538,6 +1735,9 @@ class GptProCliTests(unittest.TestCase):
             github["repository"],
             "--observed-github-commit",
             github["commit_sha"],
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-new-general-chat",
             "--confirm-sent",
         )
         markers = manifest["response_markers"]
@@ -1656,6 +1856,9 @@ class GptProCliTests(unittest.TestCase):
             "Pro",
             "--observed-transport",
             "paste",
+            "--thread-url",
+            "https://chatgpt.com/c/not-approved",
+            "--confirm-new-general-chat",
             "--confirm-sent",
             expected=2,
         )
@@ -1697,6 +1900,9 @@ class GptProCliTests(unittest.TestCase):
             "A fallback model",
             "--observed-transport",
             manifest["transport"]["resolved"],
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-new-general-chat",
             "--confirm-sent",
             expected=2,
         )
@@ -1708,6 +1914,9 @@ class GptProCliTests(unittest.TestCase):
             manifest["requested_model"],
             "--observed-transport",
             manifest["transport"]["resolved"],
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-new-general-chat",
             "--confirm-sent",
         )
 
@@ -1730,6 +1939,9 @@ class GptProCliTests(unittest.TestCase):
             manifest["requested_model"],
             "--observed-transport",
             "paste",
+            "--thread-url",
+            f"https://chatgpt.com/c/{manifest['package_id']}",
+            "--confirm-new-general-chat",
             "--confirm-sent",
             expected=2,
         )

@@ -14,7 +14,7 @@ From Codex, request a network installation without running Python directly:
 $skill-installer Install gptpro from https://github.com/oozoofrog/codex-skills/tree/main/gptpro
 ```
 
-Start a new Codex task after installation. Alternatively, register the repository Marketplace once and install `GPT Pro Collaborator` from the Plugins browser:
+Alternatively, register the repository Marketplace once and install `GPT Pro Collaborator` from the Plugins browser:
 
 ```bash
 codex plugin marketplace add oozoofrog/codex-skills --ref main
@@ -32,20 +32,20 @@ python3 scripts/manage_skills.py install gptpro --update
 
 ## Use
 
-For an ordinary GitHub-first consultation, invoke `$gptpro` with a mode and task:
+Invoke `$gptpro` with a mode and task:
 
 ```text
 $gptpro review 모드로 현재 변경의 정확성과 빠진 테스트를 검토해주세요.
 ```
 
-To let Pro explore an approved immutable local snapshot with the seven schema-4 read-only tools, request `mcp-research` explicitly and name a narrow scope:
+When that explicit project/repository consultation requires Pro to inspect, search, or navigate actual project context, the Skill-level workflow proposes `mcp-research` with a narrow scope by default:
 
 ```text
 $gptpro review 모드로 src와 tests를 Pro가 읽어가며 분석하도록 mcp-research로 진행해주세요.
 실제 수정은 Pro 응답을 현재 코드와 테스트로 검증한 뒤에만 해주세요.
 ```
 
-Do not request Web MCP merely because a repository is local. Start with the ordinary path unless the consultation benefits from iterative workspace mapping, multi-range reads, multiple searches, prepared diff/evidence, or the separately approved context-note ledger. Web MCP currently requires macOS, Python 3.11 or newer, a reviewed official `tunnel-client`, ChatGPT Developer Mode, and attended app/workspace selection.
+That routing is not transmission authority and does not make the CLI's `auto` transport select MCP. Codex must show the exact package, disclosure ceiling, tool catalog, expiry, and ledger policy, then pause for package-specific approval before activation or Send. Use the ordinary GitHub/text path when the user requests it or the task needs only a small fixed excerpt. Web MCP currently requires macOS, Python 3.11 or newer, a reviewed official `tunnel-client`, ChatGPT Developer Mode, and attended app/workspace selection.
 
 When the consultation needs exact text from a file outside the selected repository snapshot, ask Codex to include it as a supplemental document. Repeatable `--supplement LABEL=/ABSOLUTE/PATH` packages an owner-controlled, secret-scanned strict-UTF-8 snapshot without using browser file upload. The option path is local CLI input only: Codex writes the outbound task using the safe label, and preparation rejects copying that path into outbound metadata. Small packages use bounded `paste`; larger or exploratory documents use explicit Schema 4 `mcp-research` and `gptpro_artifact_read`. See [supplemental text documents](references/supplemental-documents.md).
 
@@ -55,11 +55,11 @@ The user normally does not need to construct CLI commands. The Skill:
 2. prepares, scans, hashes, and verifies a package;
 3. shows the exact outbound prompt and maximum disclosure contract;
 4. stops for package-specific approval;
-5. guides or performs only the authorized attended delivery steps;
+5. creates an empty new ChatGPT general Chat with zero prior turns and guides or performs only the authorized attended delivery steps;
 6. creates one bounded same-task response monitor that checks only the recorded conversation and never resends;
 7. revokes/stops a Web MCP session, imports the marked response, independently evaluates the advice, and removes the monitor.
 
-Transmission is always a separate attended action. Login, Developer Mode, app/workspace selection, OAuth, model selection, and an ambiguous send state remain visible human checkpoints. A successful Tunnel activation is not permission to send the prompt, and a successful Pro response is not permission to modify the repository.
+Transmission is always a separate attended action. Every package uses a new general Chat, never an existing conversation, Work, Project, or custom GPT. `mark-submitted` requires the canonical conversation URL plus explicit confirmation that the Chat was empty immediately before the single Send, and rejects a URL already bound to another local handoff. Login, Developer Mode, app/workspace selection, OAuth, model selection, and an ambiguous send state remain visible human checkpoints. A successful Tunnel activation is not permission to send the prompt, and a successful Pro response is not permission to modify the repository.
 
 처음 사용하는 분은 설치부터 첫 상담, 승인, ChatGPT 화면 조작, 응답 검증, `.gptpro/` 관리와 문제 해결까지 설명한 [한국어 사용자 매뉴얼](references/user-manual.md)을 먼저 읽으세요.
 

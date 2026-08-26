@@ -29,7 +29,7 @@ python3 <skill-dir>/scripts/gptpro.py human-handoff \
   --details "Chrome file chooser did not open."
 ```
 
-Supported pre-submission reasons include `login`, `account-or-workspace`, `app-authorization`, `file-permission`, `file-selection`, `model-selection`, `captcha`, `site-approval`, `manual-transport`, and `submission-uncertain`. For `github`, `app-authorization` names the exact approved repository and commit, while `manual-transport` requires activating the visible GitHub app/plugin, pasting only `prompt.md`, and attaching no local file. For Web MCP, the person creates/selects the Tunnel/key, enables Developer Mode, confirms the exact ChatGPT account/workspace/app, reviews the schema-specific tool catalog, and visibly submits the approved prompt. The checklist cannot substitute for package-specific approval, an active local authorization, a successful control-plane poll, or schema-4 reply approval. After submission, use `response-export` when a person must save the completed marked response.
+Supported pre-submission reasons include `login`, `account-or-workspace`, `app-authorization`, `file-permission`, `file-selection`, `model-selection`, `captcha`, `site-approval`, `manual-transport`, and `submission-uncertain`. For `github`, `app-authorization` names the exact approved repository and commit, while `manual-transport` requires activating the visible GitHub app/plugin, pasting only `prompt.md`, and attaching no local file. Every `manual-transport` checklist creates an empty new general Chat, confirms zero prior user or assistant turns, and excludes existing conversations, Work, Projects, and custom GPTs. For Web MCP, the person also creates/selects the Tunnel/key, enables Developer Mode, confirms the exact ChatGPT account/workspace/app, reviews the schema-specific tool catalog, and visibly submits the approved prompt. The checklist cannot substitute for package-specific approval, an active local authorization, a successful control-plane poll, or schema-4 reply approval. After submission, use `response-export` when a person must save the completed marked response.
 
 The command verifies the package before printing instructions. Its JSON includes the package phase, approved model, transport, exact outbound paths and hashes, human steps, expected return evidence, and retry rule. It does not write state, append a receipt event, authorize transmission, or prove that an action occurred.
 
@@ -43,6 +43,7 @@ package_id: <id>
 reason: <reason>
 result: completed | declined | blocked | sent | not-sent | unknown
 observed_model: <visible label, when relevant>
+new_general_chat_empty_before_send: yes | no | unknown
 thread_url: <visible chatgpt.com conversation URL, when sent>
 details: <short visible evidence or blocker>
 ```
@@ -52,7 +53,7 @@ Treat this report as an attended observation, not as permission for unrelated ac
 ## Resume rules
 
 - For login, permission, app, file-selection, or model-selection help, reacquire the same visible page and re-check the required state before continuing.
-- For a completed `manual-transport`, run `mark-submitted` only when the person reports `sent` and a matching user turn is visibly present.
+- For a completed `manual-transport`, run `mark-submitted --confirm-new-general-chat --thread-url <canonical-url>` only when the person reports `sent`, confirms the Chat was empty immediately before Send, and a matching user turn is visibly present. A `no` or `unknown` new-Chat result cannot become a submitted receipt.
 - For `mcp-read|mcp-research`, verify the exact package remains active before Send. Keep the foreground activation controller running through response completion, then revoke/stop it. A user confirmation of Developer Mode or app selection is not proof that the Tunnel or tool calls worked. For research, never publish a Codex context note merely because the package was approved; use the separate exact-byte note gate, and do not call local publication network delivery.
 - For `submission-uncertain`, never send again automatically. Record submission only after a matching package-specific user turn is visible. Keep the phase `approved` for `not-sent` or `unknown` and ask before any new attempt.
 - For `response-export`, open only the exact conversation URL stored by `mark-submitted` when available and import only the saved UTF-8 file containing both exact response markers. `automatic_collection_retry_allowed` applies only to checking/copying that existing response; `automatic_prompt_resend_allowed` and the legacy generic retry flag remain false.

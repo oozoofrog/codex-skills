@@ -41,7 +41,7 @@ A moving branch or PR URL is never the sole identity. The commit SHA is authorit
 
 After package-specific approval:
 
-1. Open a new ChatGPT general Chat in the intended account/workspace and select the approved model/Pro setting.
+1. Open a new ChatGPT general Chat in the intended account/workspace, visibly confirm zero prior user or assistant turns, and select the approved model/Pro setting. Never use an existing conversation, Work, Project, or custom GPT.
 2. If GitHub is not connected, run `human-handoff --reason app-authorization`. The user reviews the app, account, organization, requested permissions, and repository scope.
 3. Activate the visible GitHub app/plugin for the Chat.
 4. Paste the exact approved `prompt.md`; attach no local context or ZIP.
@@ -52,6 +52,7 @@ After package-specific approval:
 python3 <skill-dir>/scripts/gptpro.py mark-submitted \
   --handoff-dir <dir> \
   --confirm-sent \
+  --confirm-new-general-chat \
   --observed-model "ChatGPT Pro / GPT-5.6 Sol / Intelligence: Pro" \
   --observed-transport github \
   --observed-github-repository owner/repository \
