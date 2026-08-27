@@ -284,6 +284,106 @@ def open_private_regular(
         os.close(directory)
 
 
+def observe_runtime_state(root: Path | None = None) -> dict[str, Any] | None:
+    """Read the existing active pointer without creating or locking anything.
+
+    This is intentionally weaker than :class:`RuntimeStateStore`: it provides
+    a point-in-time diagnostic observation, not a transactional lifecycle
+    decision.  Callers must describe concurrent or changing evidence as
+    partial rather than attempting recovery from this function.
+    """
+
+    requested = Path(root) if root is not None else default_runtime_root()
+    try:
+        requested.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RuntimeStateError(
+            "RUNTIME_STATE_UNAVAILABLE", "The runtime directory cannot be inspected."
+        ) from exc
+    directory = _directory_fd(requested)
+    descriptor = -1
+    try:
+        metadata = os.fstat(directory)
+        if stat.S_IMODE(metadata.st_mode) != 0o700:
+            raise RuntimeStateError(
+                "RUNTIME_STATE_UNSAFE", "The runtime directory must be owner-only mode 0700."
+            )
+        try:
+            descriptor = os.open(
+                "active.json",
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW")
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=directory,
+            )
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise RuntimeStateError(
+                "RUNTIME_STATE_UNAVAILABLE", "The active runtime state cannot be inspected."
+            ) from exc
+        _validate_private_fd(descriptor)
+        return RuntimeStateStore._read_state_descriptor(descriptor)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(directory)
+
+
+def observe_controller_lease(root: Path, session_id_sha256: str) -> str:
+    """Observe an existing controller lease without creating a file or directory."""
+
+    if not isinstance(session_id_sha256, str) or _SHA256.fullmatch(session_id_sha256) is None:
+        raise RuntimeStateError(
+            "RUNTIME_STATE_UNSAFE", "The controller session hash is invalid."
+        )
+    requested = Path(root)
+    try:
+        requested.lstat()
+    except FileNotFoundError:
+        return "absent"
+    except OSError as exc:
+        raise RuntimeStateError(
+            "RUNTIME_STATE_UNAVAILABLE", "The runtime directory cannot be inspected."
+        ) from exc
+    directory = _directory_fd(requested)
+    descriptor = -1
+    try:
+        metadata = os.fstat(directory)
+        if stat.S_IMODE(metadata.st_mode) != 0o700:
+            raise RuntimeStateError(
+                "RUNTIME_STATE_UNSAFE", "The runtime directory must be owner-only mode 0700."
+            )
+        try:
+            descriptor = os.open(
+                f"controller-{session_id_sha256}.lock",
+                os.O_RDWR
+                | getattr(os, "O_NOFOLLOW")
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=directory,
+            )
+        except FileNotFoundError:
+            return "absent"
+        except OSError as exc:
+            raise RuntimeStateError(
+                "RUNTIME_STATE_UNAVAILABLE", "The controller lease cannot be inspected."
+            ) from exc
+        _validate_private_fd(descriptor)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return "live"
+        else:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            return "not_live"
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(directory)
+
+
 def fsync_directory(path: Path, *, fsync: Any = os.fsync) -> None:
     descriptor = _directory_fd(path)
     try:

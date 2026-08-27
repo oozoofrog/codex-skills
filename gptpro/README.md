@@ -105,6 +105,18 @@ python3 scripts/gptpro.py human-handoff --handoff-dir /path/to/repo/.gptpro/hand
 python3 scripts/gptpro.py response-monitor-plan --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
 ```
 
+For a sanitized machine-readable failure, put the global option before the command. For failure reporting, use `diagnostic-status` instead of treating operational `status`/`mcp-status` as pure reads: it does not recover package journals, commit expiry, create runtime/lock files, or write receipts and audit closure.
+
+```bash
+python3 scripts/gptpro.py --error-format json verify \
+  --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
+
+python3 scripts/gptpro.py --error-format json diagnostic-status \
+  --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
+```
+
+When a consultation fails, blocks on a human checkpoint, or lacks expected evidence, the Skill reports the failed step, expected versus observed result, stable error, transmission/approval/repository effects, package/Tunnel state, automatic-retry safety, and one exact next action. See [failure reporting](references/failure-reporting.md).
+
 `response-monitor-plan` is read-only and requires a submitted package with an exact recorded `chatgpt.com` conversation URL. Codex uses its output with the app's same-task heartbeat capability, then records the returned automation identity. See [response completion monitor](references/response-monitor.md); the monitor repeats response collection only and never prompt submission.
 
 Schema-3/4 preparation normally reuses one existing verified owner-only Tunnel profile plus visible app/workspace labels. Run the secretless preflight first; it does not resolve credentials, execute `tunnel-client`, create a package, or disclose repository content. Copy the exact selected profile and hash into preparation. The raw Tunnel ID is read internally from that protected profile only long enough to derive the package-specific binding and is not returned or written to gptpro artifacts:

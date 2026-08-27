@@ -638,6 +638,32 @@ Developer Mode는 ChatGPT 설정 기능이며 브라우저 설정이 아닙니�
 
 먼저 새 Tunnel을 만들거나 ID를 다시 복사하지 마세요. Codex가 설치된 gptpro의 `preflight --repo <repo> --transport mcp-research --json`을 실행해야 합니다. `ready_for_prepare: true`이면 출력된 exact profile/hash로 새 package를 준비합니다. `TUNNEL_PROFILE_AMBIGUOUS`이면 bounded `mcp-profile-list`에서 목적에 맞는 profile을 선택하고, `TUNNEL_DEFAULT_PROFILE_STALE`이면 profile 변경 원인을 확인합니다. `MCP_SKILL_ENTRYPOINT_MISMATCH`는 profile이 다른 checkout/설치본을 가리킨다는 뜻이므로 현재 설치본용 profile이 따로 필요합니다. 이 진단 단계는 credential을 읽거나 prompt/repository를 전송하지 않습니다.
 
+### 실패했을 때 어떤 보고를 받나요?
+
+Codex는 정제된 오류와 변경 없는 `diagnostic-status` 관찰을 사용해 다음 일곱 항목을 모두 알려야 합니다.
+
+1. 실패한 단계와 작업
+2. 기대한 결과와 실제 관찰
+3. 정제된 오류 코드와 설명
+4. 전송·승인·저장소 변경 여부
+5. 현재 package/Tunnel 상태
+6. 자동 재시도 가능 여부
+7. 사용자가 해야 할 다음 조치
+
+예를 들어 lifecycle commit이 중단된 package라면 다음처럼 보고합니다.
+
+```text
+1. 실패한 단계와 작업: verify에서 package 확인이 중단됨.
+2. 기대/실제: verified 결과를 기대했지만 observation-only 결과는 partial.
+3. 오류: PACKAGE_LIFECYCLE_PENDING — recovery가 필요한 journal이 관찰됨(확인된 원인).
+4. 영향: prompt 전송과 tracked worktree 변경은 현재 증거로 확인 불가. 진단 명령 자체는 state/receipt/runtime를 변경하지 않음.
+5. 상태: package=partial, Tunnel evidence=unavailable, mutations_performed=false.
+6. 자동 재시도: 불가. 모호한 전송이나 lifecycle 작업을 반복하지 않음.
+7. 다음 조치: Codex가 별도 package-first recovery 범위를 제시하게 함. 새 전송 승인은 아직 불필요함.
+```
+
+“전송하지 않음”, “승인되지 않음”, “저장소가 깨끗함” 같은 문장은 receipt, state 또는 전후 Git 증거가 있을 때만 확정됩니다. 저장소 영향은 tracked worktree, `.gptpro` 산출물, `.git/info` 같은 Git local metadata를 따로 구분합니다. 로그인·workspace·app·모델·OAuth·Send 화면 확인은 실패로 과장하지 않고 “진행 중단, 사람 확인 필요”로 표시합니다. 상세 형식과 retry 판정은 [Failure reporting](failure-reporting.md)을 따르세요.
+
 ## 보안 체크리스트
 
 상담 전에:
@@ -688,6 +714,8 @@ python3 <skill-dir>/scripts/gptpro.py prepare \
 
 python3 <skill-dir>/scripts/gptpro.py verify --handoff-dir <dir>
 python3 <skill-dir>/scripts/gptpro.py status --handoff-dir <dir> --json
+python3 <skill-dir>/scripts/gptpro.py --error-format json diagnostic-status \
+  --handoff-dir <dir>
 
 # Web MCP 새 작업/재시작: 기존 profile을 비밀정보 없이 재사용
 python3 <skill-dir>/scripts/gptpro.py preflight \

@@ -91,7 +91,10 @@ from runtime.gptpro_mcp.protocol_trace import (
 from runtime.gptpro_mcp.runtime_state import (
     RuntimeStateError,
     RuntimeStateStore,
+    default_runtime_root,
     fsync_directory,
+    observe_controller_lease,
+    observe_runtime_state,
     open_private_regular,
 )
 from runtime.gptpro_mcp.sensitive import (
@@ -257,7 +260,35 @@ SENSITIVE_NAME_PATTERNS = (
 )
 
 class HandoffError(Exception):
-    """Expected, user-actionable workflow error."""
+    """Expected, user-actionable workflow error with optional stable metadata."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        automatic_retry_allowed: bool = False,
+        recovery: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.automatic_retry_allowed = automatic_retry_allowed
+        self.recovery = recovery
+
+
+class JsonArgumentError(Exception):
+    """Internal signal used to preserve argparse text behavior outside JSON mode."""
+
+
+_JSON_ARGUMENT_ERRORS_ACTIVE = False
+
+
+class GptproArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        if _JSON_ARGUMENT_ERRORS_ACTIVE:
+            raise JsonArgumentError(message)
+        super().error(message)
 
 
 def validate_json_tree(value: Any, *, label: str) -> None:
@@ -5719,7 +5750,12 @@ def checked_schema3_handoff(path_arg: str, *, phase: str | None = None) -> tuple
 
 def runtime_failure(exc: RuntimeStateError | ToolError) -> HandoffError:
     message = getattr(exc, "message", "The MCP runtime operation failed.")
-    return HandoffError(f"{exc.code}: {message}")
+    return HandoffError(
+        f"{exc.code}: {message}",
+        code=exc.code,
+        automatic_retry_allowed=bool(getattr(exc, "retryable", False)),
+        recovery=getattr(exc, "recovery", None),
+    )
 
 
 def mcp_activation_preflight(
@@ -8469,6 +8505,146 @@ def command_status(args: argparse.Namespace) -> int:
             "closed": summary.closed,
             "bytes_used": summary.bytes_used,
         }
+    print(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False))
+    return 0
+
+
+def _diagnostic_package_summary(
+    handoff_dir_arg: str | None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    summary: dict[str, Any] = {
+        "availability": "not_provided" if handoff_dir_arg is None else "unavailable",
+        "code": None,
+        "package_id": None,
+        "phase": None,
+        "transport": None,
+        "approval": "unknown",
+        "submission": "unknown",
+    }
+    if handoff_dir_arg is None:
+        return summary, None
+    handoff_dir: Path | None = None
+    try:
+        handoff_dir = validate_handoff_dir(handoff_dir_arg)
+        verified = verify_package(handoff_dir, recover_lifecycle=False)
+    except HandoffError as exc:
+        code, _ = _handoff_error_parts(exc, "diagnostic-status")
+        summary["code"] = code
+        if handoff_dir is not None and all(
+            (handoff_dir / name).is_file()
+            for name in ("manifest.json", "state.json", "receipt.json")
+        ):
+            summary["availability"] = "partial"
+        return summary, None
+
+    manifest = verified["manifest"]
+    state = verified["state"]
+    summary.update(
+        {
+            "availability": "verified",
+            "package_id": manifest["package_id"],
+            "phase": state["phase"],
+            "transport": manifest["transport"]["resolved"],
+            "approval": "recorded" if isinstance(state.get("approval"), dict) else "not_recorded",
+            "submission": "recorded" if isinstance(state.get("submission"), dict) else "not_recorded",
+        }
+    )
+    if summary["approval"] == "recorded" and is_mcp_schema(int(manifest["schema_version"])):
+        expires = parse_utc_timestamp(
+            manifest["mcp_disclosure"]["approval_valid_until"],
+            label="MCP approval expiry",
+        )
+        if datetime.now(timezone.utc) >= expires:
+            summary["approval"] = "expired"
+    return summary, verified
+
+
+def _diagnostic_ttl_elapsed(runtime_state: dict[str, Any]) -> bool | None:
+    if runtime_state.get("status") not in {"activating", "active", "revoking"}:
+        return None
+    try:
+        activated, expires, last_activity = _mcp_monotonic_bounds(runtime_state)
+        monotonic_now = time.monotonic()
+        if monotonic_now < activated or monotonic_now < last_activity:
+            return None
+        wall_elapsed = datetime.now(timezone.utc) >= parse_utc_timestamp(
+            runtime_state.get("expires_at"), label="MCP runtime expiry"
+        )
+        return bool(
+            wall_elapsed
+            or monotonic_now >= expires
+            or monotonic_now >= last_activity + int(runtime_state["idle_ttl_seconds"])
+        )
+    except (HandoffError, KeyError, TypeError, ValueError):
+        return None
+
+
+def command_diagnostic_status(args: argparse.Namespace) -> int:
+    """Emit a mutation-free diagnostic snapshot; never recover or expire state."""
+
+    package, verified = _diagnostic_package_summary(args.handoff_dir)
+    applicable: bool | None = None
+    if verified is not None:
+        applicable = is_mcp_schema(int(verified["schema_version"]))
+    tunnel: dict[str, Any] = {
+        "applicable": applicable,
+        "recorded_status": "absent",
+        "package_binding": "not_applicable" if applicable is False else "unknown",
+        "controller_lease": "absent",
+        "ttl_elapsed": None,
+        "evidence_quality": "unavailable",
+    }
+    runtime_state: dict[str, Any] | None = None
+    try:
+        runtime_root = default_runtime_root()
+        root_existed = runtime_root.exists()
+        first = observe_runtime_state(runtime_root)
+        second = observe_runtime_state(runtime_root)
+        if first != second:
+            tunnel["recorded_status"] = "unknown"
+            tunnel["controller_lease"] = "unavailable"
+            tunnel["evidence_quality"] = "partial"
+        else:
+            runtime_state = first
+            tunnel["evidence_quality"] = "verified" if root_existed else "unavailable"
+    except RuntimeStateError:
+        tunnel["recorded_status"] = "unknown"
+        tunnel["controller_lease"] = "unavailable"
+        tunnel["evidence_quality"] = "unavailable"
+
+    if runtime_state is not None:
+        tunnel["recorded_status"] = str(runtime_state.get("status", "unknown"))
+        tunnel["ttl_elapsed"] = _diagnostic_ttl_elapsed(runtime_state)
+        session_hash = runtime_state.get("session_id_sha256")
+        try:
+            tunnel["controller_lease"] = observe_controller_lease(runtime_root, session_hash)
+        except RuntimeStateError:
+            tunnel["controller_lease"] = "unavailable"
+            tunnel["evidence_quality"] = "partial"
+        if verified is not None and applicable is True:
+            package_session = verified["state"].get("mcp_session")
+            bindings_match = (
+                runtime_state.get("package_id") == verified["manifest"]["package_id"]
+                and runtime_state.get("manifest_sha256") == verified["manifest_sha256"]
+                and (
+                    not isinstance(package_session, dict)
+                    or runtime_state.get("session_id_sha256")
+                    == package_session.get("session_id_sha256")
+                )
+            )
+            tunnel["package_binding"] = "same_package" if bindings_match else "different_package"
+    elif applicable is False:
+        tunnel["package_binding"] = "not_applicable"
+
+    payload = {
+        "ok": True,
+        "operation": "diagnostic-status",
+        "observation_only": True,
+        "observed_at": utc_now(),
+        "package": package,
+        "tunnel": tunnel,
+        "mutations_performed": False,
+    }
     print(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False))
     return 0
 
@@ -11627,7 +11803,13 @@ def nonnegative_int(raw: str) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = GptproArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--error-format",
+        choices=("text", "json"),
+        default="text",
+        help="Render failures as existing text or a sanitized JSON error envelope",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     initializer = subparsers.add_parser(
@@ -11772,6 +11954,13 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "status":
             command.add_argument("--json", action="store_true", help="Compatibility flag; output is always JSON")
         command.set_defaults(func=func)
+
+    diagnostic_status = subparsers.add_parser(
+        "diagnostic-status",
+        help="Observe package and Tunnel state without recovery, expiry, locks, or writes",
+    )
+    diagnostic_status.add_argument("--handoff-dir")
+    diagnostic_status.set_defaults(func=command_diagnostic_status)
 
     response_monitor_plan = subparsers.add_parser(
         "response-monitor-plan",
@@ -12110,12 +12299,110 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_STABLE_ERROR_PREFIX = re.compile(r"^([A-Z][A-Z0-9_]{1,63}):\s*(.*)$", re.DOTALL)
+
+
+def _requested_error_format(argv: list[str]) -> str:
+    for index, value in enumerate(argv):
+        if value == "--error-format" and index + 1 < len(argv):
+            return "json" if argv[index + 1] == "json" else "text"
+        if value.startswith("--error-format="):
+            return "json" if value.partition("=")[2] == "json" else "text"
+    return "text"
+
+
+def _operation_from_argv(argv: list[str]) -> str:
+    skip_next = False
+    for value in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if value == "--error-format":
+            skip_next = True
+            continue
+        if value.startswith("--error-format=") or value.startswith("-"):
+            continue
+        if re.fullmatch(r"[a-z][a-z0-9-]{0,63}", value):
+            return value
+        return "unknown"
+    return "unknown"
+
+
+def _fallback_error_code(operation: str) -> str:
+    normalized = re.sub(r"[^A-Z0-9]+", "_", operation.upper()).strip("_") or "COMMAND"
+    return f"GPTPRO_{normalized}_FAILED"
+
+
+def _sanitize_error_text(value: str) -> str:
+    sanitized = str(value)
+    for _, pattern in SECRET_PATTERNS:
+        sanitized = pattern.sub("[REDACTED]", sanitized)
+    for name in _GIT_SECRET_ENV_NAMES.get():
+        secret = os.environ.get(name)
+        if secret:
+            sanitized = sanitized.replace(secret, "[REDACTED]")
+    sanitized = " ".join(sanitized.split())
+    return sanitized[:2000] or "The operation failed without a safe diagnostic message."
+
+
+def _handoff_error_parts(exc: HandoffError, operation: str) -> tuple[str, str]:
+    raw = exc.message
+    match = _STABLE_ERROR_PREFIX.fullmatch(raw)
+    code = exc.code or (match.group(1) if match else None) or _fallback_error_code(operation)
+    message = match.group(2) if match else raw
+    return code, _sanitize_error_text(message)
+
+
+def _emit_json_error(
+    *,
+    operation: str,
+    exit_code: int,
+    code: str,
+    message: str,
+    automatic_retry_allowed: bool,
+    recovery: str,
+) -> None:
+    payload = {
+        "ok": False,
+        "operation": operation,
+        "exit_code": exit_code,
+        "error": {
+            "code": code,
+            "message": _sanitize_error_text(message),
+            "automatic_retry_allowed": bool(automatic_retry_allowed),
+            "recovery": _sanitize_error_text(recovery),
+            "sanitized": True,
+        },
+    }
+    print(json.dumps(payload, sort_keys=True, ensure_ascii=False), file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    error_format = _requested_error_format(raw_argv)
+    operation = _operation_from_argv(raw_argv)
+    global _JSON_ARGUMENT_ERRORS_ACTIVE
+    _JSON_ARGUMENT_ERRORS_ACTIVE = error_format == "json"
+    try:
+        parser = build_parser()
+        args = parser.parse_args(raw_argv)
+    except JsonArgumentError as exc:
+        _emit_json_error(
+            operation=operation,
+            exit_code=2,
+            code="GPTPRO_ARGUMENT_ERROR",
+            message=str(exc),
+            automatic_retry_allowed=False,
+            recovery="Correct the command arguments and run the intended operation again.",
+        )
+        return 2
+    finally:
+        _JSON_ARGUMENT_ERRORS_ACTIVE = False
+    error_format = "json" if args.command == "diagnostic-status" else args.error_format
+    operation = args.command
     secret_env_names = frozenset(
         reference.removeprefix("env:")
-        for attribute in ("tunnel_id_ref", "tunnel_api_key_ref")
+        for attribute in ("tunnel_id_ref", "tunnel_api_key_ref", "runtime_api_key_ref")
         if isinstance((reference := getattr(args, attribute, None)), str)
         and reference.startswith("env:")
         and reference != "env:"
@@ -12124,8 +12411,48 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return int(args.func(args))
     except HandoffError as exc:
+        if error_format == "json":
+            code, message = _handoff_error_parts(exc, operation)
+            _emit_json_error(
+                operation=operation,
+                exit_code=2,
+                code=code,
+                message=message,
+                automatic_retry_allowed=exc.automatic_retry_allowed,
+                recovery=exc.recovery
+                or "Inspect diagnostic-status and correct the reported package or runtime condition.",
+            )
+            return 2
         print(f"Error: {exc}", file=sys.stderr)
         return 2
+    except (ToolError, RuntimeStateError) as exc:
+        if error_format != "json":
+            raise
+        _emit_json_error(
+            operation=operation,
+            exit_code=2,
+            code=exc.code,
+            message=getattr(exc, "message", "The runtime operation failed."),
+            automatic_retry_allowed=bool(getattr(exc, "retryable", False)),
+            recovery=getattr(
+                exc,
+                "recovery",
+                "Inspect diagnostic-status and correct the reported runtime condition.",
+            ),
+        )
+        return 2
+    except Exception:
+        if error_format != "json":
+            raise
+        _emit_json_error(
+            operation=operation,
+            exit_code=3,
+            code="GPTPRO_INTERNAL_ERROR",
+            message="An unexpected internal error prevented the operation from completing.",
+            automatic_retry_allowed=False,
+            recovery="Run diagnostic-status, preserve the sanitized output, and inspect the local Skill installation before retrying.",
+        )
+        return 3
     finally:
         _GIT_SECRET_ENV_NAMES.reset(token)
 
