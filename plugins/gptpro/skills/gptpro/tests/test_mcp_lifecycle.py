@@ -49,6 +49,7 @@ from runtime.gptpro_mcp.runtime_state import (
 )
 from runtime.gptpro_mcp.schema import DEFAULT_LIMITS, PROTOCOL_PROFILE, tool_schema_sha256
 from runtime.gptpro_mcp.supervisor import ForegroundSupervisor, request_cooperative_stop
+from runtime.gptpro_mcp import tunnel_client as tunnel_client_module
 from runtime.gptpro_mcp.tunnel_client import (
     ProfileControllerLease,
     TunnelCapabilities,
@@ -62,6 +63,7 @@ from runtime.gptpro_mcp.tunnel_client import (
     prepare_runtime_files,
     runtime_key_environment,
     tunnel_binding_from_reference,
+    tunnel_binding_from_profile,
     validate_control_plane_base_url,
     validate_loopback_base_url,
     validate_unix_health_base_url,
@@ -1551,6 +1553,66 @@ else:
                 profile_dir=profile_dir,
             )
         self.assertEqual("TUNNEL_PROFILE_UNSAFE", raised.exception.code)
+
+    def test_profile_binding_is_secretless_package_specific_and_detects_late_change(self) -> None:
+        profile_dir = self.root / "binding-profiles"
+        profile = self.write_profile("binding-profile", directory=profile_dir)
+        inspection = inspect_tunnel_profile(
+            "binding-profile",
+            env=self.env,
+            mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+            profile_dir=profile_dir,
+        )
+        package = "binding-package"
+        bound = tunnel_binding_from_profile(
+            package,
+            "binding-profile",
+            expected_profile_sha256=inspection.profile_sha256,
+            env=self.env,
+            mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+            profile_dir=profile_dir,
+        )
+        self.assertEqual(inspection.profile_sha256, bound.profile_sha256)
+        self.assertEqual(
+            tunnel_binding_from_reference(
+                package,
+                "env:FAKE_TUNNEL_ID",
+                environ=self.env,
+            ),
+            bound.tunnel_id_binding_sha256,
+        )
+        self.assertNotIn(self.raw_tunnel, repr(bound))
+
+        original_snapshot = tunnel_client_module._profile_security_snapshot
+
+        def mutate_before_final_snapshot(*args, **kwargs):
+            profile.write_text(
+                profile.read_text(encoding="utf-8").replace(
+                    self.raw_tunnel,
+                    "tunnel_" + "b" * 32,
+                ),
+                encoding="utf-8",
+            )
+            profile.chmod(0o600)
+            return original_snapshot(*args, **kwargs)
+
+        with (
+            mock.patch.object(
+                tunnel_client_module,
+                "_profile_security_snapshot",
+                side_effect=mutate_before_final_snapshot,
+            ),
+            self.assertRaises(TunnelClientError) as changed,
+        ):
+            tunnel_binding_from_profile(
+                package,
+                "binding-profile",
+                expected_profile_sha256=inspection.profile_sha256,
+                env=self.env,
+                mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+                profile_dir=profile_dir,
+            )
+        self.assertEqual("TUNNEL_PROFILE_CHANGED", changed.exception.code)
 
     def test_profile_check_distinguishes_missing_profile_and_skill_root(self) -> None:
         missing_dir = self.root / "missing-profile"

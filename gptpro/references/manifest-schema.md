@@ -54,13 +54,13 @@ Schema 3 changes approval meaning, so a schema-2 approval is never reinterpreted
 Additional manifest fields bind:
 
 - `delivery.channel = browser` separately from `transport.resolved = mcp-read`;
-- `connector.type = secure-mcp-tunnel`, a safe runtime alias, visible app/workspace labels, protocol and tool-schema hashes, and a package-specific hash of the transient Tunnel ID;
+- `connector.type = secure-mcp-tunnel`, a safe exact profile alias, visible app/workspace labels, protocol and tool-schema hashes, and a package-specific Tunnel ID hash. New profile-derived packages also bind `tunnel_binding_source = verified-local-profile-v1` and the confirmed `tunnel_profile_sha256`; legacy transient-reference packages remain explicit and verifiable without that profile field;
 - `repository`: public display identity, Git SHA, packaged tree hash, and dirty summary without a local absolute root;
 - `mcp_disclosure`: exact path/size/file-hash allowlist, canonical file-set hash, potential file/byte totals, static three-tool list, bounded limits, approval expiry, and audit filename;
 - `hashes.approval_basis_sha256`: the canonical maximum-disclosure approval contract;
 - `hashes.manifest_basis_sha256`: a self-hash basis that excludes only its own two derived basis hashes.
 
-The raw Tunnel ID, its `env:` or `file:` reference, API keys, credentials, and absolute repository/file-list paths are not persisted in the manifest, package state, receipt, audit, or prompt. Schema-3 approval requires both `--confirm-transmission` and `--confirm-mcp-disclosure` and copies the approval basis into state and receipt.
+The raw Tunnel ID, its profile bytes, its `env:` or `file:` reference, API keys, credentials, and absolute repository/file-list paths are not persisted in the manifest, package state, receipt, audit, or prompt. For the preferred profile-derived path, preparation verifies the owner-only profile, derives the package-specific Tunnel binding internally, rereads the profile identity to detect drift, and stores only the source marker and profile hash. Approval binds those fields, and activation must observe the same profile hash. Schema-3 approval requires both `--confirm-transmission` and `--confirm-mcp-disclosure` and copies the approval basis into state and receipt.
 
 ## Schema 4 `mcp-research`
 

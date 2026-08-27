@@ -107,15 +107,20 @@ python3 scripts/gptpro.py response-monitor-plan --handoff-dir /path/to/repo/.gpt
 
 `response-monitor-plan` is read-only and requires a submitted package with an exact recorded `chatgpt.com` conversation URL. Codex uses its output with the app's same-task heartbeat capability, then records the returned automation identity. See [response completion monitor](references/response-monitor.md); the monitor repeats response collection only and never prompt submission.
 
-Schema-3 preparation requires transient Tunnel identity input plus visible app/workspace labels. The current official client contract is exactly `tunnel_[a-z0-9]{32}`; nonofficial legacy-shaped values fail before package creation. The raw Tunnel ID or its reference is not written to package artifacts:
+Schema-3/4 preparation normally reuses one existing verified owner-only Tunnel profile plus visible app/workspace labels. Run the secretless preflight first; it does not resolve credentials, execute `tunnel-client`, create a package, or disclose repository content. Copy the exact selected profile and hash into preparation. The raw Tunnel ID is read internally from that protected profile only long enough to derive the package-specific binding and is not returned or written to gptpro artifacts:
 
 ```bash
-export GPTPRO_TUNNEL_ID="tunnel_<value>"
+python3 scripts/gptpro.py preflight \
+  --repo /path/to/repo \
+  --transport mcp-read \
+  --json
+
 python3 scripts/gptpro.py prepare \
   --repo /path/to/repo \
   --mode architecture \
   --transport mcp-read \
-  --tunnel-id-ref env:GPTPRO_TUNNEL_ID \
+  --tunnel-profile <selected_profile> \
+  --confirm-tunnel-profile-sha256 <selected_profile_sha256> \
   --chatgpt-app-name "GPT Pro Repository Reader" \
   --chatgpt-workspace-label "Personal" \
   --include "src/**" \
@@ -131,7 +136,8 @@ python3 scripts/gptpro.py prepare \
   --repo /path/to/repo \
   --mode architecture \
   --transport mcp-research \
-  --tunnel-id-ref env:GPTPRO_TUNNEL_ID \
+  --tunnel-profile <selected_profile> \
+  --confirm-tunnel-profile-sha256 <selected_profile_sha256> \
   --chatgpt-app-name "GPT Pro Repository Research" \
   --chatgpt-workspace-label "Personal" \
   --include "src/**" \
@@ -146,6 +152,16 @@ python3 scripts/gptpro.py approve \
   --confirm-transmission \
   --confirm-mcp-disclosure \
   --confirm-analysis-ledger
+```
+
+If preflight reports more than one ready profile, inspect the bounded secretless list and choose one exact hash. After the user confirms that local preference, `mcp-profile-default` stores only the profile name and hash in the private profile directory; it stores no Tunnel ID or API key. A later profile edit makes the default stale and fails closed instead of silently changing destinations:
+
+```bash
+python3 scripts/gptpro.py mcp-profile-list --json
+python3 scripts/gptpro.py mcp-profile-default \
+  --tunnel-profile <selected_profile> \
+  --confirm-tunnel-profile-sha256 <selected_profile_sha256> \
+  --json
 ```
 
 The seven static tools are `gptpro_package_info`, `gptpro_workspace_map`, `gptpro_repo_read`, `gptpro_repo_search`, `gptpro_repo_diff`, `gptpro_artifact_read`, and `gptpro_analysis_status`. Every tool advertises `readOnlyHint: true`; no MCP tool exposes repository or application-state mutation, while owner-only audit/runtime bookkeeping records governed calls. A Schema 4 supplement shares the bounded evidence contract and is visible only through package info and artifact read, not repository search/read. Pro findings return through the visible Chat response and the established response-import workflow. See [repository research](references/mcp-research.md) for the separately approved `analysis-note-prepare` / `analysis-note-approve` context flow.
@@ -165,7 +181,7 @@ Install or build the official `tunnel-client` separately, then use the attended 
   "<skill-dir>/scripts/gptpro_mcp.py" serve
 ```
 
-`--tunnel-profile` is the exact filename stem (`<name>.yaml`), not an auto-discovered alias. A profile is bound to the absolute Skill root used at init: `TUNNEL_PROFILE_NOT_FOUND` requires attended init, while `MCP_SKILL_ENTRYPOINT_MISMATCH` means another checkout/installation needs a separately named attended profile; neither case permits `mcp-profile-refresh`.
+`--tunnel-profile` is always the exact filename stem (`<name>.yaml`), not a fuzzy alias. `preflight` examines only the bounded set of safe `*.yaml` names in the private standard profile directory: it chooses the exact current default, otherwise one sole ready profile, and fails on ambiguity. It never recursively scans the home directory. A profile is bound to the absolute Skill root used at init: `TUNNEL_PROFILE_NOT_FOUND` requires attended init, while `MCP_SKILL_ENTRYPOINT_MISMATCH` means another checkout/installation needs a separately named attended profile; neither case permits `mcp-profile-refresh`.
 
 Do not hand-edit that command. Isolated mode ignores user-site and `PYTHON*` configuration, `-S` suppresses `sitecustomize`, and the `/dev/null` pycache prefix prevents source-adjacent bytecode from replacing the hashed Skill source. The wrapper validates the narrow official init profile shape, owner-only profile path and bytes, canonical OpenAI endpoint, system-trust/no-proxy policy, single `main` command, and exact command hash before key-bearing `doctor` or `run`.
 
@@ -204,6 +220,12 @@ python3 scripts/gptpro.py mcp-profile-check \
   --tunnel-profile gptpro-web \
   --json
 
+# Routine new-task/restart path: no Tunnel ID or runtime key is resolved.
+python3 scripts/gptpro.py preflight \
+  --repo /path/to/repo \
+  --transport mcp-research \
+  --json
+
 # Run only after reviewing the check output and approving replacement of its
 # exact current profile hash. Other profile changes fail closed.
 python3 scripts/gptpro.py mcp-profile-refresh \
@@ -229,6 +251,7 @@ python3 scripts/gptpro.py mcp-activate \
 # Run status/stop from another terminal or controller.
 python3 scripts/gptpro.py mcp-status \
   --handoff-dir /path/to/repo/.gptpro/handoffs/<id> \
+  --summary \
   --json
 python3 scripts/gptpro.py mcp-stop \
   --handoff-dir /path/to/repo/.gptpro/handoffs/<id> \
@@ -257,7 +280,7 @@ python3 scripts/gptpro.py mcp-protocol-trace \
 
 For a dedicated investigation of repeated connector calls, first require `mcp-probe` to report `tunnel_client.request_correlation_contract_supported: true`, then explicitly add `--diagnose-request-correlation` to `mcp-activate`. This private diagnostic is pinned to the exact official `0.0.12+881c9a8...` build; other versions may still support normal `mcp-read` but cannot run this diagnostic. It verifies the admin Unix peer against the exact child PID, applies one total snapshot deadline, requires a contiguous exact event contract, and emits only session-scoped HMACs plus local group ordinals. The diagnostic does not print its stable internal join hashes, raw IDs, or payloads. The pre-existing owner-only disclosure audit does retain unkeyed JSON-RPC and argument hashes for integrity and joining; low-entropy values can be guessed locally, so keep that audit private. Terminal errors, an open or protocol-broken trace, late/count mismatches, zero-tool windows, or incomplete evidence are `inconclusive`; no call is deduplicated and no write tool is unlocked. Read [Request-correlation diagnostic](references/request-correlation.md) before using it.
 
-PATH discovery is probe-only. Key-bearing `mcp-profile-init`, `mcp-profile-refresh`, and `mcp-activate` require an explicit absolute `--tunnel-client` plus the exact `--confirm-tunnel-client-sha256` copied from the no-secret probe. `--profile-dir` is an explicit installation/test override; never point it at shared or untrusted state. All lifecycle commands use one canonical owner-only per-user runtime slot with no CLI root override, so a second root cannot create a second active authorization. Runtime state and receipts bind the validated profile SHA-256, Tunnel binary SHA-256, exact MCP target SHA-256, bundled MCP runtime-tree SHA-256, and package-local protocol-trace header. After exact-child termination, a normal active/revoked path uses `mcp_stopped`; a pre-active failure uses the distinct additive `mcp_activation_stopped` event and never fabricates the normal runtime-stop receipt or audit footer. The failed-activation receipt binds return code, forced-termination status, and final trace artifact identity; the normal package receipt keeps its existing final trace/audit contract while machine-global state records the observed return code and forced flag. If package integrity is unavailable, the package bytes remain untouched and only machine-global runtime state records the exact-child stop. Diagnostic `terminal_evidence` therefore reports `runtime_stop_observed`, `activation_failure_stop_observed`, `protocol_stream_closed`, `protocol_eof_observed`, `parent_shutdown_observed`, and `final_artifact_bound_to_stop_receipt` independently. The probe reports `parent_shutdown_contract_supported` separately; only the exact pinned Tunnel enables the compatibility flag. That Tunnel currently closes MCP stdin and sends `SIGTERM` together, so gptpro records the signal without doing I/O in the handler, then requires the ordinary read loop to observe EOF before writing `close_reason: parent_shutdown`. Other compatible Tunnel versions retain normal signal behavior. An honestly open final prefix is reported with a `*_protocol_eof_unobserved` status, never rewritten as `closed: true`.
+PATH discovery is probe-only. Key-bearing `mcp-profile-init`, `mcp-profile-refresh`, and `mcp-activate` require an explicit absolute `--tunnel-client` plus the exact `--confirm-tunnel-client-sha256` copied from the no-secret probe. Routine `preflight`, profile listing/default selection, and profile-derived `prepare` do not execute the client or resolve the runtime key; only init/refresh and the explicit legacy transient-ID preparation path require a Tunnel ID reference. `--profile-dir` is an explicit installation/test override; never point it at shared or untrusted state. All lifecycle commands use one canonical owner-only per-user runtime slot with no CLI root override, so a second root cannot create a second active authorization. Runtime state and receipts bind the validated profile SHA-256, Tunnel binary SHA-256, exact MCP target SHA-256, bundled MCP runtime-tree SHA-256, and package-local protocol-trace header. After exact-child termination, a normal active/revoked path uses `mcp_stopped`; a pre-active failure uses the distinct additive `mcp_activation_stopped` event and never fabricates the normal runtime-stop receipt or audit footer. The failed-activation receipt binds return code, forced-termination status, and final trace artifact identity; the normal package receipt keeps its existing final trace/audit contract while machine-global state records the observed return code and forced flag. If package integrity is unavailable, the package bytes remain untouched and only machine-global runtime state records the exact-child stop. Diagnostic `terminal_evidence` therefore reports `runtime_stop_observed`, `activation_failure_stop_observed`, `protocol_stream_closed`, `protocol_eof_observed`, `parent_shutdown_observed`, and `final_artifact_bound_to_stop_receipt` independently. The probe reports `parent_shutdown_contract_supported` separately; only the exact pinned Tunnel enables the compatibility flag. That Tunnel currently closes MCP stdin and sends `SIGTERM` together, so gptpro records the signal without doing I/O in the handler, then requires the ordinary read loop to observe EOF before writing `close_reason: parent_shutdown`. Other compatible Tunnel versions retain normal signal behavior. An honestly open final prefix is reported with a `*_protocol_eof_unobserved` status, never rewritten as `closed: true`.
 
 Lifecycle JSON separates `authorization_denied`, `authorization_status`, and `revocation_receipt_recorded`. The compatibility field `authorization_revoked` is true only when the status is `revoked` and one verified package-scoped `mcp_revoked` receipt exists. Emergency `faulted` denial remains safe but is not described as successful revocation. Likewise, `cooperative_stop_requested` reports only the local socket acknowledgement; `tunnel_runtime_stopped` requires durable package or machine-global exact-child evidence and is checked even if that acknowledgement was lost. If a concurrent new activation has archived the stopped session and replaced `active.json`, the stop command accepts only that exact session/handoff's owner-only validated terminal archive rather than reporting a false process uncertainty.
 

@@ -26,6 +26,11 @@ ChatGPT may render a large direct paste as a visible **pasted text** item instea
 ## Larger or exploratory document: Schema 4 research
 
 ```bash
+python3 <skill-dir>/scripts/gptpro.py preflight \
+  --repo "$PWD" \
+  --transport mcp-research \
+  --json
+
 python3 <skill-dir>/scripts/gptpro.py prepare \
   --repo "$PWD" \
   --mode architecture \
@@ -33,7 +38,8 @@ python3 <skill-dir>/scripts/gptpro.py prepare \
   --include "src/**" \
   --include "tests/**" \
   --supplement specification=/absolute/private/specification.md \
-  --tunnel-id-ref env:GPTPRO_TUNNEL_ID \
+  --tunnel-profile <selected_profile> \
+  --confirm-tunnel-profile-sha256 <selected_profile_sha256> \
   --chatgpt-app-name "GPT Pro Repository Research" \
   --chatgpt-workspace-label "Personal" \
   --task "Compare the repository with the approved supplemental specification."

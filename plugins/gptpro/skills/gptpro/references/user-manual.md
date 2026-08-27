@@ -465,9 +465,9 @@ Pro의 분석·질문·제안은 MCP write가 아니라 보이는 Chat 응답으
 
 ### 사용 흐름
 
-1. 사용자가 OpenAI에서 사용할 Tunnel과 runtime key를 준비합니다.
+1. 첫 사용 때 사용자가 OpenAI에서 사용할 Tunnel과 runtime key를 준비하고, 현재 설치본용 owner-only profile을 만듭니다.
 2. ChatGPT에서 Developer Mode를 켜고 Tunnel 방식의 MCP 연결을 만듭니다.
-3. Codex가 `mcp-read` 또는 `mcp-research` 패키지를 최소 파일 범위로 준비합니다.
+3. 이후 새 Codex 작업에서는 Codex가 secretless `preflight`로 기존 profile의 이름/hash만 확인한 뒤 `mcp-read` 또는 `mcp-research` 패키지를 최소 파일 범위로 준비합니다. Tunnel ID를 다시 입력할 필요는 없습니다.
 4. 사용자가 prompt와 최대 MCP 공개 범위를 함께 승인합니다. Research라면 evidence/diff와 읽기 전용 context-note 정책도 확인합니다.
 5. Codex가 secretless probe와 profile 검사를 실행합니다.
 6. 사용자가 표시된 앱·workspace가 맞는지 확인합니다.
@@ -486,6 +486,8 @@ Pro의 분석·질문·제안은 MCP write가 아니라 보이는 Chat 응답으
 - 현재 공식 Tunnel ID 형식은 정확히 `tunnel_[a-z0-9]{32}`이며, 그 밖의 구형·합성 형식은 package 생성 전에 거부됩니다.
 - key는 지원되는 `env:NAME` 또는 권한 `0600`인 절대 `file:` reference로 전달합니다.
 - `~/.openai-tunnel-api-key` 같은 파일의 값을 다른 파일에 복사해 저장하지 않습니다.
+- Codex 재시작 뒤에도 owner-only Tunnel profile은 남습니다. `preflight`는 정확한 profile 이름/hash만 확인하며 key를 읽거나 Tunnel client를 실행하지 않습니다.
+- ready profile이 하나면 자동 선택하고, 여러 개면 `mcp-profile-list` 결과에서 정확히 고릅니다. 선택을 기본값으로 저장할 때도 profile 이름/hash만 저장합니다. profile이 바뀌면 기본값은 stale로 거부됩니다.
 - Python/Homebrew 업데이트 후 interpreter 경로만 바뀌면 `mcp-profile-check`가 drift를 감지합니다.
 - profile은 자동으로 수정하지 않습니다. 현재 profile hash를 검토하고 별도 승인한 뒤, interpreter-path-only refresh만 수행합니다.
 - Tunnel client binary hash 일치는 실행 중 drift 방지 증거이지, publisher 서명이나 공급망 검증을 대신하지 않습니다.
@@ -632,6 +634,10 @@ Developer Mode는 ChatGPT 설정 기능이며 브라우저 설정이 아닙니�
 
 `mcp-profile-check`로 먼저 원인을 분류합니다. 오직 `MCP_INTERPRETER_PATH_DRIFT`만 기존 profile의 안전한 in-place refresh 대상입니다. Tunnel, endpoint, command option 또는 Skill root가 바뀌었다면 refresh로 덮지 말고 별도의 profile 초기화가 필요합니다.
 
+### Codex를 재시작했더니 Tunnel profile을 다시 요구합니다
+
+먼저 새 Tunnel을 만들거나 ID를 다시 복사하지 마세요. Codex가 설치된 gptpro의 `preflight --repo <repo> --transport mcp-research --json`을 실행해야 합니다. `ready_for_prepare: true`이면 출력된 exact profile/hash로 새 package를 준비합니다. `TUNNEL_PROFILE_AMBIGUOUS`이면 bounded `mcp-profile-list`에서 목적에 맞는 profile을 선택하고, `TUNNEL_DEFAULT_PROFILE_STALE`이면 profile 변경 원인을 확인합니다. `MCP_SKILL_ENTRYPOINT_MISMATCH`는 profile이 다른 checkout/설치본을 가리킨다는 뜻이므로 현재 설치본용 profile이 따로 필요합니다. 이 진단 단계는 credential을 읽거나 prompt/repository를 전송하지 않습니다.
+
 ## 보안 체크리스트
 
 상담 전에:
@@ -682,6 +688,12 @@ python3 <skill-dir>/scripts/gptpro.py prepare \
 
 python3 <skill-dir>/scripts/gptpro.py verify --handoff-dir <dir>
 python3 <skill-dir>/scripts/gptpro.py status --handoff-dir <dir> --json
+
+# Web MCP 새 작업/재시작: 기존 profile을 비밀정보 없이 재사용
+python3 <skill-dir>/scripts/gptpro.py preflight \
+  --repo "$PWD" \
+  --transport mcp-research \
+  --json
 
 # 화면에 표시된 package-specific 범위를 승인받은 뒤에만 실행
 python3 <skill-dir>/scripts/gptpro.py approve \

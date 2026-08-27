@@ -213,6 +213,24 @@ class WebMcpRuntimeTests(unittest.TestCase):
         self.assertEqual("ACTIVE_ANNOUNCEMENT_UNAVAILABLE", raised.exception.code)
         self.assertLess(elapsed, 0.5)
 
+    def test_status_summary_omits_trace_rows_but_preserves_integrity_fields(self) -> None:
+        summarized = self.module.summarize_protocol_trace_payload(
+            {
+                "valid": True,
+                "closed": True,
+                "head_sha256": "1" * 64,
+                "events": [
+                    {"sequence": 1, "stage": "decision"},
+                    {"sequence": 2, "stage": "response"},
+                ],
+            }
+        )
+        self.assertNotIn("events", summarized)
+        self.assertEqual(2, summarized["events_omitted"])
+        self.assertTrue(summarized["valid"])
+        self.assertTrue(summarized["closed"])
+        self.assertEqual("1" * 64, summarized["head_sha256"])
+
     def preflight(self, handoff: Path) -> tuple[dict, dict]:
         verified = self.module.verify_package(handoff)
         preflight = self.module.mcp_activation_preflight(
@@ -1268,7 +1286,10 @@ class WebMcpRuntimeTests(unittest.TestCase):
         for command in (
             "mcp-probe",
             "mcp-profile-check",
+            "mcp-profile-list",
+            "mcp-profile-default",
             "mcp-profile-refresh",
+            "preflight",
             "mcp-activate",
             "mcp-status",
             "mcp-stop",
