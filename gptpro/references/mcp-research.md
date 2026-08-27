@@ -41,7 +41,10 @@ The static catalog is also the execution allowlist. After a session is normally 
 Use the narrowest useful repository selection. Evidence and supplemental documents must be explicit current-owner, single-link, non-group/world-writable UTF-8 regular files and are secret-scanned before packaging. Secure capture requires supported POSIX current-user and descriptor-relative/no-follow file-open capabilities; symlinks, hard links, FIFOs and other non-regular files fail closed. A supplement is an evidence artifact with an additional purpose label; it does not enter repository read/search paths.
 
 ```bash
-export GPTPRO_TUNNEL_ID='tunnel_<value>'
+python3 <skill-dir>/scripts/gptpro.py preflight \
+  --repo /absolute/path/to/repo \
+  --transport mcp-research \
+  --json
 
 python3 <skill-dir>/scripts/gptpro.py prepare \
   --repo /absolute/path/to/repo \
@@ -51,8 +54,8 @@ python3 <skill-dir>/scripts/gptpro.py prepare \
   --include 'tests/**' \
   --evidence-file unit-tests=/absolute/path/to/test-output.txt \
   --supplement requirements=/absolute/path/to/requirements.md \
-  --tunnel-runtime-alias gptpro-web \
-  --tunnel-id-ref env:GPTPRO_TUNNEL_ID \
+  --tunnel-profile <selected_profile> \
+  --confirm-tunnel-profile-sha256 <selected_profile_sha256> \
   --chatgpt-app-name 'GPT Pro Repository Research' \
   --chatgpt-workspace-label 'Approved Workspace' \
   --task 'Analyze the approved implementation, tests, and prepared diff.'

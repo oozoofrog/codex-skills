@@ -104,13 +104,18 @@ from runtime.gptpro_mcp.supervisor import (
     request_cooperative_stop,
 )
 from runtime.gptpro_mcp.tunnel_client import (
+    DefaultTunnelProfile,
     ProfileControllerLease,
     TunnelCapabilities,
     TunnelClient,
     TunnelClientError,
     bundled_mcp_target_sha256,
     inspect_tunnel_profile,
+    list_tunnel_profile_names,
+    read_default_tunnel_profile,
     runtime_key_environment,
+    tunnel_binding_from_profile,
+    write_default_tunnel_profile,
 )
 
 SCHEMA_V2 = 2
@@ -3230,6 +3235,9 @@ def create_package(args: argparse.Namespace) -> int:
     mcp_limits: dict[str, int] | None = None
     approval_valid_until: str | None = None
     tunnel_id: str | None = None
+    tunnel_id_binding: str | None = None
+    tunnel_profile_sha256: str | None = None
+    tunnel_binding_source: str | None = None
     repository_identity: str | None = None
     research: dict[str, Any] | None = None
     research_members: dict[str, bytes] = {
@@ -3365,7 +3373,50 @@ def create_package(args: argparse.Namespace) -> int:
             raise HandoffError(f"Unsupported resolved transport: {resolved_transport}")
         if args.delivery_channel != "browser":
             raise HandoffError("Web MCP requires --delivery-channel browser")
-        alias = args.tunnel_runtime_alias.strip()
+        explicit_profile = (args.tunnel_profile or "").strip()
+        legacy_alias = (args.tunnel_runtime_alias or "").strip()
+        if explicit_profile:
+            if args.tunnel_id_ref:
+                raise HandoffError(
+                    "--tunnel-profile cannot be combined with the legacy --tunnel-id-ref path"
+                )
+            if legacy_alias:
+                raise HandoffError(
+                    "--tunnel-profile cannot be combined with --tunnel-runtime-alias"
+                )
+            if not args.confirm_tunnel_profile_sha256:
+                raise HandoffError(
+                    "--tunnel-profile requires --confirm-tunnel-profile-sha256 from a secretless profile check"
+                )
+            try:
+                profile_binding = tunnel_binding_from_profile(
+                    package_id,
+                    explicit_profile,
+                    expected_profile_sha256=args.confirm_tunnel_profile_sha256,
+                    env=os.environ,
+                    mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+                    profile_dir=tunnel_profile_dir_for(args),
+                )
+            except TunnelClientError as exc:
+                raise HandoffError(f"{exc.code}: {exc.message}") from exc
+            alias = explicit_profile
+            tunnel_id_binding = profile_binding.tunnel_id_binding_sha256
+            tunnel_profile_sha256 = profile_binding.profile_sha256
+            tunnel_binding_source = "verified-local-profile-v1"
+        else:
+            alias = legacy_alias or "gptpro-web"
+            if args.confirm_tunnel_profile_sha256:
+                raise HandoffError(
+                    "--confirm-tunnel-profile-sha256 requires --tunnel-profile"
+                )
+            if not args.tunnel_id_ref:
+                raise HandoffError(
+                    "Web MCP requires --tunnel-profile with its confirmed hash, or legacy "
+                    "--tunnel-id-ref env:NAME/file:/absolute/path"
+                )
+            tunnel_id = read_tunnel_id_reference(args.tunnel_id_ref)
+            tunnel_id_binding = tunnel_binding_sha256(package_id, tunnel_id)
+            tunnel_binding_source = "transient-reference-v1"
         app_name = (args.chatgpt_app_name or "").strip()
         workspace_label = (args.chatgpt_workspace_label or "").strip()
         if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", alias) is None:
@@ -3373,9 +3424,6 @@ def create_package(args: argparse.Namespace) -> int:
         for label, value in (("--chatgpt-app-name", app_name), ("--chatgpt-workspace-label", workspace_label)):
             if not value or len(value) > 128 or any(ord(character) < 32 for character in value):
                 raise HandoffError(f"{label} must be a non-empty single-line label of at most 128 characters")
-        if not args.tunnel_id_ref:
-            raise HandoffError("Web MCP requires --tunnel-id-ref env:NAME or file:/absolute/path")
-        tunnel_id = read_tunnel_id_reference(args.tunnel_id_ref)
         repository_identity = repository_display_identity(root)
         mcp_limits = mcp_limits_from_args(
             args,
@@ -3544,43 +3592,56 @@ def create_package(args: argparse.Namespace) -> int:
         "warnings": scan["warnings"],
     }
     if is_mcp_schema(schema_version):
-        assert tunnel_id is not None and repository_identity is not None
-        reject_tunnel_id_disclosure(
-            tunnel_id,
-            {
-                "task": task,
-                "requested_model": args.requested_model,
-                "git": public_git_identity(git),
-                "selection": public_selection(selection),
-                "selected_paths": [item.path for item in selected],
-                "selected_text": [item.content.decode("utf-8") for item in selected],
-                "research_members": {
-                    path: content.decode("utf-8")
-                    for path, content in research_members.items()
-                },
-                "scan_metadata": {
-                    "excluded": scan["excluded"],
-                    "omitted": scan["omitted"],
-                    "security": scan["security"],
-                    "warnings": scan["warnings"],
-                },
-                "connector_labels": {
-                    "runtime_alias": alias,
-                    "app_name": app_name,
-                    "workspace_label": workspace_label,
-                },
-                "repository_identity": repository_identity,
-                "prompt": prompt,
-                "internal_manifest": internal,
+        assert tunnel_id_binding is not None and repository_identity is not None
+        disclosure_candidate = {
+            "task": task,
+            "requested_model": args.requested_model,
+            "git": public_git_identity(git),
+            "selection": public_selection(selection),
+            "selected_paths": [item.path for item in selected],
+            "selected_text": [item.content.decode("utf-8") for item in selected],
+            "research_members": {
+                path: content.decode("utf-8")
+                for path, content in research_members.items()
             },
-            label=f"schema-{schema_version} package data",
-        )
+            "scan_metadata": {
+                "excluded": scan["excluded"],
+                "omitted": scan["omitted"],
+                "security": scan["security"],
+                "warnings": scan["warnings"],
+            },
+            "connector_labels": {
+                "runtime_alias": alias,
+                "app_name": app_name,
+                "workspace_label": workspace_label,
+            },
+            "repository_identity": repository_identity,
+            "prompt": prompt,
+            "internal_manifest": internal,
+        }
+        if tunnel_id is not None:
+            reject_tunnel_id_disclosure(
+                tunnel_id,
+                disclosure_candidate,
+                label=f"schema-{schema_version} package data",
+            )
+        else:
+            reject_secret_like_text(
+                canonical_json_bytes(disclosure_candidate).decode("utf-8"),
+                label=f"schema-{schema_version} package data",
+            )
         summary.update(
             {
                 "delivery_channel": "browser",
                 "connector_type": MCP_CONNECTOR_TYPE,
                 "tunnel_runtime_alias": alias,
-                "tunnel_id_binding_sha256": tunnel_binding_sha256(package_id, tunnel_id),
+                "tunnel_id_binding_sha256": tunnel_id_binding,
+                "tunnel_binding_source": tunnel_binding_source,
+                **(
+                    {"tunnel_profile_sha256": tunnel_profile_sha256}
+                    if tunnel_profile_sha256 is not None
+                    else {}
+                ),
                 "tool_schema_sha256": contract_for_schema(schema_version)["tool_schema_sha256"],
                 "approval_valid_until": approval_valid_until,
                 "mcp_limits": mcp_limits,
@@ -3778,7 +3839,13 @@ def create_package(args: argparse.Namespace) -> int:
                 "connector": {
                     "type": MCP_CONNECTOR_TYPE,
                     "tunnel_profile_alias": alias,
-                    "tunnel_id_binding_sha256": tunnel_binding_sha256(package_id, tunnel_id),
+                    "tunnel_id_binding_sha256": tunnel_id_binding,
+                    "tunnel_binding_source": tunnel_binding_source,
+                    **(
+                        {"tunnel_profile_sha256": tunnel_profile_sha256}
+                        if tunnel_profile_sha256 is not None
+                        else {}
+                    ),
                     "app_name": app_name,
                     "workspace_label": workspace_label,
                     "workspace_binding_required": True,
@@ -3823,8 +3890,15 @@ def create_package(args: argparse.Namespace) -> int:
         manifest["hashes"]["manifest_basis_sha256"] = sha256_bytes(
             canonical_json_bytes(mcp_manifest_basis(manifest))
         )
-        assert tunnel_id is not None
-        reject_tunnel_id_disclosure(tunnel_id, manifest, label=f"schema-{schema_version} manifest")
+        if tunnel_id is not None:
+            reject_tunnel_id_disclosure(
+                tunnel_id, manifest, label=f"schema-{schema_version} manifest"
+            )
+        else:
+            reject_secret_like_text(
+                canonical_json_bytes(manifest).decode("utf-8"),
+                label=f"schema-{schema_version} manifest",
+            )
     manifest_path = handoff_dir / "manifest.json"
     write_json(manifest_path, manifest)
     manifest_hash = sha256_file(manifest_path)
@@ -3997,6 +4071,18 @@ def verify_mcp_manifest_contract(manifest: dict[str, Any]) -> None:
     ):
         raise HandoffError("Schema-3 MCP connector contract is invalid or differs from this runtime")
     require_sha256(connector.get("tunnel_id_binding_sha256"), label="Tunnel ID binding")
+    binding_source = connector.get("tunnel_binding_source")
+    profile_hash = connector.get("tunnel_profile_sha256")
+    if binding_source is None:
+        if profile_hash is not None:
+            raise HandoffError("Legacy MCP connector cannot contain a Tunnel profile hash")
+    elif binding_source == "transient-reference-v1":
+        if profile_hash is not None:
+            raise HandoffError("Transient-reference MCP connector cannot contain a profile hash")
+    elif binding_source == "verified-local-profile-v1":
+        require_sha256(profile_hash, label="Approved Tunnel profile hash")
+    else:
+        raise HandoffError("Schema-3 MCP connector binding source is invalid")
     for label in ("app_name", "workspace_label"):
         value = connector.get(label)
         if not isinstance(value, str) or not value or len(value) > 128 or any(ord(char) < 32 for char in value):
@@ -4411,6 +4497,19 @@ def verify_package(
                 "delivery_channel": "browser",
                 "connector_type": MCP_CONNECTOR_TYPE,
                 "tunnel_id_binding_sha256": manifest["connector"]["tunnel_id_binding_sha256"],
+                **(
+                    {
+                        "tunnel_binding_source": manifest["connector"][
+                            "tunnel_binding_source"
+                        ],
+                        "tunnel_profile_sha256": manifest["connector"][
+                            "tunnel_profile_sha256"
+                        ],
+                    }
+                    if manifest["connector"].get("tunnel_binding_source")
+                    == "verified-local-profile-v1"
+                    else {}
+                ),
                 "tool_schema_sha256": manifest["connector"]["tool_schema_sha256"],
                 "protocol_profile": manifest["connector"]["protocol_profile"],
                 "file_set_sha256": manifest["mcp_disclosure"]["file_set_sha256"],
@@ -5679,6 +5778,12 @@ def mcp_activation_preflight(
         observed_tunnel_profile_sha256,
         label="Observed Tunnel profile hash",
     )
+    approved_profile_hash = connector.get("tunnel_profile_sha256")
+    if approved_profile_hash is not None and not secrets.compare_digest(
+        profile_hash,
+        require_sha256(approved_profile_hash, label="Approved Tunnel profile hash"),
+    ):
+        raise HandoffError("Tunnel profile changed after package preparation and approval")
     tunnel_binary_hash = require_sha256(
         observed_tunnel_client_binary_sha256,
         label="Observed Tunnel client binary hash",
@@ -8544,6 +8649,220 @@ def command_mcp_profile_check(args: argparse.Namespace) -> int:
     return 0 if payload["ok"] else 2
 
 
+def _tunnel_profile_inventory(
+    *,
+    profile_dir: Path | None,
+) -> tuple[list[dict[str, Any]], DefaultTunnelProfile | None]:
+    try:
+        names = list_tunnel_profile_names(env=os.environ, profile_dir=profile_dir)
+        default = read_default_tunnel_profile(env=os.environ, profile_dir=profile_dir)
+    except TunnelClientError as exc:
+        raise HandoffError(f"{exc.code}: {exc.message}") from exc
+    profiles: list[dict[str, Any]] = []
+    for name in names:
+        try:
+            inspection = inspect_tunnel_profile(
+                name,
+                env=os.environ,
+                mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+                profile_dir=profile_dir,
+            )
+            item = {
+                "name": name,
+                "ready": inspection.ready,
+                "code": inspection.code,
+                "refresh_required": inspection.refresh_required,
+                "safe_to_refresh": inspection.safe_to_refresh,
+                "reinit_required": inspection.reinit_required,
+                "profile_sha256": inspection.profile_sha256,
+                "profile_dir_sha256": inspection.profile_dir_sha256,
+                "entrypoint_matches": secrets.compare_digest(
+                    inspection.observed_mcp_command_sha256,
+                    inspection.expected_mcp_command_sha256,
+                ),
+            }
+        except TunnelClientError as exc:
+            item = {
+                "name": name,
+                "ready": False,
+                "code": exc.code,
+                "refresh_required": False,
+                "safe_to_refresh": False,
+                "reinit_required": exc.code in {
+                    "TUNNEL_PROFILE_NOT_FOUND",
+                    "MCP_SKILL_ENTRYPOINT_MISMATCH",
+                },
+                "profile_sha256": None,
+                "profile_dir_sha256": None,
+                "entrypoint_matches": False,
+            }
+        item["default"] = bool(
+            default is not None
+            and default.profile == name
+            and item["profile_sha256"] == default.profile_sha256
+        )
+        item["default_stale"] = bool(
+            default is not None
+            and default.profile == name
+            and item["profile_sha256"] != default.profile_sha256
+        )
+        profiles.append(item)
+    return profiles, default
+
+
+def command_mcp_profile_list(args: argparse.Namespace) -> int:
+    """List only sanitized profile readiness and hashes."""
+
+    require_web_mcp_runtime_platform()
+    profile_dir = tunnel_profile_dir_for(args)
+    try:
+        profiles, default = _tunnel_profile_inventory(profile_dir=profile_dir)
+        ready = [item for item in profiles if item["ready"]]
+        ok = bool(ready)
+        code = None if ok else "NO_READY_TUNNEL_PROFILE"
+        payload = {
+            "operation": "mcp-profile-list",
+            "ok": ok,
+            "code": code,
+            "profiles": profiles,
+            "default_profile": default.profile if default is not None else None,
+            "default_profile_current": any(item["default"] for item in profiles),
+            "credential_resolution": False,
+            "tunnel_client_execution": False,
+            "conversation_or_repository_disclosure": False,
+        }
+    except HandoffError as exc:
+        message = str(exc)
+        code = message.partition(":")[0] if ":" in message else "TUNNEL_PROFILE_UNSAFE"
+        payload = {
+            "operation": "mcp-profile-list",
+            "ok": False,
+            "code": code,
+            "profiles": [],
+            "default_profile": None,
+            "default_profile_current": False,
+            "credential_resolution": False,
+            "tunnel_client_execution": False,
+            "conversation_or_repository_disclosure": False,
+        }
+    print(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False))
+    return 0 if payload["ok"] else 2
+
+
+def command_mcp_profile_default(args: argparse.Namespace) -> int:
+    """Persist one reviewed profile name/hash without reading credentials."""
+
+    require_web_mcp_runtime_platform()
+    store = runtime_store_for()
+    try:
+        profile_lease = ProfileControllerLease(store.root).acquire()
+    except RuntimeStateError as exc:
+        raise runtime_failure(exc) from exc
+    try:
+        try:
+            selected = write_default_tunnel_profile(
+                args.tunnel_profile,
+                expected_profile_sha256=args.confirm_tunnel_profile_sha256,
+                env=os.environ,
+                mcp_script=SKILL_ROOT / "scripts" / "gptpro_mcp.py",
+                profile_dir=tunnel_profile_dir_for(args),
+            )
+        except TunnelClientError as exc:
+            raise HandoffError(f"{exc.code}: {exc.message}") from exc
+    finally:
+        profile_lease.close()
+    print(
+        json.dumps(
+            {
+                "operation": "mcp-profile-default",
+                "ok": True,
+                "tunnel_profile": selected.profile,
+                "tunnel_profile_sha256": selected.profile_sha256,
+                "credential_resolution": False,
+                "tunnel_client_execution": False,
+                "conversation_or_repository_disclosure": False,
+            },
+            sort_keys=True,
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
+def command_preflight(args: argparse.Namespace) -> int:
+    """Resolve one existing ready profile without package creation or credentials."""
+
+    require_web_mcp_runtime_platform()
+    root = resolve_git_root(args.repo)
+    git = git_identity(root)
+    profile_dir = tunnel_profile_dir_for(args)
+    try:
+        profiles, default = _tunnel_profile_inventory(profile_dir=profile_dir)
+    except HandoffError as exc:
+        message = str(exc)
+        code = message.partition(":")[0] if ":" in message else "TUNNEL_PROFILE_UNSAFE"
+        profiles = []
+        default = None
+        selected = None
+    else:
+        selected = None
+        code = None
+        if args.tunnel_profile:
+            matches = [item for item in profiles if item["name"] == args.tunnel_profile]
+            if not matches:
+                code = "TUNNEL_PROFILE_NOT_FOUND"
+            elif not matches[0]["ready"]:
+                code = matches[0]["code"] or "TUNNEL_PROFILE_UNSAFE"
+            else:
+                selected = matches[0]
+        else:
+            defaults = [item for item in profiles if item["default"] and item["ready"]]
+            ready = [item for item in profiles if item["ready"]]
+            if len(defaults) == 1:
+                selected = defaults[0]
+            elif default is not None and not defaults:
+                code = "TUNNEL_DEFAULT_PROFILE_STALE"
+            elif len(ready) == 1:
+                selected = ready[0]
+            elif not ready:
+                code = "NO_READY_TUNNEL_PROFILE"
+            else:
+                code = "TUNNEL_PROFILE_AMBIGUOUS"
+    payload = {
+        "operation": "preflight",
+        "ok": selected is not None,
+        "code": None if selected is not None else code,
+        "ready_for_prepare": selected is not None,
+        "transport": args.transport,
+        "git_head_sha": git["head_sha"],
+        "git_clean": git["clean"],
+        "selected_profile": selected["name"] if selected is not None else None,
+        "selected_profile_sha256": (
+            selected["profile_sha256"] if selected is not None else None
+        ),
+        "prepare_profile_args": (
+            [
+                "--tunnel-profile",
+                selected["name"],
+                "--confirm-tunnel-profile-sha256",
+                selected["profile_sha256"],
+            ]
+            if selected is not None
+            else []
+        ),
+        "profile_candidates": profiles,
+        "default_profile": default.profile if default is not None else None,
+        "credential_resolution": False,
+        "tunnel_client_execution": False,
+        "package_created": False,
+        "conversation_or_repository_disclosure": False,
+        "next_action": "prepare" if selected is not None else "select_or_repair_profile",
+    }
+    print(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False))
+    return 0 if payload["ok"] else 2
+
+
 def command_mcp_profile_init(args: argparse.Namespace) -> int:
     """Run the official attended profile initializer after an exact binary trust gate."""
 
@@ -9754,6 +10073,16 @@ def command_mcp_protocol_trace(args: argparse.Namespace) -> int:
     return 0
 
 
+def summarize_protocol_trace_payload(trace_payload: dict[str, Any]) -> dict[str, Any]:
+    """Drop per-event rows while retaining their count and final integrity evidence."""
+
+    trace = dict(trace_payload)
+    events = trace.pop("events", None)
+    if isinstance(events, list):
+        trace["events_omitted"] = len(events)
+    return trace
+
+
 def command_mcp_status(args: argparse.Namespace) -> int:
     store = runtime_store_for()
     try:
@@ -9920,6 +10249,10 @@ def command_mcp_status(args: argparse.Namespace) -> int:
         and not payload["split_brain"]
     )
     payload["recovery_actions"] = list(dict.fromkeys(payload["recovery_actions"]))
+    if getattr(args, "summary", False) and isinstance(payload.get("protocol_trace"), dict):
+        payload["protocol_trace"] = summarize_protocol_trace_payload(
+            payload["protocol_trace"]
+        )
     print(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False))
     return 0
 
@@ -10792,6 +11125,19 @@ def command_approve(args: argparse.Namespace) -> int:
                 "delivery_channel": "browser",
                 "connector_type": MCP_CONNECTOR_TYPE,
                 "tunnel_id_binding_sha256": manifest["connector"]["tunnel_id_binding_sha256"],
+                **(
+                    {
+                        "tunnel_binding_source": manifest["connector"][
+                            "tunnel_binding_source"
+                        ],
+                        "tunnel_profile_sha256": manifest["connector"][
+                            "tunnel_profile_sha256"
+                        ],
+                    }
+                    if manifest["connector"].get("tunnel_binding_source")
+                    == "verified-local-profile-v1"
+                    else {}
+                ),
                 "tool_schema_sha256": manifest["connector"]["tool_schema_sha256"],
                 "protocol_profile": manifest["connector"]["protocol_profile"],
                 "file_set_sha256": manifest["mcp_disclosure"]["file_set_sha256"],
@@ -11358,7 +11704,25 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     prepare.add_argument("--require-clean", action="store_true")
-    prepare.add_argument("--tunnel-runtime-alias", default="gptpro-web")
+    prepare.add_argument(
+        "--tunnel-profile",
+        help=(
+            "Preferred Web MCP path: exact existing profile filename stem. Requires "
+            "--confirm-tunnel-profile-sha256 and does not require the raw Tunnel ID reference"
+        ),
+    )
+    prepare.add_argument(
+        "--confirm-tunnel-profile-sha256",
+        help="Exact profile hash emitted by mcp-profile-check, mcp-profile-list, or preflight",
+    )
+    prepare.add_argument(
+        "--profile-dir",
+        help="Optional absolute Tunnel profile directory; defaults to the private standard directory",
+    )
+    prepare.add_argument(
+        "--tunnel-runtime-alias",
+        help="Legacy Web MCP profile label used only with --tunnel-id-ref",
+    )
     prepare.add_argument(
         "--tunnel-id-ref",
         help="Transient env:NAME or mode-0600 file:/absolute/path reference; the raw tunnel ID is not persisted",
@@ -11495,6 +11859,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mcp_profile_check.set_defaults(func=command_mcp_profile_check)
 
+    mcp_profile_list = subparsers.add_parser(
+        "mcp-profile-list",
+        help="List bounded local Tunnel profiles without resolving credentials or running the client",
+    )
+    mcp_profile_list.add_argument("--profile-dir")
+    mcp_profile_list.add_argument(
+        "--json", action="store_true", help="Compatibility flag; output is always JSON"
+    )
+    mcp_profile_list.set_defaults(func=command_mcp_profile_list)
+
+    mcp_profile_default = subparsers.add_parser(
+        "mcp-profile-default",
+        help="Select one exact ready Tunnel profile as the local non-secret default",
+    )
+    mcp_profile_default.add_argument("--tunnel-profile", required=True)
+    mcp_profile_default.add_argument("--confirm-tunnel-profile-sha256", required=True)
+    mcp_profile_default.add_argument("--profile-dir")
+    mcp_profile_default.add_argument(
+        "--json", action="store_true", help="Compatibility flag; output is always JSON"
+    )
+    mcp_profile_default.set_defaults(func=command_mcp_profile_default)
+
+    preflight = subparsers.add_parser(
+        "preflight",
+        help="Summarize secretless Web MCP profile readiness before package preparation",
+    )
+    preflight.add_argument("--repo", default=".")
+    preflight.add_argument("--transport", choices=("mcp-read", "mcp-research"), required=True)
+    preflight.add_argument("--tunnel-profile")
+    preflight.add_argument("--profile-dir")
+    preflight.add_argument(
+        "--json", action="store_true", help="Compatibility flag; output is always JSON"
+    )
+    preflight.set_defaults(func=command_preflight)
+
     mcp_profile_init = subparsers.add_parser(
         "mcp-profile-init",
         help="Initialize one attended Tunnel profile after confirming the exact probed binary hash",
@@ -11582,6 +11981,11 @@ def build_parser() -> argparse.ArgumentParser:
         "mcp-status", help="Inspect the one machine-global package authorization and audit"
     )
     mcp_status.add_argument("--handoff-dir")
+    mcp_status.add_argument(
+        "--summary",
+        action="store_true",
+        help="Omit protocol-trace event rows while retaining closure and integrity evidence",
+    )
     mcp_status.add_argument("--json", action="store_true", help="Compatibility flag; output is always JSON")
     mcp_status.set_defaults(func=command_mcp_status)
 

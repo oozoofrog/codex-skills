@@ -76,6 +76,9 @@ _TRUSTED_GPTPRO_CHILD_ENV_NAMES = frozenset(
 _SESSION_CAPABILITY = re.compile(r"[A-Za-z0-9_-]{43}")
 _PROFILE_KEY = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,127}")
 _PROFILE_MAX_BYTES = 64 * 1024
+_MAX_PROFILE_CANDIDATES = 128
+_DEFAULT_PROFILE_FILE = ".gptpro-default-profile.json"
+_DEFAULT_PROFILE_SCHEMA_VERSION = 1
 _MAX_UNIX_SOCKET_PATH_BYTES = 100
 _MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
 _COMMAND_STOP_GRACE_SECONDS = 1.0
@@ -326,6 +329,19 @@ class TunnelProfileInspection:
     profile_dir_sha256: str
     observed_mcp_command_sha256: str
     expected_mcp_command_sha256: str
+
+
+@dataclass(frozen=True)
+class TunnelProfileBinding:
+    profile_sha256: str
+    profile_dir_sha256: str
+    tunnel_id_binding_sha256: str
+
+
+@dataclass(frozen=True)
+class DefaultTunnelProfile:
+    profile: str
+    profile_sha256: str
 
 
 @dataclass(frozen=True)
@@ -1069,6 +1085,288 @@ def inspect_tunnel_profile(
         reinit_required=False,
         **common,
     )
+
+
+def list_tunnel_profile_names(
+    *,
+    env: Mapping[str, str],
+    profile_dir: Path | None = None,
+) -> tuple[str, ...]:
+    """List only exact profile filename stems from the validated private directory."""
+
+    directory = _resolved_profile_directory(profile_dir, env)
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory_flag is None:
+        raise TunnelClientError(
+            "RUNTIME_STATE_UNSAFE",
+            "Profile discovery requires O_NOFOLLOW and O_DIRECTORY.",
+        )
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            directory,
+            os.O_RDONLY | nofollow | directory_flag | getattr(os, "O_CLOEXEC", 0),
+        )
+        names = []
+        for entry in os.listdir(descriptor):
+            if not entry.endswith(".yaml"):
+                continue
+            stem = entry.removesuffix(".yaml")
+            if _PROFILE.fullmatch(stem) is not None:
+                names.append(stem)
+        if len(names) > _MAX_PROFILE_CANDIDATES:
+            raise TunnelClientError(
+                "TUNNEL_PROFILE_LIST_TOO_LARGE",
+                "The Tunnel profile directory contains too many candidate profiles.",
+            )
+        return tuple(sorted(set(names)))
+    except TunnelClientError:
+        raise
+    except OSError as exc:
+        raise TunnelClientError(
+            "TUNNEL_PROFILE_UNSAFE", "Unable to enumerate Tunnel profiles safely."
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def tunnel_binding_from_profile(
+    package_id: str,
+    profile: str,
+    *,
+    expected_profile_sha256: str,
+    env: Mapping[str, str],
+    mcp_script: Path,
+    profile_dir: Path | None = None,
+    python_executable: Path | str | None = None,
+) -> TunnelProfileBinding:
+    """Bind one package to a verified local profile without returning its Tunnel ID."""
+
+    if not isinstance(package_id, str) or not package_id:
+        raise TunnelClientError("MCP_INVALID_ARGUMENT", "The package identity is invalid.")
+    expected_hash = _profile_hash_or_error(expected_profile_sha256)
+    name = _profile(profile)
+    directory = _resolved_profile_directory(profile_dir, env)
+    inspection = inspect_tunnel_profile(
+        name,
+        env=env,
+        mcp_script=mcp_script,
+        profile_dir=directory,
+        python_executable=python_executable,
+    )
+    if not inspection.ready:
+        raise TunnelClientError(
+            inspection.code or "TUNNEL_PROFILE_UNSAFE",
+            "The Tunnel profile is not ready for package binding.",
+        )
+    if not secrets.compare_digest(inspection.profile_sha256, expected_hash):
+        raise TunnelClientError(
+            "TUNNEL_PROFILE_CONFIRMATION_MISMATCH",
+            "The confirmed Tunnel profile hash does not match the selected profile.",
+        )
+    expected_command = _exact_mcp_command(mcp_script, python_executable)
+    payload, document = _read_profile_document(name, directory)
+    scalars = _restricted_profile_values(document)
+    _validate_bounded_profile_values(scalars)
+    if scalars.get(("mcp", "commands", "command")) != expected_command:
+        raise TunnelClientError(
+            "TUNNEL_PROFILE_CHANGED",
+            "The Tunnel profile command changed during package binding.",
+        )
+    snapshot = ProfileSecuritySnapshot(
+        directory=directory,
+        path=directory / f"{name}.yaml",
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+    observed_hash = _profile_identity_sha256(name, snapshot)
+    if not secrets.compare_digest(observed_hash, expected_hash):
+        raise TunnelClientError(
+            "TUNNEL_PROFILE_CHANGED",
+            "The Tunnel profile changed during package binding.",
+        )
+    raw_tunnel_id = scalars[("control_plane", "tunnel_id")]
+    binding = hashlib.sha256(
+        b"gptpro-tunnel-binding-v1\0"
+        + package_id.encode("utf-8")
+        + b"\0"
+        + raw_tunnel_id.encode("utf-8")
+    ).hexdigest()
+    raw_tunnel_id = ""
+    document = ""
+    scalars = {}
+    latest = _profile_security_snapshot(
+        name,
+        directory,
+        expected_mcp_command=expected_command,
+    )
+    if not secrets.compare_digest(_profile_identity_sha256(name, latest), expected_hash):
+        raise TunnelClientError(
+            "TUNNEL_PROFILE_CHANGED",
+            "The Tunnel profile changed during package binding.",
+        )
+    return TunnelProfileBinding(
+        profile_sha256=expected_hash,
+        profile_dir_sha256=inspection.profile_dir_sha256,
+        tunnel_id_binding_sha256=binding,
+    )
+
+
+def read_default_tunnel_profile(
+    *,
+    env: Mapping[str, str],
+    profile_dir: Path | None = None,
+) -> DefaultTunnelProfile | None:
+    """Read the non-secret exact-profile preference from the private profile directory."""
+
+    directory = _resolved_profile_directory(profile_dir, env)
+    path = directory / _DEFAULT_PROFILE_FILE
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise TunnelClientError(
+            "TUNNEL_DEFAULT_PROFILE_UNSAFE",
+            "Unable to inspect the default Tunnel profile preference.",
+        ) from exc
+    try:
+        payload = _read_owner_only_file(path, maximum=4096)
+        document = json.loads(payload)
+    except TunnelClientError as exc:
+        raise TunnelClientError(
+            "TUNNEL_DEFAULT_PROFILE_UNSAFE",
+            "The default Tunnel profile preference is not an owner-only regular file.",
+        ) from exc
+    except (json.JSONDecodeError, RecursionError) as exc:
+        raise TunnelClientError(
+            "TUNNEL_DEFAULT_PROFILE_UNSAFE",
+            "The default Tunnel profile preference is invalid.",
+        ) from exc
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schema_version", "profile", "profile_sha256"}
+        or document.get("schema_version") != _DEFAULT_PROFILE_SCHEMA_VERSION
+        or _PROFILE.fullmatch(str(document.get("profile", ""))) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(document.get("profile_sha256", ""))) is None
+    ):
+        raise TunnelClientError(
+            "TUNNEL_DEFAULT_PROFILE_UNSAFE",
+            "The default Tunnel profile preference is invalid.",
+        )
+    return DefaultTunnelProfile(
+        profile=str(document["profile"]),
+        profile_sha256=str(document["profile_sha256"]),
+    )
+
+
+def write_default_tunnel_profile(
+    profile: str,
+    *,
+    expected_profile_sha256: str,
+    env: Mapping[str, str],
+    mcp_script: Path,
+    profile_dir: Path | None = None,
+    python_executable: Path | str | None = None,
+) -> DefaultTunnelProfile:
+    """Atomically select one exact, ready profile without storing credentials."""
+
+    name = _profile(profile)
+    expected_hash = _profile_hash_or_error(expected_profile_sha256)
+    directory = _resolved_profile_directory(profile_dir, env)
+    inspection = inspect_tunnel_profile(
+        name,
+        env=env,
+        mcp_script=mcp_script,
+        profile_dir=directory,
+        python_executable=python_executable,
+    )
+    if not inspection.ready:
+        raise TunnelClientError(
+            inspection.code or "TUNNEL_PROFILE_UNSAFE",
+            "Only a ready Tunnel profile can become the default.",
+        )
+    if not secrets.compare_digest(inspection.profile_sha256, expected_hash):
+        raise TunnelClientError(
+            "TUNNEL_PROFILE_CONFIRMATION_MISMATCH",
+            "The confirmed Tunnel profile hash does not match the selected profile.",
+        )
+    preference = DefaultTunnelProfile(profile=name, profile_sha256=expected_hash)
+    payload = (
+        json.dumps(
+            {
+                "schema_version": _DEFAULT_PROFILE_SCHEMA_VERSION,
+                "profile": name,
+                "profile_sha256": expected_hash,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    _atomic_write_profile_preference(directory, payload)
+    return preference
+
+
+def _atomic_write_profile_preference(directory: Path, payload: bytes) -> None:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory_flag is None:
+        raise TunnelClientError(
+            "RUNTIME_STATE_UNSAFE",
+            "Default profile selection requires O_NOFOLLOW and O_DIRECTORY.",
+        )
+    directory_descriptor = -1
+    file_descriptor = -1
+    temporary_name = f".{_DEFAULT_PROFILE_FILE}.{secrets.token_hex(8)}.tmp"
+    try:
+        directory_descriptor = os.open(
+            directory,
+            os.O_RDONLY | nofollow | directory_flag | getattr(os, "O_CLOEXEC", 0),
+        )
+        file_descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | nofollow
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=directory_descriptor,
+        )
+        os.fchmod(file_descriptor, 0o600)
+        view = memoryview(payload)
+        while view:
+            written = os.write(file_descriptor, view)
+            if written <= 0:
+                raise OSError("short default profile preference write")
+            view = view[written:]
+        os.fsync(file_descriptor)
+        os.close(file_descriptor)
+        file_descriptor = -1
+        os.replace(
+            temporary_name,
+            _DEFAULT_PROFILE_FILE,
+            src_dir_fd=directory_descriptor,
+            dst_dir_fd=directory_descriptor,
+        )
+        os.fsync(directory_descriptor)
+    except OSError as exc:
+        if directory_descriptor >= 0:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_descriptor)
+            except OSError:
+                pass
+        raise TunnelClientError(
+            "TUNNEL_DEFAULT_PROFILE_WRITE_FAILED",
+            "Unable to atomically store the default Tunnel profile preference.",
+        ) from exc
+    finally:
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
+        if directory_descriptor >= 0:
+            os.close(directory_descriptor)
 
 
 def _atomic_move_staged_profile(
@@ -2436,6 +2734,15 @@ class TunnelClient:
 def _hash_or_error(value: str | None) -> str:
     if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
         raise TunnelClientError("TUNNEL_NOT_ASSOCIATED", "The Tunnel binding digest is invalid.")
+    return value
+
+
+def _profile_hash_or_error(value: str | None) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise TunnelClientError(
+            "TUNNEL_PROFILE_CONFIRMATION_MISMATCH",
+            "The confirmed Tunnel profile hash is invalid.",
+        )
     return value
 
 
