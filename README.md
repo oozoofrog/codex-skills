@@ -35,6 +35,8 @@ $gptpro review 모드로 현재 변경을 검토하되 공개 범위는 src와 t
 
 명시적인 `$gptpro` 프로젝트/저장소 상담이 Pro의 실제 문맥 검색·읽기·탐색을 필요로 하면 Skill은 최소 범위의 `mcp-research` package를 기본 제안합니다. 이 라우팅은 공개나 전송 승인이 아니며, CLI의 `auto`가 MCP를 선택한다는 뜻도 아닙니다. 별도의 공개 범위·도구·예산·만료·ledger·전송 승인을 받은 뒤에만 활성화하고, `mcp-read`는 사용자가 기존 3-tool reader를 명시한 경우에만 사용합니다.
 
+반복적인 Schema-4 상담은 사용자가 별도로 생성한 범위 제한형 상시 승인 profile을 사용할 수 있습니다. 같은 repository·path·mode·model·app/workspace·Tunnel profile·dirty 정책·예산 안의 package만 exact receipt로 자동 승인하며, 범위 확대·외부 evidence/supplement·브라우저 신뢰 경계·Codex note별 승인은 계속 사람 확인을 요구합니다.
+
 ```text
 $gptpro mcp-research로 src와 tests의 변경과 테스트 누락을 분석할 상담을 준비해주세요.
 ```

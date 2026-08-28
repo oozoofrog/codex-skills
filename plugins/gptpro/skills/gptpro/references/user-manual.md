@@ -41,7 +41,7 @@ $gptpro review 모드로 src와 tests를 Pro가 읽어가며 분석하도록 mcp
 공개 범위는 필요한 파일로 최소화하고, 실제 수정은 Pro 응답을 검증한 뒤에만 해주세요.
 ```
 
-따라서 “프로젝트에 관해 `$gptpro`로 요청”하는 것과 “이미 공개를 승인함”은 다릅니다. 프로젝트 문맥 탐색이 필요한 요청은 `mcp-research` **제안**으로 라우팅되지만, 전송·MCP 공개·ledger 승인은 package마다 다시 받아야 합니다. 처음부터 전체 repository를 공개하기보다 `src/**`, `tests/**`처럼 목적에 필요한 범위를 함께 말하는 편이 좋습니다.
+따라서 “프로젝트에 관해 `$gptpro`로 요청”하는 것과 “이미 공개를 승인함”은 다릅니다. 기본값은 package마다 전송·MCP 공개·ledger 승인을 다시 받는 것입니다. 사용자가 별도로 범위 제한형 상시 승인 profile을 만든 경우에만 그 경계 안의 Schema 4 package가 반복 질문 없이 승인될 수 있습니다. 처음부터 전체 repository를 공개하기보다 `src/**`, `tests/**`처럼 목적에 필요한 범위를 함께 말하는 편이 좋습니다.
 
 이후 Codex가 다음을 순서대로 진행합니다.
 
@@ -49,7 +49,7 @@ $gptpro review 모드로 src와 tests를 Pro가 읽어가며 분석하도록 mcp
 2. 비밀정보와 제외 대상을 검사합니다.
 3. Git 상태와 파일 해시를 기록한 상담 패키지를 만듭니다.
 4. 실제로 외부에 공개될 내용과 범위를 보여줍니다.
-5. 사용자가 **그 패키지에 한정된 전송 승인**을 하면 ChatGPT Pro에 전달합니다.
+5. 사용자가 **그 패키지에 한정된 전송 승인**을 하거나 이미 승인한 상시 범위와 정확히 일치하면 ChatGPT Pro에 전달합니다.
 6. Pro의 답변을 가져와 현재 코드와 테스트로 다시 검증합니다.
 7. 검증을 통과한 조언만 사용합니다.
 
@@ -59,7 +59,7 @@ $gptpro review 모드로 src와 tests를 Pro가 읽어가며 분석하도록 mcp
 
 | 주체 | 담당하는 일 | 담당하지 않는 일 |
 | --- | --- | --- |
-| 사용자 | 상담 목적·공개 범위 결정, package-specific 승인, 로그인·Developer Mode·앱/워크스페이스·전송 확인 | 코드와 보안 경계를 직접 분석하거나 복잡한 CLI를 조립할 필요는 없음 |
+| 사용자 | 상담 목적·공개 범위 결정, exact-package 또는 상시 범위 승인, 로그인·Developer Mode·앱/워크스페이스·전송 확인 | 코드와 보안 경계를 직접 분석하거나 복잡한 CLI를 조립할 필요는 없음 |
 | Codex | 파일 선택, secret/exclude 검사, package·hash·receipt 생성, Tunnel 수명주기, 응답 import, 코드·테스트 기반 독립 검증 | 승인 전 전송, 계정 선택 대행, Pro 조언의 무검증 적용 |
 | ChatGPT Pro | 승인된 prompt와 허용된 repository snapshot을 읽고 계획·리뷰·디버깅·설계 조언 제공 | 로컬 파일 수정, shell/build/test 실행, Git 변경, 최종 의사결정 |
 
@@ -369,6 +369,14 @@ Tunnel을 활성화하는 것과 prompt를 보내는 것은 별도 단계입니�
 3. Pro의 결과는 visible Chat으로 받고, ledger에는 별도 승인된 Codex context note만 게시한다는 정책
 
 그 뒤 Codex가 ledger에 게시하는 각 context note는 다시 exact-byte 승인을 받습니다. package 승인이나 “계속 진행”이라는 일반 지시는 새 note 게시 승인으로 재사용하지 않습니다. Ledger 게시 자체는 네트워크 전송이나 Pro의 실제 열람을 뜻하지 않습니다.
+
+### 반복 승인을 줄이는 범위 제한형 상시 승인
+
+반복적으로 같은 repository의 같은 경로·모델·앱·예산으로 Schema 4 상담을 한다면 상시 승인 profile을 선택할 수 있습니다. 먼저 대표 package 하나를 평소처럼 정확히 승인한 뒤, Codex가 profile dry-run으로 허용 경계를 보여줍니다. 사용자가 그 경계를 한 번 승인하면 이후 package는 범위가 완전히 일치할 때만 자동으로 exact-package receipt를 만들 수 있습니다.
+
+이 기능은 “gptpro가 무엇이든 보내도 된다”는 승인이 아닙니다. 다른 경로, mode, model, app/workspace, Tunnel profile, dirty worktree, 더 큰 예산, evidence나 supplement는 자동으로 거부되고 다시 exact-package 승인이 필요합니다. Profile은 기본 7일, 최대 30일이며 언제든 철회할 수 있습니다. 철회는 앞으로의 자동 승인만 막으므로 이미 활성화된 Tunnel은 별도 stop 절차가 필요합니다. 로그인, OAuth, Developer Mode, 앱 선택, 불확실한 Send 같은 브라우저 경계와 Codex note별 승인은 사라지지 않습니다.
+
+Profile은 repository의 `.gptpro/standing-approvals/` 아래에만 저장되고 Git에 올리지 않습니다. 쉬운 생성·조회·철회 절차와 정확한 범위는 [범위 제한형 상시 승인](standing-approval.md)을 참고하세요.
 
 ### 안전한 승인 문장 예시
 

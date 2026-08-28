@@ -96,6 +96,8 @@ Lifecycle output separates authorization denial from evidence quality. `authoriz
 
 Receipt and audit event hashes are unkeyed consistency checks. They detect accidental drift and cross-bind the current manifest, artifacts, state, and lifecycle records, but they are not a signature against a malicious process with the same user's file-write authority. A stronger adversary model requires a separate protected trust anchor such as a Keychain-held MAC key or externally retained approval hash; that is outside this runtime.
 
+Repository-local standing approval profiles use the same local-user trust boundary. Their directory is owner-only mode `0700`, each JSON profile and lock is mode `0600`, symlinks and unsafe ownership/modes fail closed, and a canonical profile SHA-256 is copied into every package approval receipt. The profile stores no raw Tunnel ID, API key, credential, source absolute path, or repository absolute path; the local root is represented only by a domain-separated hash. This detects corruption and binds provenance but does not defend against malicious code already running as the same OS user. A profile authorizes only new exact-package approvals while active; revocation is not a substitute for stopping an already active package. See [standing-approval.md](standing-approval.md).
+
 ## Retention
 
 Generated handoffs can contain proprietary source. Keep `.gptpro/` local by default, follow the repository's retention policy, and delete packages only with the user's authorization. The Skill does not upload, delete, or clean handoffs automatically.

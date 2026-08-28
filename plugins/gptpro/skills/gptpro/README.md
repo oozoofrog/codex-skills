@@ -45,7 +45,7 @@ $gptpro review 모드로 src와 tests를 Pro가 읽어가며 분석하도록 mcp
 실제 수정은 Pro 응답을 현재 코드와 테스트로 검증한 뒤에만 해주세요.
 ```
 
-That routing is not transmission authority and does not make the CLI's `auto` transport select MCP. Codex must show the exact package, disclosure ceiling, tool catalog, expiry, and ledger policy, then pause for package-specific approval before activation or Send. Use the ordinary GitHub/text path when the user requests it or the task needs only a small fixed excerpt. Web MCP currently requires macOS, Python 3.11 or newer, a reviewed official `tunnel-client`, ChatGPT Developer Mode, and attended app/workspace selection.
+That routing is not transmission authority and does not make the CLI's `auto` transport select MCP. Codex must show the exact package, disclosure ceiling, tool catalog, expiry, and ledger policy, then obtain exact-package approval or prove a previously created bounded standing profile matches before activation or Send. Use the ordinary GitHub/text path when the user requests it or the task needs only a small fixed excerpt. Web MCP currently requires macOS, Python 3.11 or newer, a reviewed official `tunnel-client`, ChatGPT Developer Mode, and attended app/workspace selection.
 
 When the consultation needs exact text from a file outside the selected repository snapshot, ask Codex to include it as a supplemental document. Repeatable `--supplement LABEL=/ABSOLUTE/PATH` packages an owner-controlled, secret-scanned strict-UTF-8 snapshot without using browser file upload. The option path is local CLI input only: Codex writes the outbound task using the safe label, and preparation rejects copying that path into outbound metadata. Small packages use bounded `paste`; larger or exploratory documents use explicit Schema 4 `mcp-research` and `gptpro_artifact_read`. See [supplemental text documents](references/supplemental-documents.md).
 
@@ -54,7 +54,7 @@ The user normally does not need to construct CLI commands. The Skill:
 1. previews first-use local setup without writing;
 2. prepares, scans, hashes, and verifies a package;
 3. shows the exact outbound prompt and maximum disclosure contract;
-4. stops for package-specific approval;
+4. obtains package-specific authority through manual approval or a strict standing-profile match;
 5. creates an empty new ChatGPT general Chat with zero prior turns and guides or performs only the authorized attended delivery steps;
 6. creates one bounded same-task response monitor that checks only the recorded conversation and never resends;
 7. revokes/stops a Web MCP session, imports the marked response, independently evaluates the advice, and removes the monitor.
@@ -116,6 +116,30 @@ python3 scripts/gptpro.py --error-format json diagnostic-status \
 ```
 
 When a consultation fails, blocks on a human checkpoint, or lacks expected evidence, the Skill reports the failed step, expected versus observed result, stable error, transmission/approval/repository effects, package/Tunnel state, automatic-retry safety, and one exact next action. See [failure reporting](references/failure-reporting.md).
+
+Repeated Schema-4 consultations can use an optional repository-local bounded standing approval. Create it only from one manually approved directed package after reviewing a dry run. Future packages still receive exact manifest/file-set receipts, but matching packages no longer need a new approval prompt. A different path, mode, model, app/workspace, Tunnel profile, dirty policy, external artifact, budget, or expired/revoked profile fails closed. Browser login/OAuth/model/UI checkpoints and every Codex analysis note remain separately attended. See [bounded standing approval](references/standing-approval.md).
+
+```bash
+python3 scripts/gptpro.py standing-approval-create \
+  --repo /path/to/repo \
+  --handoff-dir /path/to/repo/.gptpro/handoffs/<manually-approved-id> \
+  --name routine-src-review \
+  --approved-by user \
+  --dry-run
+
+# After explicit approval of the complete dry-run scope:
+python3 scripts/gptpro.py standing-approval-create \
+  --repo /path/to/repo \
+  --handoff-dir /path/to/repo/.gptpro/handoffs/<manually-approved-id> \
+  --name routine-src-review \
+  --approved-by user \
+  --confirm-standing-approval
+
+python3 scripts/gptpro.py approve \
+  --repo /path/to/repo \
+  --handoff-dir /path/to/repo/.gptpro/handoffs/<new-id> \
+  --standing-approval routine-src-review
+```
 
 `response-monitor-plan` is read-only and requires a submitted package with an exact recorded `chatgpt.com` conversation URL. Codex uses its output with the app's same-task heartbeat capability, then records the returned automation identity. See [response completion monitor](references/response-monitor.md); the monitor repeats response collection only and never prompt submission.
 

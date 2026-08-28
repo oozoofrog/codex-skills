@@ -29,6 +29,7 @@ REQUIRED_FILES = (
     "references/request-correlation.md",
     "references/response-monitor.md",
     "references/security.md",
+    "references/standing-approval.md",
     "references/supplemental-documents.md",
     "references/user-manual.md",
     "references/web-mcp.md",
@@ -623,6 +624,35 @@ def validate_supplement_documentation(skill_root: Path, errors: list[str]) -> No
         )
 
 
+def validate_standing_approval_documentation(skill_root: Path, errors: list[str]) -> None:
+    """Keep bounded standing authority explicit and narrower than package governance."""
+
+    reference = skill_root / "references/standing-approval.md"
+    try:
+        text = reference.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return
+    required = {
+        "standing-approval-create",
+        "standing-approval-list",
+        "standing-approval-revoke",
+        "--standing-approval",
+        "--confirm-standing-approval",
+        "mcp-research",
+        "외부 evidence",
+        "supplement",
+        "mode `0600`",
+        "mode `0700`",
+        "30일",
+        "자동 재전송하지 않습니다",
+    }
+    missing = sorted(token for token in required if token not in text)
+    if missing:
+        errors.append(
+            f"Standing-approval reference is missing required boundary terms: {missing}"
+        )
+
+
 def package_files(skill_root: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     for path in sorted(skill_root.rglob("*")):
@@ -675,6 +705,7 @@ def validate(skill_root: Path, mirror: Path | None) -> dict[str, object]:
             validate_canonical_runtime_slot(root, errors)
             validate_research_documentation(root, errors)
             validate_supplement_documentation(root, errors)
+            validate_standing_approval_documentation(root, errors)
     if mirror is not None and root.is_dir():
         validate_mirror(root, mirror.expanduser().resolve(), errors)
     return {
@@ -692,6 +723,7 @@ def validate(skill_root: Path, mirror: Path | None) -> dict[str, object]:
             "web-mcp-canonical-runtime-slot",
             "web-mcp-research-documentation",
             "supplemental-documentation",
+            "standing-approval-documentation",
             *(("standalone-plugin-mirror",) if mirror else ()),
         ],
         "errors": errors,

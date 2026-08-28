@@ -135,7 +135,14 @@ class TunnelProfileReuseTests(unittest.TestCase):
         )
         return str(json.loads(result.stdout)["tunnel_profile_sha256"])
 
-    def prepare_from_profile(self, name: str, profile_hash: str, *, expected: int = 0):
+    def prepare_from_profile(
+        self,
+        name: str,
+        profile_hash: str,
+        *,
+        task: str = "Review the approved immutable repository snapshot.",
+        expected: int = 0,
+    ):
         return self.run_cli(
             "prepare",
             "--repo",
@@ -147,7 +154,7 @@ class TunnelProfileReuseTests(unittest.TestCase):
             "--include",
             "src/**",
             "--task",
-            "Review the approved immutable repository snapshot.",
+            task,
             "--output-root",
             str(self.output),
             "--tunnel-profile",
@@ -247,6 +254,338 @@ class TunnelProfileReuseTests(unittest.TestCase):
                 profile_binding_verification="automatic-doctor-json",
                 workspace_binding_confirmed=True,
             )
+
+    def test_bounded_standing_approval_reuses_exact_scope_and_revocation_blocks_future_use(self) -> None:
+        name = "StandingSourceProfile"
+        standing_name = "routine-src-review"
+        self.write_profile(name)
+        profile_hash = self.profile_hash(name)
+        self.run_cli("init", "--repo", str(self.repo), "--apply")
+        (self.repo / "outside.md").write_text("Outside standing scope.\n", encoding="utf-8")
+        self.git("add", "outside.md")
+        self.git("commit", "-m", "add outside fixture")
+
+        source_result = self.prepare_from_profile(name, profile_hash)
+        source = Path(json.loads(source_result.stdout)["handoff_dir"])
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(source),
+            "--approved-by",
+            "standing-test-user",
+            "--confirm-transmission",
+            "--confirm-mcp-disclosure",
+            "--confirm-analysis-ledger",
+        )
+        preview = self.run_cli(
+            "standing-approval-create",
+            "--repo",
+            str(self.repo),
+            "--handoff-dir",
+            str(source),
+            "--name",
+            standing_name,
+            "--approved-by",
+            "standing-test-user",
+            "--valid-for-seconds",
+            "3600",
+            "--max-task-bytes",
+            "4096",
+            "--max-files",
+            "10",
+            "--max-bytes",
+            "65536",
+            "--max-file-bytes",
+            "65536",
+            "--dry-run",
+        )
+        preview_payload = json.loads(preview.stdout)
+        self.assertTrue(preview_payload["dry_run"])
+        self.assertTrue(preview_payload["would_write_on_confirm"])
+        self.assertFalse(preview_payload["write_performed"])
+        self.assertEqual(["src/**"], preview_payload["profile"]["scope"]["path_scope"]["include_patterns"])
+        self.assertNotIn(str(self.repo), preview.stdout)
+        self.assertFalse((self.repo / ".gptpro" / "standing-approvals").exists())
+        missing_candidate_result = self.prepare_from_profile(name, profile_hash)
+        missing_candidate = Path(json.loads(missing_candidate_result.stdout)["handoff_dir"])
+        missing = self.run_cli(
+            "approve",
+            "--repo",
+            str(self.repo),
+            "--handoff-dir",
+            str(missing_candidate),
+            "--standing-approval",
+            "does-not-exist",
+            expected=2,
+        )
+        self.assertIn("STANDING_APPROVAL_NOT_FOUND", missing.stderr)
+        self.assertFalse((self.repo / ".gptpro" / "standing-approvals").exists())
+
+        created = self.run_cli(
+            "standing-approval-create",
+            "--repo",
+            str(self.repo),
+            "--handoff-dir",
+            str(source),
+            "--name",
+            standing_name,
+            "--approved-by",
+            "standing-test-user",
+            "--valid-for-seconds",
+            "3600",
+            "--max-task-bytes",
+            "4096",
+            "--max-files",
+            "10",
+            "--max-bytes",
+            "65536",
+            "--max-file-bytes",
+            "65536",
+            "--confirm-standing-approval",
+        )
+        created_payload = json.loads(created.stdout)
+        profile_path = self.repo / ".gptpro" / "standing-approvals" / f"{standing_name}.json"
+        self.assertTrue(profile_path.is_file())
+        self.assertEqual(0o600, stat.S_IMODE(profile_path.stat().st_mode))
+        self.assertEqual(
+            created_payload["profile"]["profile_sha256"],
+            self.load(profile_path)["profile_sha256"],
+        )
+        listed = json.loads(
+            self.run_cli("standing-approval-list", "--repo", str(self.repo)).stdout
+        )
+        self.assertEqual(1, listed["count"])
+        self.assertEqual("active", listed["profiles"][0]["status"])
+
+        in_scope_result = self.prepare_from_profile(name, profile_hash)
+        in_scope = Path(json.loads(in_scope_result.stdout)["handoff_dir"])
+        conflict = self.run_cli(
+            "approve",
+            "--repo",
+            str(self.repo),
+            "--handoff-dir",
+            str(in_scope),
+            "--standing-approval",
+            standing_name,
+            "--confirm-transmission",
+            expected=2,
+        )
+        self.assertIn("STANDING_APPROVAL_ARGUMENT_CONFLICT", conflict.stderr)
+        approved = self.run_cli(
+            "approve",
+            "--repo",
+            str(self.repo),
+            "--handoff-dir",
+            str(in_scope),
+            "--standing-approval",
+            standing_name,
+        )
+        self.assertEqual("gptpro-standing-approval-v1", json.loads(approved.stdout)["approval_source"])
+        verified = self.run_cli("verify", "--handoff-dir", str(in_scope))
+        self.assertIn("verified", verified.stdout)
+        standing_receipt = self.load(in_scope / "state.json")["approval"]
+        self.assertEqual(standing_name, standing_receipt["standing_approval_name"])
+        self.assertEqual(
+            created_payload["profile"]["profile_sha256"],
+            standing_receipt["standing_approval_sha256"],
+        )
+
+        outside_result = self.run_cli(
+            "prepare",
+            "--repo",
+            str(self.repo),
+            "--mode",
+            "review",
+            "--transport",
+            "mcp-research",
+            "--include",
+            "outside.md",
+            "--task",
+            "Review the approved immutable repository snapshot.",
+            "--output-root",
+            str(self.output),
+            "--tunnel-profile",
+            name,
+            "--confirm-tunnel-profile-sha256",
+            profile_hash,
+            "--profile-dir",
+            str(self.profile_dir),
+            "--chatgpt-app-name",
+            APP_NAME,
+            "--chatgpt-workspace-label",
+            WORKSPACE_LABEL,
+            "--approval-ttl-seconds",
+            "600",
+            "--session-ttl-seconds",
+            "600",
+            "--idle-ttl-seconds",
+            "300",
+        )
+        outside = Path(json.loads(outside_result.stdout)["handoff_dir"])
+        rejected = self.run_cli(
+            "approve",
+            "--repo",
+            str(self.repo),
+            "--handoff-dir",
+            str(outside),
+            "--standing-approval",
+            standing_name,
+            expected=2,
+        )
+        self.assertIn("STANDING_APPROVAL_PATH_OUT_OF_SCOPE", rejected.stderr)
+        self.assertEqual("prepared", self.load(outside / "state.json")["phase"])
+
+        original_profile = profile_path.read_bytes()
+        tampered_profile = self.load(profile_path)
+        tampered_profile["scope"]["max_task_bytes"] += 1
+        profile_path.write_text(
+            json.dumps(tampered_profile, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        tampered = self.run_cli(
+            "approve",
+            "--repo",
+            str(self.repo),
+            "--handoff-dir",
+            str(outside),
+            "--standing-approval",
+            standing_name,
+            expected=2,
+        )
+        self.assertIn("STANDING_APPROVAL_HASH_MISMATCH", tampered.stderr)
+        profile_path.write_bytes(original_profile)
+        profile_path.chmod(0o600)
+
+        oversized_result = self.prepare_from_profile(
+            name,
+            profile_hash,
+            task="x" * 4097,
+        )
+        oversized = Path(json.loads(oversized_result.stdout)["handoff_dir"])
+        over_budget = self.run_cli(
+            "approve",
+            "--repo",
+            str(self.repo),
+            "--handoff-dir",
+            str(oversized),
+            "--standing-approval",
+            standing_name,
+            expected=2,
+        )
+        self.assertIn("STANDING_APPROVAL_BUDGET_EXCEEDED", over_budget.stderr)
+        self.assertEqual("prepared", self.load(oversized / "state.json")["phase"])
+
+        expired_profile = self.load(profile_path)
+        expired_profile["created_at"] = "2000-01-01T00:00:00Z"
+        expired_profile["valid_until"] = "2000-01-01T01:00:00Z"
+        module = self.load_cli_module()
+        expired_profile["profile_sha256"] = module.standing_approval_digest(expired_profile)
+        profile_path.write_bytes(module.pretty_json_bytes(expired_profile))
+        profile_path.chmod(0o600)
+        expired = self.run_cli(
+            "approve",
+            "--repo",
+            str(self.repo),
+            "--handoff-dir",
+            str(outside),
+            "--standing-approval",
+            standing_name,
+            expected=2,
+        )
+        self.assertIn("STANDING_APPROVAL_EXPIRED", expired.stderr)
+        profile_path.write_bytes(original_profile)
+        profile_path.chmod(0o600)
+
+        revoked = self.run_cli(
+            "standing-approval-revoke",
+            "--repo",
+            str(self.repo),
+            "--name",
+            standing_name,
+            "--confirm-revocation",
+        )
+        self.assertFalse(json.loads(revoked.stdout)["already_revoked"])
+        fresh_result = self.prepare_from_profile(name, profile_hash)
+        fresh = Path(json.loads(fresh_result.stdout)["handoff_dir"])
+        rejected_after_revoke = self.run_cli(
+            "approve",
+            "--repo",
+            str(self.repo),
+            "--handoff-dir",
+            str(fresh),
+            "--standing-approval",
+            standing_name,
+            expected=2,
+        )
+        self.assertIn("STANDING_APPROVAL_REVOKED", rejected_after_revoke.stderr)
+        self.assertEqual("prepared", self.load(fresh / "state.json")["phase"])
+
+    def test_standing_approval_rejects_external_research_artifacts(self) -> None:
+        name = "artifact-source-profile"
+        self.write_profile(name)
+        profile_hash = self.profile_hash(name)
+        self.run_cli("init", "--repo", str(self.repo), "--apply")
+        evidence = self.root / "evidence.txt"
+        evidence.write_text("bounded evidence\n", encoding="utf-8")
+        evidence.chmod(0o600)
+        prepared = self.run_cli(
+            "prepare",
+            "--repo",
+            str(self.repo),
+            "--mode",
+            "review",
+            "--transport",
+            "mcp-research",
+            "--include",
+            "src/**",
+            "--task",
+            "Review with explicit evidence.",
+            "--output-root",
+            str(self.output),
+            "--tunnel-profile",
+            name,
+            "--confirm-tunnel-profile-sha256",
+            profile_hash,
+            "--profile-dir",
+            str(self.profile_dir),
+            "--chatgpt-app-name",
+            APP_NAME,
+            "--chatgpt-workspace-label",
+            WORKSPACE_LABEL,
+            "--evidence-file",
+            f"test-output={evidence}",
+            "--approval-ttl-seconds",
+            "600",
+            "--session-ttl-seconds",
+            "600",
+            "--idle-ttl-seconds",
+            "300",
+        )
+        handoff = Path(json.loads(prepared.stdout)["handoff_dir"])
+        self.run_cli(
+            "approve",
+            "--handoff-dir",
+            str(handoff),
+            "--approved-by",
+            "artifact-test-user",
+            "--confirm-transmission",
+            "--confirm-mcp-disclosure",
+            "--confirm-analysis-ledger",
+        )
+        rejected = self.run_cli(
+            "standing-approval-create",
+            "--repo",
+            str(self.repo),
+            "--handoff-dir",
+            str(handoff),
+            "--name",
+            "artifact-scope",
+            "--approved-by",
+            "artifact-test-user",
+            "--dry-run",
+            expected=2,
+        )
+        self.assertIn("STANDING_APPROVAL_EXTERNAL_ARTIFACT", rejected.stderr)
 
     def test_default_profile_resolves_ambiguity_and_stale_default_fails_closed(self) -> None:
         first = "profile-one"

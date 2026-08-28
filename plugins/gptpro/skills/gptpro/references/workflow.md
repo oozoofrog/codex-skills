@@ -113,6 +113,28 @@ python3 <skill-dir>/scripts/gptpro.py approve \
   --confirm-analysis-ledger
 ```
 
+For repeated directed Schema-4 work, an optional repository-local standing profile can replace later manual package prompts without replacing exact package receipts. The source must be one manually approved, unexpired, evidence-free package prepared from a verified local Tunnel profile. Preview the full scope first:
+
+```bash
+python3 <skill-dir>/scripts/gptpro.py standing-approval-create \
+  --repo <repo> \
+  --handoff-dir <manually-approved-dir> \
+  --name routine-src-review \
+  --approved-by user \
+  --dry-run
+```
+
+After explicit approval of that mode/path/model/app/workspace/dirty/budget/expiry scope, repeat with `--confirm-standing-approval` and without `--dry-run`. A later package uses only:
+
+```bash
+python3 <skill-dir>/scripts/gptpro.py approve \
+  --repo <repo> \
+  --handoff-dir <new-dir> \
+  --standing-approval routine-src-review
+```
+
+Do not combine standing and manual approval flags. Any mismatch remains `prepared`, emits a stable `STANDING_APPROVAL_*` error, and requires the seven-field failure report before a separate exact-package approval. List and revoke profiles with `standing-approval-list` and `standing-approval-revoke --confirm-revocation`. Full semantics are in [standing-approval.md](standing-approval.md).
+
 ## Activate an experimental Web MCP session
 
 Read [web-mcp.md](web-mcp.md) first. The official `tunnel-client` profile is user-owned and must point to the exact installed `/absolute/python -I -S -B -Xpycache_prefix=/dev/null /absolute/skill/scripts/gptpro_mcp.py serve` command. Its documented v0.0.12 public flow is:

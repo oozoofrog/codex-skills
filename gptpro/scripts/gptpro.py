@@ -8,6 +8,7 @@ import contextvars
 import copy
 import difflib
 import errno
+import fcntl
 import fnmatch
 import functools
 import hashlib
@@ -27,6 +28,7 @@ import time
 import unicodedata
 import zipfile
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -188,6 +190,15 @@ DEFAULT_MAX_SUPPLEMENT_TOTAL_BYTES = 8 * 1024 * 1024
 SCHEMA3_INTERNAL_MANIFEST_MAX_BYTES = 4 * 1024 * 1024
 SCHEMA3_CENTRAL_DIRECTORY_MAX_BYTES = 2 * 1024 * 1024
 RESEARCH_INTERNAL_ARTIFACT_MAX_BYTES = 4 * 1024 * 1024
+STANDING_APPROVAL_SCHEMA_VERSION = 1
+STANDING_APPROVAL_CONTRACT = "gptpro-standing-approval-v1"
+STANDING_APPROVAL_DIRECTORY = "standing-approvals"
+STANDING_APPROVAL_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+DEFAULT_STANDING_APPROVAL_VALIDITY_SECONDS = 7 * 24 * 3_600
+MAX_STANDING_APPROVAL_VALIDITY_SECONDS = 30 * 24 * 3_600
+MAX_STANDING_TASK_BYTES = 64 * 1024
+MAX_STANDING_APPROVAL_FILES = 64
+MAX_STANDING_APPROVAL_DOCUMENT_BYTES = 256 * 1024
 MAX_JSON_NESTING_DEPTH = 64
 MAX_JSON_NODES = 100_000
 IGNORE_COMMENT = "# gptpro local handoff artifacts"
@@ -1204,6 +1215,182 @@ def load_json(path: Path) -> dict[str, Any]:
         raise HandoffError(f"Expected a JSON object: {path}")
     validate_json_tree(value, label=f"JSON artifact {path}")
     return value
+
+
+def standing_approval_name(raw: str) -> str:
+    value = raw.strip()
+    if STANDING_APPROVAL_NAME.fullmatch(value) is None:
+        raise HandoffError(
+            "STANDING_APPROVAL_NAME_INVALID: standing approval names must use 1-64 "
+            "lowercase letters, digits, dots, underscores, or hyphens"
+        )
+    return value
+
+
+def standing_repository_binding(root: Path) -> str:
+    return sha256_bytes(
+        b"gptpro-standing-repository-v1\0"
+        + str(root.resolve()).encode("utf-8", "strict")
+    )
+
+
+def _validate_private_directory(path: Path, *, create: bool) -> Path:
+    path = Path(os.path.abspath(path))
+    if create:
+        parent = path.parent
+        if parent.name == ".gptpro" and not parent.exists():
+            parent.mkdir(mode=0o700)
+        if not path.exists():
+            path.mkdir(mode=0o700)
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as exc:
+        raise HandoffError(
+            "STANDING_APPROVAL_NOT_FOUND: no standing approval directory exists for this repository"
+        ) from exc
+    if (
+        path.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise HandoffError(
+            "STANDING_APPROVAL_STORAGE_UNSAFE: standing approval storage must be an "
+            "owner-only, non-symlink directory with mode 0700"
+        )
+    return path
+
+
+def standing_approval_directory(root: Path, *, create: bool = False) -> Path:
+    storage_root = root / ".gptpro"
+    if create:
+        if storage_root.exists():
+            metadata = storage_root.lstat()
+            if (
+                storage_root.is_symlink()
+                or not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) & 0o022
+            ):
+                raise HandoffError(
+                    "STANDING_APPROVAL_STORAGE_UNSAFE: .gptpro must be an owner-controlled, "
+                    "non-symlink directory without group/world write permission"
+                )
+        else:
+            storage_root.mkdir(mode=0o700)
+    elif not storage_root.exists():
+        raise HandoffError(
+            "STANDING_APPROVAL_NOT_FOUND: no standing approval storage exists for this repository"
+        )
+    else:
+        metadata = storage_root.lstat()
+        if (
+            storage_root.is_symlink()
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise HandoffError(
+                "STANDING_APPROVAL_STORAGE_UNSAFE: .gptpro must be an owner-controlled, "
+                "non-symlink directory without group/world write permission"
+            )
+    return _validate_private_directory(
+        storage_root / STANDING_APPROVAL_DIRECTORY,
+        create=create,
+    )
+
+
+def standing_approval_path(root: Path, name: str) -> Path:
+    return standing_approval_directory(root) / f"{standing_approval_name(name)}.json"
+
+
+@contextmanager
+def standing_approval_lock(root: Path, name: str, *, create_directory: bool = True):
+    directory = standing_approval_directory(root, create=create_directory)
+    lock_path = directory / f".{standing_approval_name(name)}.lock"
+    descriptor = -1
+    try:
+        base_flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(lock_path, base_flags | os.O_CREAT | os.O_EXCL, 0o600)
+            os.fchmod(descriptor, 0o600)
+        except FileExistsError:
+            descriptor = os.open(lock_path, base_flags)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise HandoffError(
+                "STANDING_APPROVAL_STORAGE_UNSAFE: standing approval lock is unsafe"
+            )
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    except OSError as exc:
+        raise HandoffError(
+            "STANDING_APPROVAL_STORAGE_UNSAFE: unable to lock standing approval storage"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+
+def _load_private_standing_json(path: Path) -> dict[str, Any]:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size > MAX_STANDING_APPROVAL_DOCUMENT_BYTES
+        ):
+            raise HandoffError(
+                "STANDING_APPROVAL_STORAGE_UNSAFE: standing approval must be an owner-only "
+                "regular file with mode 0600"
+            )
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            descriptor = -1
+            value = json.load(handle)
+    except FileNotFoundError as exc:
+        raise HandoffError(
+            f"STANDING_APPROVAL_NOT_FOUND: standing approval {path.stem!r} does not exist"
+        ) from exc
+    except HandoffError:
+        raise
+    except (OSError, UnicodeError, ValueError, RecursionError) as exc:
+        raise HandoffError(
+            "STANDING_APPROVAL_INVALID: unable to read a valid standing approval"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if not isinstance(value, dict):
+        raise HandoffError("STANDING_APPROVAL_INVALID: standing approval is not a JSON object")
+    validate_json_tree(value, label="Standing approval")
+    return value
+
+
+def standing_approval_basis(profile: dict[str, Any]) -> dict[str, Any]:
+    basis = dict(profile)
+    basis.pop("profile_sha256", None)
+    return basis
+
+
+def standing_approval_digest(profile: dict[str, Any]) -> str:
+    return sha256_bytes(canonical_json_bytes(standing_approval_basis(profile)))
 
 
 def git_child_environment() -> dict[str, str]:
@@ -4515,6 +4702,34 @@ def verify_package(
                 or approval.get("connector_type") != MCP_CONNECTOR_TYPE
             ):
                 raise HandoffError("Schema-3 approval does not bind the current disclosure contract")
+            standing_fields: dict[str, Any] = {}
+            approval_source = approval.get("approval_source")
+            if approval_source is not None:
+                if schema_version != SCHEMA_V4 or approval_source != STANDING_APPROVAL_CONTRACT:
+                    raise HandoffError("Schema-3 approval source is unsupported")
+                standing_name = standing_approval_name(
+                    str(approval.get("standing_approval_name", ""))
+                )
+                standing_hash = require_sha256(
+                    approval.get("standing_approval_sha256"),
+                    label="Standing approval receipt hash",
+                )
+                standing_repository_hash = require_sha256(
+                    approval.get("standing_repository_binding_sha256"),
+                    label="Standing repository binding hash",
+                )
+                standing_valid_until = approval.get("standing_approval_valid_until")
+                parse_utc_timestamp(
+                    standing_valid_until,
+                    label="Standing approval receipt expiry",
+                )
+                standing_fields = {
+                    "approval_source": STANDING_APPROVAL_CONTRACT,
+                    "standing_approval_name": standing_name,
+                    "standing_approval_sha256": standing_hash,
+                    "standing_approval_valid_until": standing_valid_until,
+                    "standing_repository_binding_sha256": standing_repository_hash,
+                }
             expected_approval = {
                 "approved_at": approval.get("approved_at"),
                 "approved_by": approval.get("approved_by"),
@@ -4553,6 +4768,7 @@ def verify_package(
                     if schema_version == SCHEMA_V4
                     else {}
                 ),
+                **standing_fields,
             }
             approval_time = parse_utc_timestamp(
                 approval.get("approved_at"), label="Schema-3 approval time"
@@ -4564,11 +4780,23 @@ def verify_package(
                 manifest["mcp_disclosure"]["approval_valid_until"],
                 label="MCP approval expiry",
             )
+            standing_receipt_expiry = (
+                parse_utc_timestamp(
+                    approval["standing_approval_valid_until"],
+                    label="Standing approval receipt expiry",
+                )
+                if standing_fields
+                else None
+            )
             if (
                 not isinstance(approval.get("approved_by"), str)
                 or not approval["approved_by"].strip()
                 or approval_time < creation_time
                 or approval_time > approval_expiry
+                or (
+                    standing_receipt_expiry is not None
+                    and approval_time > standing_receipt_expiry
+                )
                 or approval_time > datetime.now(timezone.utc) + timedelta(minutes=5)
                 or approval != expected_approval
             ):
@@ -11257,38 +11485,270 @@ def require_phase(state: dict[str, Any], expected: str) -> None:
         raise HandoffError(f"Expected phase {expected!r}, found {state.get('phase')!r}")
 
 
-@_with_package_lock(_command_handoff_arg)
-def command_approve(args: argparse.Namespace) -> int:
-    if not args.confirm_transmission:
-        raise HandoffError("Approval requires --confirm-transmission after the user approves the exact outbound text")
-    if not args.approved_by.strip():
-        raise HandoffError("--approved-by must not be empty")
-    handoff_dir = validate_handoff_dir(args.handoff_dir)
-    verified = verify_package(handoff_dir)
-    state = verified["state"]
-    require_phase(state, "prepared")
+def validate_standing_approval(
+    profile: dict[str, Any], *, root: Path, expected_name: str | None = None
+) -> dict[str, Any]:
+    expected_keys = {
+        "schema_version",
+        "contract",
+        "name",
+        "created_at",
+        "valid_until",
+        "revoked_at",
+        "approved_by",
+        "source",
+        "repository",
+        "scope",
+        "profile_sha256",
+    }
+    if set(profile) != expected_keys:
+        raise HandoffError("STANDING_APPROVAL_INVALID: profile fields differ from the v1 contract")
+    if (
+        profile.get("schema_version") != STANDING_APPROVAL_SCHEMA_VERSION
+        or profile.get("contract") != STANDING_APPROVAL_CONTRACT
+    ):
+        raise HandoffError("STANDING_APPROVAL_INVALID: unsupported standing approval contract")
+    name = standing_approval_name(str(profile.get("name", "")))
+    if expected_name is not None and name != standing_approval_name(expected_name):
+        raise HandoffError("STANDING_APPROVAL_INVALID: profile name does not match its filename")
+    approved_by = profile.get("approved_by")
+    if not isinstance(approved_by, str) or not approved_by.strip() or len(approved_by) > 128:
+        raise HandoffError("STANDING_APPROVAL_INVALID: approved_by is missing or too long")
+    created_at = parse_utc_timestamp(profile.get("created_at"), label="Standing approval creation time")
+    valid_until = parse_utc_timestamp(profile.get("valid_until"), label="Standing approval expiry")
+    lifetime = int((valid_until - created_at).total_seconds())
+    if not 300 <= lifetime <= MAX_STANDING_APPROVAL_VALIDITY_SECONDS:
+        raise HandoffError("STANDING_APPROVAL_INVALID: profile lifetime is outside the supported range")
+    revoked_at = profile.get("revoked_at")
+    if revoked_at is not None:
+        revoked_time = parse_utc_timestamp(revoked_at, label="Standing approval revocation time")
+        if revoked_time < created_at or revoked_time > datetime.now(timezone.utc) + timedelta(minutes=5):
+            raise HandoffError("STANDING_APPROVAL_INVALID: profile revocation time is invalid")
+    source = profile.get("source")
+    if not isinstance(source, dict) or set(source) != {
+        "package_id",
+        "manifest_sha256",
+        "approval_event_sha256",
+    }:
+        raise HandoffError("STANDING_APPROVAL_INVALID: source approval binding is invalid")
+    if not isinstance(source.get("package_id"), str) or not source["package_id"]:
+        raise HandoffError("STANDING_APPROVAL_INVALID: source package ID is invalid")
+    require_sha256(source.get("manifest_sha256"), label="Standing source manifest hash")
+    require_sha256(source.get("approval_event_sha256"), label="Standing source approval event hash")
+    repository = profile.get("repository")
+    if not isinstance(repository, dict) or set(repository) != {
+        "display_identity",
+        "root_binding_sha256",
+    }:
+        raise HandoffError("STANDING_APPROVAL_INVALID: repository binding is invalid")
+    if (
+        not isinstance(repository.get("display_identity"), str)
+        or not repository["display_identity"].strip()
+        or repository["root_binding_sha256"] != standing_repository_binding(root)
+    ):
+        raise HandoffError(
+            "STANDING_APPROVAL_REPOSITORY_MISMATCH: profile belongs to a different local repository"
+        )
+    scope = profile.get("scope")
+    expected_scope_keys = {
+        "transport",
+        "delivery_channel",
+        "connector_type",
+        "tunnel_profile_alias",
+        "tunnel_profile_sha256",
+        "app_name",
+        "workspace_label",
+        "tool_schema_sha256",
+        "protocol_profile",
+        "requested_model",
+        "allowed_modes",
+        "path_scope",
+        "allow_dirty",
+        "max_task_bytes",
+        "max_files",
+        "max_bytes",
+        "max_file_bytes",
+        "max_package_approval_ttl_seconds",
+        "mcp_limits",
+        "external_artifacts_allowed",
+    }
+    if not isinstance(scope, dict) or set(scope) != expected_scope_keys:
+        raise HandoffError("STANDING_APPROVAL_INVALID: scope fields differ from the v1 contract")
+    if (
+        scope.get("transport") != "mcp-research"
+        or scope.get("delivery_channel") != "browser"
+        or scope.get("connector_type") != MCP_CONNECTOR_TYPE
+        or scope.get("external_artifacts_allowed") is not False
+        or type(scope.get("allow_dirty")) is not bool
+    ):
+        raise HandoffError("STANDING_APPROVAL_INVALID: unsupported standing approval scope")
+    for label in ("tunnel_profile_alias", "app_name", "workspace_label", "protocol_profile", "requested_model"):
+        value = scope.get(label)
+        if not isinstance(value, str) or not value or len(value) > 256 or any(ord(char) < 32 for char in value):
+            raise HandoffError(f"STANDING_APPROVAL_INVALID: scope {label} is invalid")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", scope["tunnel_profile_alias"]) is None:
+        raise HandoffError("STANDING_APPROVAL_INVALID: Tunnel profile alias is invalid")
+    require_sha256(scope.get("tunnel_profile_sha256"), label="Standing Tunnel profile hash")
+    require_sha256(scope.get("tool_schema_sha256"), label="Standing tool schema hash")
+    allowed_modes = scope.get("allowed_modes")
+    if (
+        not isinstance(allowed_modes, list)
+        or not allowed_modes
+        or allowed_modes != sorted(set(allowed_modes))
+        or any(mode not in MODES for mode in allowed_modes)
+    ):
+        raise HandoffError("STANDING_APPROVAL_INVALID: allowed modes are invalid")
+    path_scope = scope.get("path_scope")
+    if not isinstance(path_scope, dict) or set(path_scope) != {
+        "include_patterns",
+        "exact_paths",
+        "exclude_patterns",
+    }:
+        raise HandoffError("STANDING_APPROVAL_INVALID: path scope is invalid")
+    for field, normalizer in (
+        ("include_patterns", normalize_pattern),
+        ("exclude_patterns", normalize_pattern),
+        ("exact_paths", normalize_rel_path),
+    ):
+        values = path_scope.get(field)
+        if not isinstance(values, list) or values != sorted(set(values)):
+            raise HandoffError(f"STANDING_APPROVAL_INVALID: {field} must be sorted and unique")
+        for value in values:
+            if not isinstance(value, str) or normalizer(value, label=f"Standing {field}") != value:
+                raise HandoffError(f"STANDING_APPROVAL_INVALID: {field} contains an invalid value")
+    if not path_scope["include_patterns"] and not path_scope["exact_paths"]:
+        raise HandoffError("STANDING_APPROVAL_INVALID: path scope must not be empty")
+    numeric_limits = {
+        "max_task_bytes": MAX_STANDING_TASK_BYTES,
+        "max_files": DEFAULT_MAX_FILES,
+        "max_bytes": DEFAULT_MAX_BYTES,
+        "max_file_bytes": DEFAULT_MAX_FILE_BYTES,
+        "max_package_approval_ttl_seconds": 7 * 24 * 3_600,
+    }
+    for field, maximum in numeric_limits.items():
+        value = scope.get(field)
+        minimum = 300 if field == "max_package_approval_ttl_seconds" else 1
+        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            raise HandoffError(f"STANDING_APPROVAL_INVALID: {field} is outside its supported range")
+    try:
+        scope["mcp_limits"] = validate_limits_for_schema(SCHEMA_V4, scope.get("mcp_limits"))
+    except (TypeError, ValueError) as exc:
+        raise HandoffError(f"STANDING_APPROVAL_INVALID: MCP limits are invalid: {exc}") from exc
+    expected_digest = standing_approval_digest(profile)
+    if profile.get("profile_sha256") != expected_digest:
+        raise HandoffError("STANDING_APPROVAL_HASH_MISMATCH: standing approval content changed")
+    return profile
+
+
+def load_standing_approval(root: Path, name: str) -> dict[str, Any]:
+    normalized = standing_approval_name(name)
+    profile = _load_private_standing_json(standing_approval_path(root, normalized))
+    return validate_standing_approval(profile, root=root, expected_name=normalized)
+
+
+def standing_approval_status(profile: dict[str, Any]) -> str:
+    if profile.get("revoked_at") is not None:
+        return "revoked"
+    if parse_utc_timestamp(profile["valid_until"], label="Standing approval expiry") <= datetime.now(timezone.utc):
+        return "expired"
+    return "active"
+
+
+def _standing_path_allowed(path: str, path_scope: dict[str, Any]) -> bool:
+    if matches_any(path, path_scope["exclude_patterns"]):
+        return False
+    return path in set(path_scope["exact_paths"]) or matches_any(
+        path, path_scope["include_patterns"]
+    )
+
+
+def match_standing_approval(
+    profile: dict[str, Any], *, root: Path, verified: dict[str, Any]
+) -> None:
+    profile = validate_standing_approval(profile, root=root, expected_name=profile.get("name"))
+    status = standing_approval_status(profile)
+    if status != "active":
+        raise HandoffError(f"STANDING_APPROVAL_{status.upper()}: standing approval is {status}")
+    manifest = verified["manifest"]
+    if int(manifest.get("schema_version", 0)) != SCHEMA_V4:
+        raise HandoffError("STANDING_APPROVAL_SCOPE_MISMATCH: only schema-4 mcp-research is supported")
+    scope = profile["scope"]
+    connector = manifest["connector"]
+    expected_connector = {
+        "transport": manifest["transport"]["resolved"],
+        "delivery_channel": manifest["delivery"]["channel"],
+        "connector_type": connector["type"],
+        "tunnel_profile_alias": connector["tunnel_profile_alias"],
+        "tunnel_profile_sha256": connector.get("tunnel_profile_sha256"),
+        "app_name": connector["app_name"],
+        "workspace_label": connector["workspace_label"],
+        "tool_schema_sha256": connector["tool_schema_sha256"],
+        "protocol_profile": connector["protocol_profile"],
+        "requested_model": manifest["requested_model"],
+    }
+    if any(scope[key] != value for key, value in expected_connector.items()):
+        raise HandoffError(
+            "STANDING_APPROVAL_SCOPE_MISMATCH: transport, model, app, workspace, or Tunnel binding changed"
+        )
+    if connector.get("tunnel_binding_source") != "verified-local-profile-v1":
+        raise HandoffError(
+            "STANDING_APPROVAL_SCOPE_MISMATCH: a verified reusable Tunnel profile is required"
+        )
+    if manifest["repository"]["display_identity"] != profile["repository"]["display_identity"]:
+        raise HandoffError("STANDING_APPROVAL_REPOSITORY_MISMATCH: public repository identity changed")
+    if public_git_identity(git_identity(root)) != manifest.get("git"):
+        raise HandoffError(
+            "STANDING_APPROVAL_REPOSITORY_DRIFT: current Git identity differs from the prepared package"
+        )
+    if manifest["mode"] not in scope["allowed_modes"]:
+        raise HandoffError("STANDING_APPROVAL_SCOPE_MISMATCH: package mode is not approved")
+    if len(manifest["task"].encode("utf-8")) > scope["max_task_bytes"]:
+        raise HandoffError("STANDING_APPROVAL_BUDGET_EXCEEDED: task text exceeds the approved maximum")
+    if manifest["git"].get("clean") is not True and not scope["allow_dirty"]:
+        raise HandoffError("STANDING_APPROVAL_DIRTY_REPOSITORY: dirty repository content was not approved")
+    research = manifest.get("research", {})
+    if research.get("evidence") or research.get("supplement_artifact_ids"):
+        raise HandoffError(
+            "STANDING_APPROVAL_EXTERNAL_ARTIFACT: external evidence and supplements require exact approval"
+        )
+    files = manifest["files"]
+    path_scope = scope["path_scope"]
+    disallowed = [entry["path"] for entry in files if not _standing_path_allowed(entry["path"], path_scope)]
+    if disallowed:
+        raise HandoffError(
+            "STANDING_APPROVAL_PATH_OUT_OF_SCOPE: package includes a path outside the approved scope"
+        )
+    included_bytes = sum(int(entry["size"]) for entry in files)
+    if (
+        len(files) > scope["max_files"]
+        or included_bytes > scope["max_bytes"]
+        or any(int(entry["size"]) > scope["max_file_bytes"] for entry in files)
+    ):
+        raise HandoffError("STANDING_APPROVAL_BUDGET_EXCEEDED: repository disclosure exceeds approved limits")
+    for key, value in manifest["mcp_disclosure"]["limits"].items():
+        if value > scope["mcp_limits"][key]:
+            raise HandoffError(
+                f"STANDING_APPROVAL_BUDGET_EXCEEDED: MCP limit {key} exceeds the approved maximum"
+            )
+    created_at = parse_utc_timestamp(manifest["created_at"], label="Package creation time")
+    approval_expiry = parse_utc_timestamp(
+        manifest["mcp_disclosure"]["approval_valid_until"], label="Package approval expiry"
+    )
+    approval_lifetime = int((approval_expiry - created_at).total_seconds())
+    if approval_lifetime > scope["max_package_approval_ttl_seconds"]:
+        raise HandoffError(
+            "STANDING_APPROVAL_BUDGET_EXCEEDED: package approval TTL exceeds the approved maximum"
+        )
+
+
+def package_approval_record(
+    verified: dict[str, Any], *, approved_by: str, standing_profile: dict[str, Any] | None = None
+) -> dict[str, Any]:
     manifest = verified["manifest"]
     schema_version = int(manifest["schema_version"])
-    if is_mcp_schema(schema_version):
-        if not args.confirm_mcp_disclosure:
-            raise HandoffError(
-                f"Schema-{schema_version} {manifest['transport']['resolved']} approval requires "
-                "--confirm-mcp-disclosure after the user reviews the exact maximum disclosure set"
-            )
-        if parse_utc_timestamp(
-            manifest["mcp_disclosure"]["approval_valid_until"], label="MCP approval expiry"
-        ) <= datetime.now(timezone.utc):
-            raise HandoffError(
-                f"Schema-{schema_version} MCP approval window has expired; prepare a new package"
-            )
-        if schema_version == SCHEMA_V4 and not args.confirm_analysis_ledger:
-            raise HandoffError(
-                "Schema-4 mcp-research approval requires --confirm-analysis-ledger after reviewing "
-                "the read-only owner-note ledger and exact-byte Codex note policy"
-            )
-    approval = {
+    return {
         "approved_at": utc_now(),
-        "approved_by": args.approved_by,
+        "approved_by": approved_by,
         "destination": manifest["destination"],
         "manifest_sha256": verified["manifest_sha256"],
         "transport": manifest["transport"]["resolved"],
@@ -11303,15 +11763,10 @@ def command_approve(args: argparse.Namespace) -> int:
                 "tunnel_id_binding_sha256": manifest["connector"]["tunnel_id_binding_sha256"],
                 **(
                     {
-                        "tunnel_binding_source": manifest["connector"][
-                            "tunnel_binding_source"
-                        ],
-                        "tunnel_profile_sha256": manifest["connector"][
-                            "tunnel_profile_sha256"
-                        ],
+                        "tunnel_binding_source": manifest["connector"]["tunnel_binding_source"],
+                        "tunnel_profile_sha256": manifest["connector"]["tunnel_profile_sha256"],
                     }
-                    if manifest["connector"].get("tunnel_binding_source")
-                    == "verified-local-profile-v1"
+                    if manifest["connector"].get("tunnel_binding_source") == "verified-local-profile-v1"
                     else {}
                 ),
                 "tool_schema_sha256": manifest["connector"]["tool_schema_sha256"],
@@ -11321,9 +11776,18 @@ def command_approve(args: argparse.Namespace) -> int:
                 "potential_bytes": manifest["mcp_disclosure"]["potential_bytes"],
                 "limits": manifest["mcp_disclosure"]["limits"],
                 "approval_valid_until": manifest["mcp_disclosure"]["approval_valid_until"],
+                **({"analysis_ledger_confirmed": True} if schema_version == SCHEMA_V4 else {}),
                 **(
-                    {"analysis_ledger_confirmed": True}
-                    if schema_version == SCHEMA_V4
+                    {
+                        "approval_source": STANDING_APPROVAL_CONTRACT,
+                        "standing_approval_name": standing_profile["name"],
+                        "standing_approval_sha256": standing_profile["profile_sha256"],
+                        "standing_approval_valid_until": standing_profile["valid_until"],
+                        "standing_repository_binding_sha256": standing_profile["repository"][
+                            "root_binding_sha256"
+                        ],
+                    }
+                    if standing_profile is not None
                     else {}
                 ),
             }
@@ -11331,13 +11795,320 @@ def command_approve(args: argparse.Namespace) -> int:
             else {}
         ),
     }
+
+
+def standing_profile_from_package(
+    args: argparse.Namespace, *, root: Path, verified: dict[str, Any]
+) -> dict[str, Any]:
+    state = verified["state"]
+    if state.get("phase") not in PHASES[PHASES.index("approved") :]:
+        raise HandoffError("STANDING_APPROVAL_SOURCE_UNAPPROVED: source package must already be approved")
+    manifest = verified["manifest"]
+    if int(manifest.get("schema_version", 0)) != SCHEMA_V4 or manifest["transport"]["resolved"] != "mcp-research":
+        raise HandoffError("STANDING_APPROVAL_SOURCE_UNSUPPORTED: source must be schema-4 mcp-research")
+    approval = state.get("approval")
+    if not isinstance(approval, dict) or approval.get("approval_source") is not None:
+        raise HandoffError(
+            "STANDING_APPROVAL_SOURCE_UNSUPPORTED: source requires one ordinary exact-package approval"
+        )
+    if parse_utc_timestamp(
+        manifest["mcp_disclosure"]["approval_valid_until"], label="Source approval expiry"
+    ) <= datetime.now(timezone.utc):
+        raise HandoffError("STANDING_APPROVAL_SOURCE_EXPIRED: source package approval has expired")
+    connector = manifest["connector"]
+    if connector.get("tunnel_binding_source") != "verified-local-profile-v1":
+        raise HandoffError(
+            "STANDING_APPROVAL_SOURCE_UNSUPPORTED: source requires a verified reusable Tunnel profile"
+        )
+    if (
+        repository_display_identity(root) != manifest["repository"]["display_identity"]
+        or public_git_identity(git_identity(root)) != manifest.get("git")
+    ):
+        raise HandoffError(
+            "STANDING_APPROVAL_REPOSITORY_MISMATCH: source package does not match the current repository"
+        )
+    selection = manifest["selection"]
+    if selection.get("mode") != "directed":
+        raise HandoffError("STANDING_APPROVAL_SCOPE_TOO_BROAD: source package must use directed selection")
+    research = manifest.get("research", {})
+    if research.get("evidence") or research.get("supplement_artifact_ids"):
+        raise HandoffError(
+            "STANDING_APPROVAL_EXTERNAL_ARTIFACT: source must not include evidence or supplements"
+        )
+    allowed_modes = sorted(set(args.allow_mode or [manifest["mode"]]))
+    if manifest["mode"] not in allowed_modes:
+        raise HandoffError("STANDING_APPROVAL_SCOPE_MISMATCH: source mode must remain approved")
+    files = manifest["files"]
+    actual_bytes = sum(int(entry["size"]) for entry in files)
+    actual_file_bytes = max(int(entry["size"]) for entry in files)
+    max_task_bytes = args.max_task_bytes or len(manifest["task"].encode("utf-8"))
+    max_files = args.max_files or len(files)
+    max_bytes = args.max_bytes or actual_bytes
+    max_file_bytes = args.max_file_bytes or actual_file_bytes
+    if (
+        max_task_bytes < len(manifest["task"].encode("utf-8"))
+        or max_files < len(files)
+        or max_bytes < actual_bytes
+        or max_file_bytes < actual_file_bytes
+    ):
+        raise HandoffError("STANDING_APPROVAL_BUDGET_TOO_SMALL: profile limits exclude the source package")
+    created_at = datetime.now(timezone.utc).replace(microsecond=0)
+    valid_until = created_at + timedelta(seconds=args.valid_for_seconds)
+    approval_events = [
+        event for event in verified["receipt"]["events"] if event.get("type") == "approved"
+    ]
+    if not approval_events:
+        raise HandoffError("STANDING_APPROVAL_SOURCE_UNAPPROVED: source approval event is missing")
+    source_created = parse_utc_timestamp(manifest["created_at"], label="Source package creation time")
+    source_expiry = parse_utc_timestamp(
+        manifest["mcp_disclosure"]["approval_valid_until"], label="Source approval expiry"
+    )
+    profile = {
+        "schema_version": STANDING_APPROVAL_SCHEMA_VERSION,
+        "contract": STANDING_APPROVAL_CONTRACT,
+        "name": standing_approval_name(args.name),
+        "created_at": created_at.isoformat().replace("+00:00", "Z"),
+        "valid_until": valid_until.isoformat().replace("+00:00", "Z"),
+        "revoked_at": None,
+        "approved_by": args.approved_by.strip(),
+        "source": {
+            "package_id": manifest["package_id"],
+            "manifest_sha256": verified["manifest_sha256"],
+            "approval_event_sha256": approval_events[-1]["event_hash"],
+        },
+        "repository": {
+            "display_identity": manifest["repository"]["display_identity"],
+            "root_binding_sha256": standing_repository_binding(root),
+        },
+        "scope": {
+            "transport": "mcp-research",
+            "delivery_channel": "browser",
+            "connector_type": MCP_CONNECTOR_TYPE,
+            "tunnel_profile_alias": connector["tunnel_profile_alias"],
+            "tunnel_profile_sha256": connector["tunnel_profile_sha256"],
+            "app_name": connector["app_name"],
+            "workspace_label": connector["workspace_label"],
+            "tool_schema_sha256": connector["tool_schema_sha256"],
+            "protocol_profile": connector["protocol_profile"],
+            "requested_model": manifest["requested_model"],
+            "allowed_modes": allowed_modes,
+            "path_scope": {
+                "include_patterns": sorted(set(selection["include_patterns"])),
+                "exact_paths": sorted(set(selection["file_list_entries"])),
+                "exclude_patterns": sorted(set(selection["exclude_patterns"])),
+            },
+            "allow_dirty": bool(args.allow_dirty),
+            "max_task_bytes": max_task_bytes,
+            "max_files": max_files,
+            "max_bytes": max_bytes,
+            "max_file_bytes": max_file_bytes,
+            "max_package_approval_ttl_seconds": int((source_expiry - source_created).total_seconds()),
+            "mcp_limits": manifest["mcp_disclosure"]["limits"],
+            "external_artifacts_allowed": False,
+        },
+    }
+    profile["profile_sha256"] = standing_approval_digest(profile)
+    return validate_standing_approval(profile, root=root, expected_name=profile["name"])
+
+
+@_with_package_lock(_command_handoff_arg)
+def command_standing_approval_create(args: argparse.Namespace) -> int:
+    root = resolve_git_root(args.repo)
+    handoff_dir = validate_handoff_dir(args.handoff_dir)
+    verified = verify_package(handoff_dir)
+    profile = standing_profile_from_package(args, root=root, verified=verified)
+    result = {
+        "ok": True,
+        "operation": "standing-approval-create",
+        "dry_run": bool(args.dry_run),
+        "would_write_on_confirm": bool(args.dry_run),
+        "write_performed": False,
+        "profile": profile,
+        "transmission_performed": False,
+    }
+    if args.dry_run:
+        print(json.dumps(result, sort_keys=True, indent=2))
+        return 0
+    if not args.confirm_standing_approval:
+        raise HandoffError(
+            "STANDING_APPROVAL_CONFIRMATION_REQUIRED: review the dry-run scope, then pass "
+            "--confirm-standing-approval"
+        )
+    with standing_approval_lock(root, profile["name"]):
+        path = standing_approval_directory(root) / f"{profile['name']}.json"
+        if path.exists():
+            raise HandoffError(
+                "STANDING_APPROVAL_ALREADY_EXISTS: revoke the existing profile and choose a new name"
+            )
+        write_json(path, profile)
+        os.chmod(path, 0o600)
+    result["stored"] = True
+    result["write_performed"] = True
+    print(json.dumps(result, sort_keys=True, indent=2))
+    return 0
+
+
+def command_standing_approval_list(args: argparse.Namespace) -> int:
+    root = resolve_git_root(args.repo)
+    try:
+        directory = standing_approval_directory(root)
+    except HandoffError as exc:
+        if str(exc).startswith("STANDING_APPROVAL_NOT_FOUND:"):
+            print(json.dumps({"ok": True, "profiles": [], "count": 0}, indent=2))
+            return 0
+        raise
+    paths = sorted(directory.glob("*.json"))
+    if len(paths) > MAX_STANDING_APPROVAL_FILES:
+        raise HandoffError("STANDING_APPROVAL_STORAGE_UNSAFE: too many standing approval profiles")
+    profiles = []
+    for path in paths:
+        name = standing_approval_name(path.stem)
+        profile = validate_standing_approval(
+            _load_private_standing_json(path), root=root, expected_name=name
+        )
+        profiles.append(
+            {
+                "name": name,
+                "status": standing_approval_status(profile),
+                "valid_until": profile["valid_until"],
+                "approved_by": profile["approved_by"],
+                "profile_sha256": profile["profile_sha256"],
+                "scope": profile["scope"],
+            }
+        )
+    print(json.dumps({"ok": True, "profiles": profiles, "count": len(profiles)}, sort_keys=True, indent=2))
+    return 0
+
+
+def command_standing_approval_revoke(args: argparse.Namespace) -> int:
+    if not args.confirm_revocation:
+        raise HandoffError("STANDING_APPROVAL_CONFIRMATION_REQUIRED: revocation requires --confirm-revocation")
+    root = resolve_git_root(args.repo)
+    name = standing_approval_name(args.name)
+    load_standing_approval(root, name)
+    with standing_approval_lock(root, name, create_directory=False):
+        profile = load_standing_approval(root, name)
+        already_revoked = profile.get("revoked_at") is not None
+        if profile.get("revoked_at") is None:
+            profile["revoked_at"] = utc_now()
+            profile["profile_sha256"] = standing_approval_digest(profile)
+            validate_standing_approval(profile, root=root, expected_name=name)
+            path = standing_approval_path(root, name)
+            write_json(path, profile)
+            os.chmod(path, 0o600)
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "operation": "standing-approval-revoke",
+                "name": name,
+                "status": "revoked",
+                "revoked_at": profile["revoked_at"],
+                "profile_sha256": profile["profile_sha256"],
+                "already_revoked": already_revoked,
+            },
+            sort_keys=True,
+            indent=2,
+        )
+    )
+    return 0
+
+
+@_with_package_lock(_command_handoff_arg)
+def command_approve(args: argparse.Namespace) -> int:
+    handoff_dir = validate_handoff_dir(args.handoff_dir)
+    verified = verify_package(handoff_dir)
+    state = verified["state"]
+    require_phase(state, "prepared")
+    manifest = verified["manifest"]
+    schema_version = int(manifest["schema_version"])
+    standing_profile: dict[str, Any] | None = None
+    if args.standing_approval:
+        if args.approved_by or args.confirm_transmission or args.confirm_mcp_disclosure or args.confirm_analysis_ledger:
+            raise HandoffError(
+                "STANDING_APPROVAL_ARGUMENT_CONFLICT: standing approval cannot be combined with "
+                "manual confirmation flags"
+            )
+        if schema_version != SCHEMA_V4:
+            raise HandoffError("STANDING_APPROVAL_SCOPE_MISMATCH: only schema-4 mcp-research is supported")
+        root = resolve_git_root(args.repo)
+        name = standing_approval_name(args.standing_approval)
+        load_standing_approval(root, name)
+        with standing_approval_lock(root, name, create_directory=False):
+            standing_profile = load_standing_approval(root, name)
+            match_standing_approval(standing_profile, root=root, verified=verified)
+            approval = package_approval_record(
+                verified,
+                approved_by=standing_profile["approved_by"],
+                standing_profile=standing_profile,
+            )
+            if parse_utc_timestamp(
+                manifest["mcp_disclosure"]["approval_valid_until"], label="MCP approval expiry"
+            ) <= datetime.now(timezone.utc):
+                raise HandoffError(
+                    f"Schema-{schema_version} MCP approval window has expired; prepare a new package"
+                )
+            state["phase"] = "approved"
+            state["updated_at"] = approval["approved_at"]
+            state["approval"] = approval
+            state["revision"] += 1
+            commit_state_receipt_event(handoff_dir, state, "approved", approval)
+            print(
+                json.dumps(
+                    {
+                        "package_id": state["package_id"],
+                        "phase": "approved",
+                        "approval_source": STANDING_APPROVAL_CONTRACT,
+                        "standing_approval_name": standing_profile["name"],
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+    else:
+        if not args.confirm_transmission:
+            raise HandoffError(
+                "Approval requires --confirm-transmission after the user approves the exact outbound text"
+            )
+        if not isinstance(args.approved_by, str) or not args.approved_by.strip():
+            raise HandoffError("--approved-by must not be empty")
+        if is_mcp_schema(schema_version):
+            if not args.confirm_mcp_disclosure:
+                raise HandoffError(
+                    f"Schema-{schema_version} {manifest['transport']['resolved']} approval requires "
+                    "--confirm-mcp-disclosure after the user reviews the exact maximum disclosure set"
+                )
+            if schema_version == SCHEMA_V4 and not args.confirm_analysis_ledger:
+                raise HandoffError(
+                    "Schema-4 mcp-research approval requires --confirm-analysis-ledger after reviewing "
+                    "the read-only owner-note ledger and exact-byte Codex note policy"
+                )
+        approval = package_approval_record(
+            verified,
+            approved_by=args.approved_by.strip(),
+        )
+    if is_mcp_schema(schema_version) and parse_utc_timestamp(
+        manifest["mcp_disclosure"]["approval_valid_until"], label="MCP approval expiry"
+    ) <= datetime.now(timezone.utc):
+        raise HandoffError(
+            f"Schema-{schema_version} MCP approval window has expired; prepare a new package"
+        )
     state["phase"] = "approved"
     state["updated_at"] = approval["approved_at"]
     state["approval"] = approval
     if is_mcp_schema(schema_version):
         state["revision"] += 1
     commit_state_receipt_event(handoff_dir, state, "approved", approval)
-    print(json.dumps({"package_id": state["package_id"], "phase": "approved"}, indent=2))
+    print(
+        json.dumps(
+            {
+                "package_id": state["package_id"],
+                "phase": "approved",
+                "approval_source": "exact-package",
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -12233,9 +13004,52 @@ def build_parser() -> argparse.ArgumentParser:
     )
     human_handoff.set_defaults(func=command_human_handoff)
 
-    approve = subparsers.add_parser("approve", help="Record package-specific user approval")
+    standing_create = subparsers.add_parser(
+        "standing-approval-create",
+        help="Preview or create a repository-scoped standing approval from one exactly approved package",
+    )
+    standing_create.add_argument("--repo", default=".")
+    standing_create.add_argument("--handoff-dir", required=True)
+    standing_create.add_argument("--name", required=True)
+    standing_create.add_argument("--approved-by", required=True)
+    standing_create.add_argument(
+        "--valid-for-seconds",
+        type=positive_int,
+        default=DEFAULT_STANDING_APPROVAL_VALIDITY_SECONDS,
+    )
+    standing_create.add_argument("--allow-mode", action="append", choices=MODES, default=[])
+    standing_create.add_argument("--allow-dirty", action="store_true")
+    standing_create.add_argument("--max-task-bytes", type=positive_int)
+    standing_create.add_argument("--max-files", type=positive_int)
+    standing_create.add_argument("--max-bytes", type=positive_int)
+    standing_create.add_argument("--max-file-bytes", type=positive_int)
+    standing_create.add_argument("--dry-run", action="store_true")
+    standing_create.add_argument("--confirm-standing-approval", action="store_true")
+    standing_create.set_defaults(func=command_standing_approval_create)
+
+    standing_list = subparsers.add_parser(
+        "standing-approval-list",
+        help="List repository-local standing approvals without changing them",
+    )
+    standing_list.add_argument("--repo", default=".")
+    standing_list.set_defaults(func=command_standing_approval_list)
+
+    standing_revoke = subparsers.add_parser(
+        "standing-approval-revoke",
+        help="Revoke a repository-local standing approval for future packages",
+    )
+    standing_revoke.add_argument("--repo", default=".")
+    standing_revoke.add_argument("--name", required=True)
+    standing_revoke.add_argument("--confirm-revocation", action="store_true")
+    standing_revoke.set_defaults(func=command_standing_approval_revoke)
+
+    approve = subparsers.add_parser(
+        "approve", help="Record an exact-package approval manually or from a bounded standing profile"
+    )
+    approve.add_argument("--repo", default=".")
     approve.add_argument("--handoff-dir", required=True)
-    approve.add_argument("--approved-by", required=True)
+    approve.add_argument("--approved-by")
+    approve.add_argument("--standing-approval")
     approve.add_argument("--confirm-transmission", action="store_true")
     approve.add_argument(
         "--confirm-mcp-disclosure",
