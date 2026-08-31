@@ -1,362 +1,122 @@
 # gptpro
 
-`gptpro` is an attended Codex Skill for consulting a logged-in ChatGPT Pro general Chat without giving the web model direct authority over the local repository.
-
-It initializes local handoff storage, scans and hashes selected repository files, records the exact Git state, excludes likely secrets and build noise, requires transport-specific user approval, guides the visible Chrome or human handoff, imports only the package-marked response, and records Codex's later evaluation. After a confirmed submission with an exact ChatGPT conversation URL, a bounded same-task Codex heartbeat can collect long-running responses without resending the prompt: two-minute checks, at most 15 runs/30 minutes, with receipt-bound creation and terminal cleanup. GitHub-first handoffs pin a remotely verified immutable commit and send only a prompt; text handoffs retain structured Markdown alternatives. A ZIP is retained locally for audit and integrity checks but is not uploaded by default.
-
-This build also contains two explicit experimental Web MCP contracts. Schema-3 `mcp-read` retains the original three-tool immutable repository reader. Schema-4 `mcp-research` adds a prepare-time workspace map and a diff against the exact Git SHA recorded as `HEAD` in the manifest, explicit test/build/diagnostic evidence, multi-range reads, multi-query search, and an owner-controlled context-note ledger. All seven schema-4 MCP tools are read-only so the contract remains usable with ChatGPT Pro's current read/fetch-only custom-MCP support. Pro returns findings in the visible Chat response; it cannot mutate the ledger or repository. Separately approved exact-byte Codex notes may be appended locally and then read by Pro. Both paths supervise the official `tunnel-client` foreground flow and leave Developer Mode, ChatGPT app/workspace selection, account authorization, and prompt submission attended. See [Web MCP repository consultation](references/web-mcp.md), [repository research](references/mcp-research.md), and OpenAI's [Developer mode and MCP apps](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt).
-
-## Install
-
-From Codex, request a network installation without running Python directly:
+`gptpro`는 Codex가 macOS ChatGPT 앱의 로그인된 ChatGPT Pro와 협업하도록 돕는 Skill입니다.
 
 ```text
-$skill-installer Install gptpro from https://github.com/oozoofrog/codex-skills/tree/main/gptpro
+사용자: $gptpro 이 변경을 리뷰해주세요
+Codex: 관련 코드 선택 및 비밀 검사
+       → 읽기 전용 MCP package 승인/활성화
+       → ChatGPT 앱의 새 Chat에서 1회 전송
+       → 응답 회수
+       → 로컬 코드로 독립 검증
 ```
 
-Alternatively, register the repository Marketplace once and install `GPT Pro Collaborator` from the Plugins browser:
+ChatGPT Pro는 조언자입니다. 실제 파일 수정, shell, build/test, Git 작업은 Codex만 수행합니다.
+
+## 가장 중요한 사용 모델
+
+- Codex에서 보이는 Skill 이름은 `GPT Pro Collaborator`입니다.
+- ChatGPT 앱에서 실제로 선택하는 읽기 전용 App 이름은 `gptpro`입니다. 두 이름은 같은 화면 이름이 아닙니다.
+- `gptpro` ChatGPT App과 Tunnel 프로필은 **사용자 계정에 한 번** 연결합니다.
+- 프로젝트마다 앱을 다시 만들지 않습니다.
+- 각 요청에서는 “이번에 어떤 저장소 파일을 얼마나 읽을 수 있는가”를 고정한 작은 package만 새로 만듭니다.
+- 범위 제한형 상시 승인을 만들면 조건이 맞는 package는 매번 다시 묻지 않습니다.
+
+## 요구 사항
+
+- macOS ChatGPT 앱에 로그인된 상태
+- 일반 `Chat`에서 사용할 수 있는 `Pro`
+- Codex의 Computer Use/Accessibility 접근
+- ChatGPT Developer Mode에 연결되어 있고 ChatGPT Plugins에서 `gptpro`로 보이는 읽기 전용 App
+- OpenAI Secure MCP Tunnel 프로필
+- Python 3.11 이상
+
+Browser나 Chrome은 사용하지 않습니다. CDP, `--remote-debugging-port`, Electron 내부 bridge/IPC, 비공개 ChatGPT endpoint도 사용하지 않습니다.
+
+## 설치
+
+저장소 루트에서 다음 한 명령을 실행합니다. 기본 설치는 `gptpro-mcp` companion도 함께 설치합니다.
 
 ```bash
-codex plugin marketplace add oozoofrog/codex-skills --ref main
-```
-
-The Plugin package is under `plugins/gptpro`; the standalone GitHub path remains available for compatibility. See the [Plugin installation guide](https://github.com/oozoofrog/codex-skills/blob/main/docs/plugin-installation.md) for installation choices and the public-directory release gate.
-
-Maintainers using a reviewed clone can still preview, install, or atomically update the standalone package:
-
-```bash
-python3 scripts/manage_skills.py install gptpro --dry-run
 python3 scripts/manage_skills.py install gptpro
+```
+
+업데이트:
+
+```bash
 python3 scripts/manage_skills.py install gptpro --update
 ```
 
-## Use
-
-Invoke `$gptpro` with a mode and task:
-
-```text
-$gptpro review 모드로 현재 변경의 정확성과 빠진 테스트를 검토해주세요.
-```
-
-When that explicit project/repository consultation requires Pro to inspect, search, or navigate actual project context, the Skill-level workflow proposes `mcp-research` with a narrow scope by default:
-
-```text
-$gptpro review 모드로 src와 tests를 Pro가 읽어가며 분석하도록 mcp-research로 진행해주세요.
-실제 수정은 Pro 응답을 현재 코드와 테스트로 검증한 뒤에만 해주세요.
-```
-
-That routing is not transmission authority and does not make the CLI's `auto` transport select MCP. Codex must show the exact package, disclosure ceiling, tool catalog, expiry, and ledger policy, then obtain exact-package approval or prove a previously created bounded standing profile matches before activation or Send. Use the ordinary GitHub/text path when the user requests it or the task needs only a small fixed excerpt. Web MCP currently requires macOS, Python 3.11 or newer, a reviewed official `tunnel-client`, ChatGPT Developer Mode, and attended app/workspace selection.
-
-When the consultation needs exact text from a file outside the selected repository snapshot, ask Codex to include it as a supplemental document. Repeatable `--supplement LABEL=/ABSOLUTE/PATH` packages an owner-controlled, secret-scanned strict-UTF-8 snapshot without using browser file upload. The option path is local CLI input only: Codex writes the outbound task using the safe label, and preparation rejects copying that path into outbound metadata. Small packages use bounded `paste`; larger or exploratory documents use explicit Schema 4 `mcp-research` and `gptpro_artifact_read`. See [supplemental text documents](references/supplemental-documents.md).
-
-The user normally does not need to construct CLI commands. The Skill:
-
-1. previews first-use local setup without writing;
-2. prepares, scans, hashes, and verifies a package;
-3. shows the exact outbound prompt and maximum disclosure contract;
-4. obtains package-specific authority through manual approval or a strict standing-profile match;
-5. creates an empty new ChatGPT general Chat with zero prior turns and guides or performs only the authorized attended delivery steps;
-6. creates one bounded same-task response monitor that checks only the recorded conversation and never resends;
-7. revokes/stops a Web MCP session, imports the marked response, independently evaluates the advice, and removes the monitor.
-
-Transmission is always a separate attended action. Every package uses a new general Chat, never an existing conversation, Work, Project, or custom GPT. `mark-submitted` requires the canonical conversation URL plus explicit confirmation that the Chat was empty immediately before the single Send, and rejects a URL already bound to another local handoff. Login, Developer Mode, app/workspace selection, OAuth, model selection, and an ambiguous send state remain visible human checkpoints. A successful Tunnel activation is not permission to send the prompt, and a successful Pro response is not permission to modify the repository.
-
-처음 사용하는 분은 설치부터 첫 상담, 승인, ChatGPT 화면 조작, 응답 검증, `.gptpro/` 관리와 문제 해결까지 설명한 [한국어 사용자 매뉴얼](references/user-manual.md)을 먼저 읽으세요.
-
-Human participation is expected at trust and UI boundaries. Login, MFA, CAPTCHA, ChatGPT account/workspace choice, GitHub App authorization and repository scope, Chrome permissions, an OS file chooser, ambiguous model controls, uncertain submission, or response copying may require the user to take over briefly. This is a supported workflow state, not an automation failure. The Skill prints an exact checklist and resumes only from visible evidence.
-
-## First-use setup
-
-Preview the repository-local environment without writing anything:
+ChatGPT App ID를 저장소에 넣지 않고 로컬 owner-only plugin으로 결속하려면, App ID만 들어 있는 mode `0600` 파일을 준비한 뒤 실행합니다.
 
 ```bash
-python3 scripts/gptpro.py init --repo /path/to/repo
-```
-
-The recommended `local` scope plans two idempotent changes: create `<repo>/.gptpro/handoffs/` and add `.gptpro/` to that clone's `.git/info/exclude`. After reviewing and approving the JSON preview:
-
-```bash
-python3 scripts/gptpro.py init --repo /path/to/repo --apply
-```
-
-Use `--ignore-scope repository` to update the tracked-worktree `.gitignore` instead, or `--ignore-scope none` to create only the directory. The Skill never applies the preview automatically. `prepare` remains usable without initialization but reports a warning when an in-repository output directory is not ignored.
-
-The default `--transport auto` is GitHub-first:
-
-- `github` when every selected file matches HEAD and that SHA is advertised by the configured github.com remote;
-- `paste` when GitHub is unavailable and the complete structured payload is at most 128 KiB;
-- `text-file` when GitHub is unavailable and the payload is larger, attaching one `context-<id>.md` and pasting `prompt.md`.
-
-Auto records the exact GitHub fallback reason. Supplying `--github-pr-url` makes a verification mismatch fatal instead of falling back. The 128 KiB cutoff is a conservative Skill policy, not a published ChatGPT limit. Override it with `--max-paste-bytes`, require GitHub with `--transport github`, or avoid app access with `--transport paste|text-file`. A transport never changes after approval because approval binds the exact outbound bytes and repository disclosure.
-
-With `--supplement`, `auto` deliberately skips GitHub and text-file and resolves only to paste within the configured threshold. If the combined payload is too large, preparation fails and asks for a newly prepared `mcp-research` package; it never silently falls back to a browser attachment.
-
-Normal `auto|github|paste|text-file` handoffs continue to use manifest schema 2. Explicit `--transport mcp-read` uses schema 3. Explicit `--transport mcp-research` uses schema 4 and additionally binds research artifacts and the read-only context-note policy. Neither is inferred from `auto`, and neither approval may be reinterpreted as the other. A schema-1 ZIP-first handoff is not upgraded in place; prepare a new handoff so the transport and approval hashes are explicit.
-
-## Local CLI
-
-```bash
-python3 scripts/gptpro.py prepare --repo /path/to/repo --mode plan --transport auto --include 'src/**' --include 'tests/**' --task "Plan the change."
-python3 scripts/gptpro.py prepare --repo /path/to/repo --mode review --transport paste --include 'src/**' --include 'tests/**' --supplement requirements=/absolute/private/requirements.md --task "Review against the supplemental requirements."
-python3 scripts/gptpro.py prepare --repo /path/to/repo --mode review --transport github --github-pr-url https://github.com/owner/repo/pull/123 --include 'src/**' --include 'tests/**' --task "Review the pinned PR."
-python3 scripts/gptpro.py verify --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
-python3 scripts/gptpro.py status --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
-python3 scripts/gptpro.py human-handoff --handoff-dir /path/to/repo/.gptpro/handoffs/<id> --reason manual-transport
-python3 scripts/gptpro.py response-monitor-plan --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
-```
-
-For a sanitized machine-readable failure, put the global option before the command. For failure reporting, use `diagnostic-status` instead of treating operational `status`/`mcp-status` as pure reads: it does not recover package journals, commit expiry, create runtime/lock files, or write receipts and audit closure.
-
-```bash
-python3 scripts/gptpro.py --error-format json verify \
-  --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
-
-python3 scripts/gptpro.py --error-format json diagnostic-status \
-  --handoff-dir /path/to/repo/.gptpro/handoffs/<id>
-```
-
-When a consultation fails, blocks on a human checkpoint, or lacks expected evidence, the Skill reports the failed step, expected versus observed result, stable error, transmission/approval/repository effects, package/Tunnel state, automatic-retry safety, and one exact next action. See [failure reporting](references/failure-reporting.md).
-
-Repeated Schema-4 consultations can use an optional repository-local bounded standing approval. Create it only from one manually approved directed package after reviewing a dry run. Future packages still receive exact manifest/file-set receipts, but matching packages no longer need a new approval prompt. A different path, mode, model, app/workspace, Tunnel profile, dirty policy, external artifact, budget, or expired/revoked profile fails closed. Browser login/OAuth/model/UI checkpoints and every Codex analysis note remain separately attended. See [bounded standing approval](references/standing-approval.md).
-
-```bash
-python3 scripts/gptpro.py standing-approval-create \
-  --repo /path/to/repo \
-  --handoff-dir /path/to/repo/.gptpro/handoffs/<manually-approved-id> \
-  --name routine-src-review \
-  --approved-by user \
+python3 scripts/manage_skills.py desktop-bind \
+  --app-id-file /absolute/private/app-id.txt \
   --dry-run
 
-# After explicit approval of the complete dry-run scope:
-python3 scripts/gptpro.py standing-approval-create \
-  --repo /path/to/repo \
-  --handoff-dir /path/to/repo/.gptpro/handoffs/<manually-approved-id> \
-  --name routine-src-review \
-  --approved-by user \
-  --confirm-standing-approval
-
-python3 scripts/gptpro.py approve \
-  --repo /path/to/repo \
-  --handoff-dir /path/to/repo/.gptpro/handoffs/<new-id> \
-  --standing-approval routine-src-review
+python3 scripts/manage_skills.py desktop-bind \
+  --app-id-file /absolute/private/app-id.txt \
+  --confirm-bind
 ```
 
-`response-monitor-plan` is read-only and requires a submitted package with an exact recorded `chatgpt.com` conversation URL. Codex uses its output with the app's same-task heartbeat capability, then records the returned automation identity. See [response completion monitor](references/response-monitor.md); the monitor repeats response collection only and never prompt submission.
+결과에는 App ID 자체가 아니라 hash만 표시됩니다. 생성된 `.app.json`과 binding receipt는 `~/Library/Application Support/gptpro/desktop/v2/` 아래 mode `0600`으로 저장됩니다.
 
-Schema-3/4 preparation normally reuses one existing verified owner-only Tunnel profile plus visible app/workspace labels. Run the secretless preflight first; it does not resolve credentials, execute `tunnel-client`, create a package, or disclose repository content. Copy the exact selected profile and hash into preparation. The raw Tunnel ID is read internally from that protected profile only long enough to derive the package-specific binding and is not returned or written to gptpro artifacts:
+## 사용
 
-```bash
-python3 scripts/gptpro.py preflight \
-  --repo /path/to/repo \
-  --transport mcp-read \
-  --json
+새 Codex 작업에서 자연스럽게 요청합니다.
 
-python3 scripts/gptpro.py prepare \
-  --repo /path/to/repo \
-  --mode architecture \
-  --transport mcp-read \
-  --tunnel-profile <selected_profile> \
-  --confirm-tunnel-profile-sha256 <selected_profile_sha256> \
-  --chatgpt-app-name "GPT Pro Repository Reader" \
-  --chatgpt-workspace-label "Personal" \
-  --include "src/**" \
-  --task "Review this approved immutable snapshot."
+```text
+$gptpro 현재 변경의 버그 가능성과 빠진 테스트를 리뷰해주세요.
 ```
 
-Review `manifest.json`, `status`, and the exact maximum file/hash set before using both approval flags. Approval still does not activate a Tunnel: activation is a separate, attended command and succeeds only after the official client proves a live control-plane poll. Without the activation-generated capability and active package state, `scripts/gptpro_mcp.py serve` denies content calls.
+지원 모드는 `plan`, `ask`, `review`, `debug`, `architecture`입니다. 자세한 첫 사용과 운영 절차는 [references/user-manual.md](references/user-manual.md)를 참고하세요.
 
-For broader read-only analysis, prepare schema 4 with explicit evidence and approve its third ledger gate:
+ChatGPT 앱에서는 Plugins에서 `gptpro`를 찾아 “채팅에서 사용해 보기”를 선택합니다. 이 동작이 `Work`를 열면 `Chat`으로 전환한 뒤에도 composer의 `gptpro` pill이 남아 있고 `Pro`가 선택되어 있는지 확인합니다. App 이름이 바뀌었다면 기존 승인 패키지를 재사용하지 말고, 화면에 보이는 새 이름으로 새 package를 준비·승인합니다.
 
-```bash
-python3 scripts/gptpro.py prepare \
-  --repo /path/to/repo \
-  --mode architecture \
-  --transport mcp-research \
-  --tunnel-profile <selected_profile> \
-  --confirm-tunnel-profile-sha256 <selected_profile_sha256> \
-  --chatgpt-app-name "GPT Pro Repository Research" \
-  --chatgpt-workspace-label "Personal" \
-  --include "src/**" \
-  --include "tests/**" \
-  --evidence-file unit-tests=/private/path/test-output.txt \
-  --supplement specification=/private/path/specification.md \
-  --task "Analyze the approved snapshot, prepared diff, and test evidence."
+## 승인
 
-python3 scripts/gptpro.py approve \
-  --handoff-dir /path/to/repo/.gptpro/handoffs/<id> \
-  --approved-by user \
-  --confirm-transmission \
-  --confirm-mcp-disclosure \
-  --confirm-analysis-ledger
+두 방식이 있습니다.
+
+- exact-package 승인: 이번 요청의 정확한 파일·hash·예산만 승인
+- machine-global standing approval: 모든 로컬 Git 저장소에서 같은 App/Tunnel/model과 지정된 경로·모드·예산 안의 요청을 일정 기간 승인
+
+상시 승인은 선택된 untracked 파일, 외부 문서, 비밀 탐지, 예산 초과, App/workspace/model 변경을 포함하지 않습니다. 범위를 벗어나면 새 승인이 필요합니다.
+
+## 저장 위치
+
+새 Desktop 상태는 저장소가 아니라 다음 owner-only 위치에 둡니다.
+
+```text
+~/Library/Application Support/gptpro/desktop/v2/
 ```
 
-If preflight reports more than one ready profile, inspect the bounded secretless list and choose one exact hash. After the user confirms that local preference, `mcp-profile-default` stores only the profile name and hash in the private profile directory; it stores no Tunnel ID or API key. A later profile edit makes the default stale and fails closed instead of silently changing destinations:
+따라서 일반 사용은 프로젝트에 `.gptpro`를 만들지 않습니다. 디렉터리는 `0700`, 파일은 `0600`, 쓰기는 atomic이며 symlink·hard link·잘못된 소유권을 거부합니다.
+
+## 안전 규칙
+
+- 비밀 검사 후에만 공개
+- 읽기 전용 MCP 도구만 제공
+- 새 general Chat과 `Pro`를 화면에서 확인
+- Send 최대 1회
+- 모호한 전송은 자동 재전송 금지
+- 응답은 exact request nonce와 outbound hash에 결속
+- 숨은 Web/Browser fallback 없음
+- CDP/Electron 내부 API 없음
+- Pro 조언은 적용 전 로컬 검증
+
+## 검증
 
 ```bash
-python3 scripts/gptpro.py mcp-profile-list --json
-python3 scripts/gptpro.py mcp-profile-default \
-  --tunnel-profile <selected_profile> \
-  --confirm-tunnel-profile-sha256 <selected_profile_sha256> \
-  --json
-```
+python3 -m unittest discover -s gptpro/tests -v
 
-The seven static tools are `gptpro_package_info`, `gptpro_workspace_map`, `gptpro_repo_read`, `gptpro_repo_search`, `gptpro_repo_diff`, `gptpro_artifact_read`, and `gptpro_analysis_status`. Every tool advertises `readOnlyHint: true`; no MCP tool exposes repository or application-state mutation, while owner-only audit/runtime bookkeeping records governed calls. A Schema 4 supplement shares the bounded evidence contract and is visible only through package info and artifact read, not repository search/read. Pro findings return through the visible Chat response and the established response-import workflow. See [repository research](references/mcp-research.md) for the separately approved `analysis-note-prepare` / `analysis-note-approve` context flow.
-
-New schema-3/4 sessions use disclosure-audit schema 2 with `complete_model_visible_result_v1`, so the approved byte budget counts each complete model-visible success result rather than only its repository-text body. Audit versions are exact JSON integers. Existing schema-1 schema-3 chains remain verifiable/closable as `legacy_tool_body_estimate` but cannot accept new calls; compatibility requires the actual legacy audit and matching omitted package/global accounting bindings, not fields removed from a schema-2 chain. Schema-4 always requires the current pair. A well-formed unadvertised tool is never executed: after a durable zero-content rejection it consumes one call and returns JSON-RPC `-32602` with stable code `MCP_INVALID_ARGUMENT`. If an append may have committed, the runtime reconciles provable counters, latches that process session, and best-effort faults/closes persistent authorization; stop or recover instead of retrying automatically. Pre-publication recovery also compares the actual audit version/mode with its machine-global binding; a proven mismatch faults only that exact global authorization and does not rewrite the package/audit as a normal close, while an operational recovery failure is reported separately as unavailable rather than falsely labeled invalid. A completed package and its terminal receipt are rechecked against the actual audit footer's header/head, sequence, counters, footer flag, commit timestamp, and close reason. If the exact global authorization and audit became terminal immediately before the package commit failed, rerunning `mcp-recover` reconciles only that already-bound terminal evidence into the package receipt; it does not invent child-stop evidence or reopen authorization. `mcp-status` reports an already-closed audit with still-active global/package state as split-brain and never as effectively authorized.
-
-## Experimental Web MCP setup
-
-The phase-3 runtime currently requires macOS and Python 3.11 or newer. This requirement applies to the Web MCP lifecycle, not to ordinary Skill installation or the established browser/manual handoff paths.
-
-The official Secure MCP Tunnel and ChatGPT connection steps are documented by OpenAI in [Secure MCP Tunnels](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), [Build an MCP server](https://developers.openai.com/plugins/build/mcp-server), and [Connect from ChatGPT](https://developers.openai.com/plugins/deploy/connect-chatgpt). Availability and account/workspace controls may change; confirm them in the visible ChatGPT UI.
-
-Install or build the official `tunnel-client` separately, then use the attended `mcp-profile-init` command below to create a user-owned profile for the exact Skill installation. The v0.0.12 public flow is `init`, `doctor`, and foreground `run`; `gptpro` does not depend on undocumented managed-runtime commands. The wrapper pins the exact absolute Python and Skill entrypoint as:
-
-```bash
-/absolute/path/to/python3 -I -S -B -Xpycache_prefix=/dev/null \
-  "<skill-dir>/scripts/gptpro_mcp.py" serve
-```
-
-`--tunnel-profile` is always the exact filename stem (`<name>.yaml`), not a fuzzy alias. `preflight` examines only the bounded set of safe `*.yaml` names in the private standard profile directory: it chooses the exact current default, otherwise one sole ready profile, and fails on ambiguity. It never recursively scans the home directory. A profile is bound to the absolute Skill root used at init: `TUNNEL_PROFILE_NOT_FOUND` requires attended init, while `MCP_SKILL_ENTRYPOINT_MISMATCH` means another checkout/installation needs a separately named attended profile; neither case permits `mcp-profile-refresh`.
-
-Do not hand-edit that command. Isolated mode ignores user-site and `PYTHON*` configuration, `-S` suppresses `sitecustomize`, and the `/dev/null` pycache prefix prevents source-adjacent bytecode from replacing the hashed Skill source. The wrapper validates the narrow official init profile shape, owner-only profile path and bytes, canonical OpenAI endpoint, system-trust/no-proxy policy, single `main` command, and exact command hash before key-bearing `doctor` or `run`.
-
-The user creates/selects the Tunnel and runtime key, enables Developer Mode, and confirms the intended ChatGPT app/workspace. Do not paste keys into prompts, package files, receipts, audit records, or command-line literal arguments. Official profile initialization stores the Tunnel ID in the owner-only user profile; gptpro handoff/runtime/receipt/audit artifacts retain only its package-bound hash. `doctor` is configuration preflight only. During activation, health/admin is confined to an activation-owned owner-only Unix socket with no TCP listener, and readiness additionally requires the exact foreground process to pass:
-
-```bash
-tunnel-client health \
-  --url-file <activation-health-url-file> \
-  --pid <owned-child-pid> \
-  --require-control-plane-poll \
-  --json
-```
-
-Before that command, the wrapper verifies that the activation-owned private PID file contains the same exact `Popen.pid`; official v0.0.12 rejects combining `--pid` and `--pid-file`. A green `/healthz` or `/readyz` response without `--require-control-plane-poll` is not enough. Keep `mcp-activate` in the foreground for the consultation. Stop with `mcp-stop`: content authorization becomes terminally denied before the exact controller receives a cooperative shutdown request; only a verified package-scoped revoke receipt is reported as `authorization_revoked`. The Skill never uses a broad process kill, installs a daemon, or silently changes transport.
-
-After package-specific approval, the minimal lifecycle is:
-
-```bash
-python3 scripts/gptpro.py mcp-probe \
-  --tunnel-client /absolute/path/to/tunnel-client \
-  --json
-
-# Copy binary_sha256 from the secretless probe. Profile initialization is
-# attended and resolves secret references only after that exact hash matches.
-python3 scripts/gptpro.py mcp-profile-init \
-  --tunnel-profile gptpro-web \
-  --tunnel-id-ref env:GPTPRO_TUNNEL_ID \
-  --runtime-api-key-ref env:CONTROL_PLANE_API_KEY \
-  --tunnel-client /absolute/path/to/tunnel-client \
-  --confirm-tunnel-client-sha256 <binary_sha256-from-probe> \
-  --json
-
-# Secretless: detects an exact profile or interpreter-path-only drift after a
-# Homebrew/Python update. It does not execute tunnel-client or resolve keys.
-python3 scripts/gptpro.py mcp-profile-check \
-  --tunnel-profile gptpro-web \
-  --json
-
-# Routine new-task/restart path: no Tunnel ID or runtime key is resolved.
-python3 scripts/gptpro.py preflight \
-  --repo /path/to/repo \
-  --transport mcp-research \
-  --json
-
-# Run only after reviewing the check output and approving replacement of its
-# exact current profile hash. Other profile changes fail closed.
-python3 scripts/gptpro.py mcp-profile-refresh \
-  --tunnel-profile gptpro-web \
-  --tunnel-id-ref env:GPTPRO_TUNNEL_ID \
-  --runtime-api-key-ref env:CONTROL_PLANE_API_KEY \
-  --tunnel-client /absolute/path/to/tunnel-client \
-  --confirm-tunnel-client-sha256 <binary_sha256-from-probe> \
-  --confirm-current-profile-sha256 <tunnel_profile_sha256-from-check> \
-  --confirm-profile-replacement \
-  --json
-
-# Foreground: keep this process running during the consultation.
-python3 scripts/gptpro.py mcp-activate \
-  --handoff-dir /path/to/repo/.gptpro/handoffs/<id> \
-  --tunnel-profile gptpro-web \
-  --runtime-api-key-ref env:CONTROL_PLANE_API_KEY \
-  --tunnel-client /absolute/path/to/tunnel-client \
-  --confirm-tunnel-client-sha256 <binary_sha256-from-probe> \
-  --confirm-workspace-binding \
-  --json
-
-# Run status/stop from another terminal or controller.
-python3 scripts/gptpro.py mcp-status \
-  --handoff-dir /path/to/repo/.gptpro/handoffs/<id> \
-  --summary \
-  --json
-python3 scripts/gptpro.py mcp-stop \
-  --handoff-dir /path/to/repo/.gptpro/handoffs/<id> \
-  --json
-# Only after separately proving that the exact foreground controller is gone:
-python3 scripts/gptpro.py mcp-recover \
-  --handoff-dir /path/to/repo/.gptpro/handoffs/<id> \
-  --confirm-controller-lost \
-  --json
-# If no exact-child stop receipt exists, inspect local processes outside
-# gptpro and only after proving the orphan Tunnel child is gone, rerun with:
-python3 scripts/gptpro.py mcp-recover \
-  --handoff-dir /path/to/repo/.gptpro/handoffs/<id> \
-  --confirm-controller-lost \
-  --confirm-orphan-tunnel-stopped \
-  --json
-python3 scripts/gptpro.py mcp-verify-audit \
-  --handoff-dir /path/to/repo/.gptpro/handoffs/<id> \
-  --json
-# Verify the package-local sanitized protocol trace, its available lifecycle
-# binding scope, and independent disclosure-audit totals.
-python3 scripts/gptpro.py mcp-protocol-trace \
-  --handoff-dir /path/to/repo/.gptpro/handoffs/<id> \
-  --json
-```
-
-For a dedicated investigation of repeated connector calls, first require `mcp-probe` to report `tunnel_client.request_correlation_contract_supported: true`, then explicitly add `--diagnose-request-correlation` to `mcp-activate`. This private diagnostic is pinned to the exact official `0.0.12+881c9a8...` build; other versions may still support normal `mcp-read` but cannot run this diagnostic. It verifies the admin Unix peer against the exact child PID, applies one total snapshot deadline, requires a contiguous exact event contract, and emits only session-scoped HMACs plus local group ordinals. The diagnostic does not print its stable internal join hashes, raw IDs, or payloads. The pre-existing owner-only disclosure audit does retain unkeyed JSON-RPC and argument hashes for integrity and joining; low-entropy values can be guessed locally, so keep that audit private. Terminal errors, an open or protocol-broken trace, late/count mismatches, zero-tool windows, or incomplete evidence are `inconclusive`; no call is deduplicated and no write tool is unlocked. Read [Request-correlation diagnostic](references/request-correlation.md) before using it.
-
-PATH discovery is probe-only. Key-bearing `mcp-profile-init`, `mcp-profile-refresh`, and `mcp-activate` require an explicit absolute `--tunnel-client` plus the exact `--confirm-tunnel-client-sha256` copied from the no-secret probe. Routine `preflight`, profile listing/default selection, and profile-derived `prepare` do not execute the client or resolve the runtime key; only init/refresh and the explicit legacy transient-ID preparation path require a Tunnel ID reference. `--profile-dir` is an explicit installation/test override; never point it at shared or untrusted state. All lifecycle commands use one canonical owner-only per-user runtime slot with no CLI root override, so a second root cannot create a second active authorization. Runtime state and receipts bind the validated profile SHA-256, Tunnel binary SHA-256, exact MCP target SHA-256, bundled MCP runtime-tree SHA-256, and package-local protocol-trace header. After exact-child termination, a normal active/revoked path uses `mcp_stopped`; a pre-active failure uses the distinct additive `mcp_activation_stopped` event and never fabricates the normal runtime-stop receipt or audit footer. The failed-activation receipt binds return code, forced-termination status, and final trace artifact identity; the normal package receipt keeps its existing final trace/audit contract while machine-global state records the observed return code and forced flag. If package integrity is unavailable, the package bytes remain untouched and only machine-global runtime state records the exact-child stop. Diagnostic `terminal_evidence` therefore reports `runtime_stop_observed`, `activation_failure_stop_observed`, `protocol_stream_closed`, `protocol_eof_observed`, `parent_shutdown_observed`, and `final_artifact_bound_to_stop_receipt` independently. The probe reports `parent_shutdown_contract_supported` separately; only the exact pinned Tunnel enables the compatibility flag. That Tunnel currently closes MCP stdin and sends `SIGTERM` together, so gptpro records the signal without doing I/O in the handler, then requires the ordinary read loop to observe EOF before writing `close_reason: parent_shutdown`. Other compatible Tunnel versions retain normal signal behavior. An honestly open final prefix is reported with a `*_protocol_eof_unobserved` status, never rewritten as `closed: true`.
-
-Lifecycle JSON separates `authorization_denied`, `authorization_status`, and `revocation_receipt_recorded`. The compatibility field `authorization_revoked` is true only when the status is `revoked` and one verified package-scoped `mcp_revoked` receipt exists. Emergency `faulted` denial remains safe but is not described as successful revocation. Likewise, `cooperative_stop_requested` reports only the local socket acknowledgement; `tunnel_runtime_stopped` requires durable package or machine-global exact-child evidence and is checked even if that acknowledgement was lost. If a concurrent new activation has archived the stopped session and replaced `active.json`, the stop command accepts only that exact session/handoff's owner-only validated terminal archive rather than reporting a false process uncertainty.
-
-A terminal authorization is not reusable-slot clearance by itself. A new activation requires positive `runtime_child_stopped`/`activation_child_stopped` evidence or an explicit attended `--confirm-orphan-tunnel-stopped` recovery after the operator has independently established that no orphan Tunnel child remains. The latter is stored separately as a human assertion, never reported as `tunnel_runtime_stopped`, and never converted into an exact-child receipt. The foreground controller blocks lifecycle signals before durable activation begins and keeps them ordered through denial, exact-child stop evidence, and lease release. Its final exact-session check holds the global runtime lock through child ownership, so an already committed terminal denial cannot be followed by a new Tunnel spawn.
-
-`mcp-profile-refresh` preserves the same Tunnel and bounded profile settings and permits only the first command argument—the absolute Python interpreter path—to change. A machine-global owner-only profile/controller flock serializes attended init, the full foreground activation lifetime, and the full refresh transaction. Refresh additionally requires either no authorization or a terminal session whose pre-existing safe controller lease is exclusively held through cleanup; missing, unsafe, unresolved, or live terminal leases are rejected. It generates a new owner-only profile through the official initializer, validates it, and atomically replaces the stale file. A byte-for-byte private backup restores the old profile if replacement or post-replacement validation fails; after a valid commit, `staging_cleanup_complete` reports cleanup separately. If cleanup is incomplete, do not print the private stage, activate, or retry; inspect and remove only its `.gptpro-refresh-*` child under the selected profile directory, then rerun `mcp-profile-check`. It never runs automatically from `mcp-activate`; a changed flag, entrypoint, Tunnel, endpoint, or unreviewed profile hash is rejected. The flock coordinates only this gptpro version, so stop controllers started by older or unmanaged code before refreshing.
-
-`human-handoff` is read-only: it verifies the package and prints the approved paths, hashes, model, user steps, expected return evidence, and retry rule. It does not change state, authorize transmission, or mark a message as sent. The five modes are `plan`, `ask`, `review`, `debug`, and `architecture`. Run `python3 scripts/gptpro.py --help` for the full lifecycle.
-
-## Validate Skill structure
-
-The included validator uses only the Python standard library; it does not require PyYAML or another package:
-
-```bash
-python3 scripts/validate_structure.py --json
-```
-
-Repository maintainers can additionally prove that the standalone and Plugin distributable files are byte-identical (ephemeral ignored artifacts such as `__pycache__` are outside the package set):
-
-```bash
 python3 gptpro/scripts/validate_structure.py \
   --skill-dir gptpro \
   --mirror plugins/gptpro/skills/gptpro \
   --json
+
+python3 -m py_compile \
+  gptpro/scripts/gptpro.py \
+  gptpro/scripts/validate_structure.py
 ```
 
-It checks required files, exact `name`/`description` frontmatter, local Markdown links, prompt placeholder contract, every packaged Python file's syntax, executable modes, both exact dependency-free Web MCP schema/runtime contracts, and optional mirror hashes.
-
-## Security posture
-
-- GitHub/paste/text-file handoffs require no OpenAI API key. The experimental Web MCP path requires a user-provisioned Tunnel runtime credential kept in the official client's environment or secure reference, never in gptpro artifacts.
-- No private ChatGPT endpoints or headless session scraping are used.
-- Schema-3 exposes only its original three read tools. Schema-4 exposes the seven static read-only research/analysis tools listed above. Neither exposes repository write, MCP-side local-state write, shell, build/test execution, Git mutation, network fetch, or a generic local tool relay. An owner-approved local CLI may append an exact-byte Codex context note; ChatGPT can only read it.
-- ChatGPT Desktop private renderer automation is not part of this implementation.
-- User-global runtime state is owner-only and stores bindings/hashes rather than raw Tunnel/API credentials. Package receipts and the disclosure audit remain in the handoff directory.
-- Repository content is returned only after its audit event is durably committed. An audit event proves local disclosure commitment, not network delivery or use by ChatGPT.
-- Secret values are never printed in findings; matching files are excluded.
-- Chrome/browser automation stops for attended human takeover at login, CAPTCHA, OAuth/app scope, permission, file chooser, model-selection, response-export, or ambiguous-submission blockers.
-- GitHub transport refuses selected dirty/untracked content and unadvertised commits; it never commits or pushes on the user's behalf.
-- The GitHub app's repository scope can be broader than the prompt path allowlist, so repository authorization remains a human decision.
-- Imported Pro output is advisory until Codex verifies it against current repository evidence.
-
-Generated handoffs live under `<repo>/.gptpro/handoffs/` by default. Add `.gptpro/` to the target repository's ignore rules if appropriate.
+실제 로그인된 ChatGPT 앱 E2E는 로컬 단위 테스트와 별개의 attended evidence입니다. 새로운 prompt 전송에는 해당 package의 유효한 승인과 화면상 1회 Send 확인이 필요합니다.

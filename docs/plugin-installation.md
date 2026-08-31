@@ -1,43 +1,47 @@
 # GPT Pro Plugin installation
 
-`gptpro` supports network installation without asking the user to run a Python script.
+`GPT Pro Collaborator`는 Desktop-only base이고 `GPT Pro MCP`는 matching read-only companion입니다. 실제 상담에는 둘 다 필요합니다.
 
-## Install from Codex without a terminal
-
-Ask Codex to use its bundled installer:
-
-```text
-$skill-installer Install gptpro from https://github.com/oozoofrog/codex-skills/tree/main/gptpro
-```
-
-The installer downloads only the selected Skill into the Codex skills directory. If discovery is uncertain, ask Codex to verify the installed path and package hash.
-
-설치 후 첫 상담을 시작하는 방법과 승인·브라우저·`.gptpro/` 관리가 궁금하면 [`gptpro` 한국어 사용자 매뉴얼](../gptpro/references/user-manual.md)을 참고하세요.
-
-## Install from the repository marketplace
-
-Until the Plugin is published in the universal Plugins Directory, register this GitHub marketplace once:
+## Repository marketplace
 
 ```bash
 codex plugin marketplace add oozoofrog/codex-skills --ref main
 ```
 
-Then open the Plugins browser, select the `GPT Pro` marketplace, and install `GPT Pro Collaborator`. In Codex CLI, `/plugins` opens the same marketplace browser.
-
-For a CLI-only installation after registration:
+Plugins 화면에서 `GPT Pro Collaborator`와 `GPT Pro MCP`를 설치할 수 있습니다. CLI에서는 다음과 같습니다.
 
 ```bash
 codex plugin add gptpro@codex-skills
+codex plugin add gptpro-mcp@codex-skills
 ```
 
-The marketplace entry resolves `./plugins/gptpro`; its manifest loads the mirrored Skill from `./skills/gptpro/`. No Python installation command is involved.
+Plugin 설치는 Skill을 로드하지만 현재 Plugin metadata만으로는 두 component 사이의 owner-only `.gptpro-components.json` descriptor를 생성한다는 보장이 없습니다. 따라서 실제 repository disclosure 전에 `desktop-doctor`와 component handshake가 성공하는지 확인해야 합니다. 실패하면 검토한 checkout에서 다음 atomic installer를 사용합니다.
 
-The Skill package does not bundle or install OpenAI `tunnel-client`. Its experimental Web MCP runtime currently requires macOS plus Python 3.11 or newer and has a separate attended setup: the user obtains or builds the client through the reviewed official `openai/tunnel-client` path and owns Tunnel/key, Developer Mode, and ChatGPT app/workspace authorization. A no-secret probe reports the exact binary path/hash; key-bearing init/activation require both values, but that drift check is not publisher provenance or signature verification. The Skill supervises the documented foreground client flow and requires a successful control-plane poll, while local runtime tests still do not prove logged-in ChatGPT account E2E. Read the installed Skill's `references/web-mcp.md` before using this path.
+```bash
+python3 scripts/manage_skills.py install gptpro --update
+```
 
-## Public click installation
+이 명령은 companion을 먼저 설치하고 exact entrypoint/tree hash descriptor를 기록합니다.
 
-After the skills-only Plugin passes OpenAI review and is published, users can find it in the universal Plugins Directory and install it with the plus button. Public publication is a separate release gate; the presence of this repository package does not imply that review or publication has completed.
+## GitHub Skill installer
 
-## Maintainer checkout workflow
+`$skill-installer`로 standalone 디렉터리를 내려받을 수도 있지만 base 하나만 설치하면 operational Desktop workflow가 완성되지 않습니다.
 
-`scripts/manage_skills.py` remains available for repository maintainers, offline checkouts, and atomic updates of an existing standalone installation. It is a compatibility path, not the recommended first-install experience.
+```text
+$skill-installer Install gptpro from https://github.com/oozoofrog/codex-skills/tree/main/gptpro
+$skill-installer Install gptpro-mcp from https://github.com/oozoofrog/codex-skills/tree/main/gptpro-mcp
+```
+
+두 Skill이 있어도 descriptor가 없으면 fail closed합니다. 공개 전송이나 Tunnel activation을 시도하지 말고 repository installer로 결속을 완성합니다.
+
+## What is not installed automatically
+
+- OpenAI `tunnel-client`
+- ChatGPT account login
+- ChatGPT Developer Mode/App authorization
+- macOS Screen Recording/Accessibility permissions
+- private app ID or Tunnel credentials
+
+이 값들은 사용자 소유 private state에만 둡니다. 저장소, Plugin manifest, package receipt에는 raw app ID, Tunnel ID, API key를 넣지 않습니다.
+
+첫 사용은 [한국어 사용자 매뉴얼](../gptpro/references/user-manual.md), 설치 전환은 [standalone installation](selective-installation.md)을 참고하세요.

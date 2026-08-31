@@ -1,0 +1,6 @@
+interface:
+  display_name: "GPT Pro MCP Companion"
+  short_description: "Read-only repository companion for Desktop gptpro"
+  default_prompt: "Use $gptpro-mcp only for this explicitly requested read-only MCP profile, lifecycle, audit, recovery, or repository-tool diagnostic. Keep the Desktop-only gptpro security and approval boundaries intact."
+policy:
+  allow_implicit_invocation: false

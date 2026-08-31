@@ -1,7 +1,7 @@
 {
   "name": "gptpro",
-  "version": "0.1.0",
-  "description": "Secure approval-gated ChatGPT Pro project consultations with read-only Web MCP.",
+  "version": "0.3.0",
+  "description": "Desktop-only ChatGPT Pro repository collaboration with a read-only MCP companion.",
   "author": {
     "name": "oozoofrog",
     "url": "https://github.com/oozoofrog"
@@ -17,16 +17,16 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "GPT Pro Collaborator",
-    "shortDescription": "Approval-gated Pro project consultations and Web MCP",
-    "longDescription": "For an explicitly requested project or repository consultation that needs ChatGPT Pro to inspect, search, or navigate actual project context, propose a narrowly scoped Schema 4 mcp-research package by default while keeping CLI auto non-MCP. Exact disclosure, tool, budget, expiry, ledger, and transmission approval remain mandatory before activation or Send. Each package is sent once from an empty new general Chat and bound to its canonical conversation URL. Seven bounded read-only tools and separately approved Codex context notes use the foreground official Secure MCP Tunnel client; Pro returns advice in visible Chat and Codex independently validates it.",
+    "shortDescription": "Desktop ChatGPT Pro with read-only repository context",
+    "longDescription": "For an explicitly requested repository consultation, use the visible ChatGPT macOS app together with the exact installed gptpro-mcp companion and Secure MCP Tunnel. Prepare an immutable Schema 4 package, enforce secret scanning and approval, send at most once from an empty new general Chat through visible Desktop UI, expose only bounded read-only repository tools, collect the matching response, and independently validate all advice. Browser delivery, CDP, Electron-private APIs, local writes, shell commands, and automatic resend are not supported.",
     "developerName": "oozoofrog",
     "category": "Productivity",
     "capabilities": [
       "Interactive"
     ],
     "defaultPrompt": [
-      "Use $gptpro to propose narrow read-only Web MCP research when Pro must explore project context, then wait for exact approval.",
-      "Use $gptpro to send one approved package from an empty new general Chat, bind its canonical URL, and never resend.",
+      "Use $gptpro to prepare a bounded Desktop Pro review with read-only repository access.",
+      "Use $gptpro to submit one approved prompt through the visible ChatGPT macOS app and never resend.",
       "Use $gptpro to independently validate ChatGPT Pro advice before applying it."
     ]
   }

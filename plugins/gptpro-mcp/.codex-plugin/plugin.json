@@ -1,0 +1,32 @@
+{
+  "name": "gptpro-mcp",
+  "version": "0.2.0",
+  "description": "Read-only Secure MCP companion for Desktop ChatGPT Pro repository collaboration.",
+  "author": {
+    "name": "oozoofrog",
+    "url": "https://github.com/oozoofrog"
+  },
+  "homepage": "https://github.com/oozoofrog/codex-skills/tree/main/gptpro-mcp",
+  "repository": "https://github.com/oozoofrog/codex-skills",
+  "keywords": [
+    "chatgpt-pro",
+    "codex",
+    "mcp",
+    "read-only"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "GPT Pro MCP Companion",
+    "shortDescription": "Read-only repository companion for Desktop gptpro",
+    "longDescription": "Provide the exact bounded Schema 4 repository tools and Secure MCP Tunnel lifecycle used by the Desktop-only GPT Pro Collaborator. The component exposes no repository writes, shell commands, Git mutation, credentials, arbitrary network fetches, browser delivery, CDP, or Electron-private APIs.",
+    "developerName": "oozoofrog",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use $gptpro-mcp for this explicitly requested Desktop read-only repository consultation.",
+      "Use $gptpro-mcp to diagnose or safely recover this existing legacy MCP session."
+    ]
+  }
+}

@@ -1,4 +1,6 @@
 interface:
   display_name: "GPT Pro Collaborator"
-  short_description: "Approval-gated Pro project consultations and Web MCP"
-  default_prompt: "Use $gptpro in review mode for an explicitly requested repository consultation. If Pro must inspect, search, or navigate actual project context, propose a narrowly scoped mcp-research package by default while keeping CLI auto non-MCP; require exact disclosure and ledger approval before activation or Send. Submit once from an empty new general Chat, record its canonical URL and new-Chat confirmation, never reuse or resend, install one bounded same-task response monitor, and independently validate ChatGPT Pro advice."
+  short_description: "Desktop ChatGPT Pro with read-only repository context"
+  default_prompt: "Use $gptpro for this explicitly requested ChatGPT Pro consultation. Prepare the smallest bounded read-only repository package, use the exact installed MCP companion and visible macOS ChatGPT new general Chat with Pro, send at most once, collect the bound response, and independently validate all advice."
+policy:
+  allow_implicit_invocation: false

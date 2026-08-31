@@ -1,74 +1,110 @@
 # codex-skills
 
-로그인된 ChatGPT Pro와 Codex가 안전하게 협업하도록 돕는 `gptpro` 전용 저장소입니다. 일반 로컬 작업이나 OpenAI API 호출에는 사용하지 않으며, 사용자가 ChatGPT Pro 협업을 명시적으로 요청한 경우에만 plan, ask, review, debug, architecture 상담을 준비합니다.
+이 저장소는 Codex가 로그인된 **ChatGPT macOS 앱의 ChatGPT Pro**를 읽기 전용 저장소 협업자로 사용할 수 있게 하는 `gptpro` 패키지를 제공합니다.
 
-## 제공 패키지
+## 현재 구조
 
-| Package | 용도 |
+| Package | 역할 |
 |---|---|
-| `gptpro` | 명시적으로 요청한 프로젝트 상담이 실제 문맥 탐색을 필요로 하면 승인 대기 `mcp-research`를 기본 제안하고, 새 ChatGPT Pro general Chat에서 자문을 받은 뒤 Codex가 독립 검증합니다. |
+| `gptpro` 0.3.x | 사용자가 호출하는 Desktop 전용 오케스트레이터입니다. |
+| `gptpro-mcp` 0.2.x | immutable repository snapshot을 읽는 Secure MCP Tunnel companion입니다. |
 
-저장소에는 같은 내용을 두 형태로 제공합니다.
+새 상담은 한 경로만 사용합니다.
 
-- `gptpro/`: `$skill-installer` 또는 로컬 checkout으로 설치하는 standalone Skill
-- `plugins/gptpro/`: Codex Plugin marketplace용 skills-only Plugin
+```text
+Codex $gptpro
+  -> secret scan + immutable Schema 4 package
+  -> package approval or bounded standing approval
+  -> exact gptpro-mcp + Secure MCP Tunnel
+  -> visible ChatGPT macOS app / new general Chat / Pro
+  -> one visible Send
+  -> read-only repository exploration
+  -> one matching assistant response
+  -> Codex independent evaluation
+```
 
-두 Skill 복사본은 검증 시 byte-for-byte 일치를 요구합니다.
+ChatGPT Web, Chrome handoff, browser fallback, CDP, remote debugging port, Electron renderer/IPC/private bridge는 새 실행 경로에서 지원하지 않습니다. 과거 receipt는 offline verification만 가능합니다.
 
 ## 설치
 
-Codex에 다음과 같이 요청할 수 있습니다.
-
-```text
-$skill-installer Install gptpro from https://github.com/oozoofrog/codex-skills/tree/main/gptpro
-```
-
-Plugin marketplace 설치는 [Plugin 설치 안내](docs/plugin-installation.md), checkout에서의 안전한 설치·update는 [standalone 설치 안내](docs/selective-installation.md)를 참고하세요. 설치 후 첫 상담과 승인 흐름은 [한국어 사용자 매뉴얼](gptpro/references/user-manual.md)에 정리되어 있습니다.
-
-## 사용 예시
-
-작은 고정 문맥의 일반 상담이나 사용자가 GitHub/text 경로를 지정한 경우에는 검증된 GitHub commit을 우선하고, 사용자가 정확한 전송 대상과 바이트를 승인한 뒤 진행합니다.
-
-```text
-$gptpro review 모드로 현재 변경을 검토하되 공개 범위는 src와 tests로 제한해 상담 패키지를 준비해주세요.
-```
-
-명시적인 `$gptpro` 프로젝트/저장소 상담이 Pro의 실제 문맥 검색·읽기·탐색을 필요로 하면 Skill은 최소 범위의 `mcp-research` package를 기본 제안합니다. 이 라우팅은 공개나 전송 승인이 아니며, CLI의 `auto`가 MCP를 선택한다는 뜻도 아닙니다. 별도의 공개 범위·도구·예산·만료·ledger·전송 승인을 받은 뒤에만 활성화하고, `mcp-read`는 사용자가 기존 3-tool reader를 명시한 경우에만 사용합니다.
-
-반복적인 Schema-4 상담은 사용자가 별도로 생성한 범위 제한형 상시 승인 profile을 사용할 수 있습니다. 같은 repository·path·mode·model·app/workspace·Tunnel profile·dirty 정책·예산 안의 package만 exact receipt로 자동 승인하며, 범위 확대·외부 evidence/supplement·브라우저 신뢰 경계·Codex note별 승인은 계속 사람 확인을 요구합니다.
-
-```text
-$gptpro mcp-research로 src와 tests의 변경과 테스트 누락을 분석할 상담을 준비해주세요.
-```
-
-각 package는 이전 대화, Work, Project, custom GPT가 아닌 **비어 있는 새 general Chat**에서 한 번만 전송합니다. 제출 기록에는 canonical `chatgpt.com/c/<id>` URL과 새 Chat 확인이 필수이며, 다른 로컬 handoff에 이미 묶인 URL은 거부됩니다.
-
-저장소 밖의 요구사항처럼 검토된 UTF-8 문서가 필요하면 파일을 브라우저에 업로드하지 않고 보충 snapshot으로 요청할 수 있습니다. repository 범위도 함께 지정해야 하며, 원본 locator는 package에 저장되지 않지만 shell/process/tool log에는 보일 수 있습니다.
-
-```text
-$gptpro review 모드로 src와 tests를 검토하면서 /절대/경로/requirements.md를 requirements 보충 문서로 읽어주세요. 브라우저에는 원본 파일을 업로드하지 마세요.
-```
-
-작은 문서가 아니라 prompt·선택 repository 문맥·보충 문서를 합친 complete payload가 paste 한도 안이어야 합니다. 큰 one-line artifact를 포함한 Schema 4 제약과 안전한 로컬 파일 계약은 [Supplemental text documents](gptpro/references/supplemental-documents.md)를 참고하세요.
-
-ChatGPT Pro의 답변은 자문일 뿐입니다. Codex가 현재 저장소에서 다시 확인하고 관련 테스트를 실행한 뒤에만 적용합니다.
-
-## Maintainer workflow
+검증 가능한 기본 설치는 checkout의 관리 도구를 사용합니다. `gptpro`를 설치하면 matching `gptpro-mcp` companion도 먼저 설치하고 owner-only component descriptor에 정확한 entrypoint와 tree hash를 기록합니다.
 
 ```bash
-python3 scripts/manage_skills.py list
 python3 scripts/manage_skills.py install gptpro --dry-run
 python3 scripts/manage_skills.py install gptpro --update
 ```
 
-기본 설치 위치는 `${CODEX_HOME:-~/.codex}/skills/gptpro`입니다. 다른 위치에서 검증하려면 `--dest`를 사용합니다.
+기본 위치는 `${CODEX_HOME:-~/.codex}/skills`입니다. 설치 전환과 레거시 MCP 상태가 있으면 관리 도구가 종료 증거나 residual ownership receipt 없이는 기존 코드를 제거하지 않습니다.
 
-핵심 검증 명령:
+Plugin marketplace와 GitHub Skill 설치는 패키지 탐색에는 사용할 수 있지만, 두 component의 exact descriptor를 만들어 준다는 보장은 없습니다. 실제 Desktop consultation 전에 `desktop-doctor`와 component handshake를 통과해야 합니다. 자세한 내용은 [설치 문서](docs/selective-installation.md)와 [Plugin 문서](docs/plugin-installation.md)를 참고하세요.
+
+## 첫 사용
+
+사용자는 원하는 프로젝트에서 명시적으로 호출합니다.
+
+```text
+$gptpro review 모드로 현재 변경을 ChatGPT Pro와 함께 검토해주세요.
+```
+
+Codex는 다음을 수행합니다.
+
+1. 관련 tracked 파일을 고르고 secret/exclude scan을 수행합니다.
+2. immutable package와 최대 MCP 공개 범위를 보여줍니다.
+3. exact package 승인 또는 일치하는 machine-global standing approval을 확인합니다.
+4. foreground Tunnel을 활성화합니다.
+5. Computer Use로 보이는 ChatGPT macOS 앱에서 Personal/승인 workspace, ChatGPT App `gptpro`, Pro 모델, 빈 새 general Chat을 확인합니다. `GPT Pro Collaborator`는 Codex 쪽 Skill 이름이며 ChatGPT App 이름이 아닙니다.
+6. 승인된 prompt를 한 번만 Send합니다. 결과가 불확실하면 재전송하지 않습니다.
+7. Pro는 고정된 read-only tools로 승인 snapshot만 검색·읽습니다.
+8. 같은 대화의 다음 완료 assistant turn을 수집하고 Codex가 독립 검증합니다.
+
+계정·App/Tunnel profile은 사용자 단위로 한 번 구성해 여러 로컬 Git repository에서 재사용합니다. 상담 package는 repository와 요청마다 새로 만들어집니다.
+
+## 반복 승인 줄이기
+
+`gptpro-standing-approval-v2`는 최대 30일 동안 transport, Desktop channel, Tunnel profile hash, app, workspace, model, modes, path patterns, dirty policy, 파일/바이트/tool budgets가 정확히 일치하는 상담만 승인합니다.
+
+다음은 standing approval에 포함되지 않습니다.
+
+- 선택된 untracked 파일
+- 외부 evidence
+- secret finding
+- app/workspace/model/profile 변경
+- 허용 범위나 예산 확대
+- 자동 Send 또는 자동 재전송
+
+## 저장소 밖 텍스트 파일
+
+브라우저 업로드 대신 검토한 strict UTF-8 파일을 package에 immutable evidence로 포함합니다.
+
+```text
+$gptpro review 모드로 현재 저장소와 /absolute/path/requirements.md를 함께 검토해주세요.
+```
+
+구현은 `--evidence-file safe-id=/absolute/path`로 snapshot을 만들고, Pro에는 `gptpro_artifact_read`만 공개합니다. 원본 경로와 secret은 모델에 전달하지 않습니다.
+
+## 보안 경계
+
+- MCP tools는 read/fetch only입니다.
+- live worktree가 아니라 approved immutable snapshot을 읽습니다.
+- shell, build, test, Git mutation, repository write, credential access, arbitrary network/filesystem access가 없습니다.
+- Tunnel은 foreground exact-child lifecycle로 관리됩니다.
+- visible Desktop UI Send는 최대 한 번입니다.
+- ChatGPT Pro 결과는 advisory이며 Codex가 검증 전에는 적용하지 않습니다.
+- Electron 내부 구현을 사용하지 않으므로 앱 업데이트에 대한 private bridge 의존성이 없습니다.
+
+사용자 매뉴얼은 [gptpro user manual](gptpro/references/user-manual.md), MCP 세부 계약은 [gptpro-mcp manual](gptpro-mcp/references/user-manual.md)에 있습니다.
+
+## Maintainer validation
 
 ```bash
+python3 scripts/build_gptpro_base.py --check
 python3 gptpro/scripts/validate_structure.py
+python3 gptpro-mcp/scripts/validate_structure.py
 python3 -m unittest discover -s gptpro/tests -v
+python3 -m unittest discover -s gptpro-mcp/tests -v
 python3 -m unittest discover -s scripts/tests -v
+python3 scripts/sync_skill_mirrors.py
+git diff --check
 ```
 
 변경 기록은 [CHANGELOG.md](CHANGELOG.md)를 참고하세요.

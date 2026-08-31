@@ -8,6 +8,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 STANDALONE_SKILL = REPO_ROOT / "gptpro"
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "gptpro"
 PLUGIN_SKILL = PLUGIN_ROOT / "skills" / "gptpro"
+MCP_STANDALONE_SKILL = REPO_ROOT / "gptpro-mcp"
+MCP_PLUGIN_ROOT = REPO_ROOT / "plugins" / "gptpro-mcp"
+MCP_PLUGIN_SKILL = MCP_PLUGIN_ROOT / "skills" / "gptpro-mcp"
 IGNORED_NAMES = {".DS_Store", "__pycache__"}
 IGNORED_SUFFIXES = {".pyc", ".pyo"}
 
@@ -30,19 +33,25 @@ class PluginDistributionTests(unittest.TestCase):
         )
         self.assertEqual("codex-skills", marketplace["name"])
         self.assertEqual("GPT Pro", marketplace["interface"]["displayName"])
-        self.assertEqual(["gptpro"], [plugin["name"] for plugin in marketplace["plugins"]])
+        self.assertEqual(
+            ["gptpro", "gptpro-mcp"],
+            [plugin["name"] for plugin in marketplace["plugins"]],
+        )
         entry = next(plugin for plugin in marketplace["plugins"] if plugin["name"] == "gptpro")
         self.assertEqual({"source": "local", "path": "./plugins/gptpro"}, entry["source"])
         self.assertEqual("AVAILABLE", entry["policy"]["installation"])
         self.assertEqual("ON_INSTALL", entry["policy"]["authentication"])
         self.assertEqual("Productivity", entry["category"])
+        mcp_entry = next(plugin for plugin in marketplace["plugins"] if plugin["name"] == "gptpro-mcp")
+        self.assertEqual({"source": "local", "path": "./plugins/gptpro-mcp"}, mcp_entry["source"])
+        self.assertEqual("AVAILABLE", mcp_entry["policy"]["installation"])
 
     def test_plugin_manifest_loads_mirrored_skill(self) -> None:
         manifest = json.loads(
             (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
         )
         self.assertEqual("gptpro", manifest["name"])
-        self.assertEqual("0.1.0", manifest["version"])
+        self.assertEqual("0.3.0", manifest["version"])
         self.assertEqual("./skills/", manifest["skills"])
         self.assertEqual("GPT Pro Collaborator", manifest["interface"]["displayName"])
         self.assertTrue((PLUGIN_SKILL / "SKILL.md").is_file())
@@ -59,20 +68,36 @@ class PluginDistributionTests(unittest.TestCase):
             self.assertIn("$gptpro", prompt)
         combined_prompts = " ".join(default_prompts)
         self.assertIn("approved", combined_prompts.lower())
-        self.assertIn("Web MCP", combined_prompts)
+        self.assertIn("Desktop", combined_prompts)
         self.assertIn("validate", combined_prompts.lower())
         self.assertIn("$gptpro", ui_metadata)
         long_description = manifest["interface"]["longDescription"].lower()
-        self.assertIn("schema 4", long_description)
-        self.assertIn("seven", long_description)
-        self.assertIn("read-only", long_description)
-        self.assertIn("context notes", long_description)
-        self.assertIn("visible chat", long_description)
+        self.assertIn("visible chatgpt macos app", long_description)
+        self.assertIn("bounded", long_description)
+        self.assertIn("send at most once", long_description)
+        self.assertIn("browser delivery", long_description)
+        self.assertIn("not supported", long_description)
 
     def test_plugin_skill_mirrors_standalone_package(self) -> None:
         self.assertEqual(tree_files(STANDALONE_SKILL), tree_files(PLUGIN_SKILL))
+        self.assertEqual(tree_files(MCP_STANDALONE_SKILL), tree_files(MCP_PLUGIN_SKILL))
 
-    def test_integrated_project_route_and_new_chat_contract_are_aligned(self) -> None:
+    def test_optional_mcp_plugin_is_explicit_and_independent(self) -> None:
+        manifest = json.loads(
+            (MCP_PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual("gptpro-mcp", manifest["name"])
+        self.assertEqual("./skills/", manifest["skills"])
+        self.assertTrue((MCP_PLUGIN_SKILL / "SKILL.md").is_file())
+        skill = (MCP_STANDALONE_SKILL / "SKILL.md").read_text(encoding="utf-8")
+        metadata = (MCP_STANDALONE_SKILL / "agents" / "openai.yaml").read_text(encoding="utf-8")
+        self.assertIn("$gptpro-mcp", skill)
+        self.assertIn("$gptpro-mcp", metadata)
+        self.assertIn("allow_implicit_invocation: false", metadata)
+        self.assertIn("desktop-ui", skill.lower())
+        self.assertIn("browser", skill.lower())
+
+    def test_desktop_only_route_and_new_chat_contract_are_aligned(self) -> None:
         skill = (STANDALONE_SKILL / "SKILL.md").read_text(encoding="utf-8")
         ui = (STANDALONE_SKILL / "agents" / "openai.yaml").read_text(encoding="utf-8")
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
@@ -89,19 +114,38 @@ class PluginDistributionTests(unittest.TestCase):
         ):
             with self.subTest(surface=label):
                 self.assertIn("$gptpro", text)
-                self.assertIn("mcp-research", text)
+                self.assertIn("desktop", text.lower())
 
-        self.assertIn("defaults to a proposed `mcp-research` package", skill)
-        self.assertIn("propose a narrowly scoped mcp-research package by default", ui)
-        self.assertIn("mcp-research` package를 기본 제안", readme)
+        self.assertIn("visible macOS ChatGPT app", skill)
+        self.assertIn("Desktop", ui)
+        self.assertIn("Desktop", readme)
         self.assertIn(
-            "propose a narrowly scoped Schema 4 mcp-research package by default",
+            "visible ChatGPT macOS app",
             manifest["interface"]["longDescription"],
         )
         self.assertIn("empty new general Chat", skill)
-        self.assertIn("empty new general Chat", ui)
-        self.assertIn("비어 있는 새 general Chat", readme)
-        self.assertIn("empty new general Chat", plugin_text)
+        self.assertIn("new general Chat", ui)
+        self.assertIn("빈 새 general Chat", readme)
+        self.assertIn("new general Chat", plugin_text)
+        self.assertIn("Browser delivery", plugin_text)
+
+    def test_codex_and_chatgpt_app_names_are_not_conflated(self) -> None:
+        skill = (STANDALONE_SKILL / "SKILL.md").read_text(encoding="utf-8")
+        readme = (STANDALONE_SKILL / "README.md").read_text(encoding="utf-8")
+        manual = (STANDALONE_SKILL / "references" / "user-manual.md").read_text(
+            encoding="utf-8"
+        )
+        workflow = (STANDALONE_SKILL / "references" / "desktop-workflow.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("# GPT Pro Collaborator", skill)
+        self.assertIn("--chatgpt-app-name 'gptpro'", skill)
+        self.assertNotIn("--chatgpt-app-name 'GPT Pro Collaborator'", skill)
+        self.assertIn("Skill 이름은 `GPT Pro Collaborator`", readme)
+        self.assertIn("App 이름은 `gptpro`", readme)
+        self.assertIn("ChatGPT Plugins에 보이는 App 이름은 `gptpro`", manual)
+        self.assertIn("`gpt-pro-collaborator`: owner-only", workflow)
 
 
 if __name__ == "__main__":
