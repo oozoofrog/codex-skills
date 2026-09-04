@@ -1,0 +1,22 @@
+{
+  "name": "swift-intelligence",
+  "version": "0.1.0+codex.20260904035318",
+  "description": "Global SourceKit-backed semantic navigation for Swift code in Codex",
+  "author": {
+    "name": "oozoofrog"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Swift Intelligence",
+    "shortDescription": "Navigate Swift code with SourceKit semantics.",
+    "longDescription": "Adds read-only Swift definitions, references, implementations, symbols, hover information, and diagnostics through Xcode's bundled SourceKit-LSP.",
+    "developerName": "oozoofrog",
+    "category": "Productivity",
+    "capabilities": [
+      "Read-only",
+      "Semantic navigation"
+    ],
+    "defaultPrompt": "Inspect this Swift symbol semantically before editing it."
+  },
+  "mcpServers": "./.mcp.json"
+}

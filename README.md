@@ -1,6 +1,6 @@
 # codex-skills
 
-이 저장소는 Codex가 로그인된 **ChatGPT macOS 앱의 ChatGPT Pro**를 읽기 전용 저장소 협업자로 사용할 수 있게 하는 `gptpro` 패키지를 제공합니다.
+이 저장소는 Codex용 `gptpro` 패키지와 Swift 의미론 탐색용 `swift-intelligence` Plugin을 제공합니다.
 
 ## 현재 구조
 
@@ -8,6 +8,7 @@
 |---|---|
 | `gptpro` 0.3.x | 사용자가 호출하는 Desktop 전용 오케스트레이터입니다. |
 | `gptpro-mcp` 0.2.x | immutable repository snapshot을 읽는 Secure MCP Tunnel companion입니다. |
+| `swift-intelligence` 0.1.x | Xcode의 SourceKit-LSP로 Swift 정의, 참조, 구현, 타입, 심볼 및 진단을 읽기 전용으로 조회합니다. |
 
 새 상담은 한 경로만 사용합니다.
 
@@ -25,6 +26,8 @@ Codex $gptpro
 
 ChatGPT Web, Chrome handoff, browser fallback, CDP, remote debugging port, Electron renderer/IPC/private bridge는 새 실행 경로에서 지원하지 않습니다. 과거 receipt는 offline verification만 가능합니다.
 
+`swift-intelligence`는 MCP 서버가 필요한 Plugin이므로 `plugins/swift-intelligence/`에만 제공합니다. Python 3 외의 Python 패키지나 외부 MCP 바이너리를 추가로 설치하지 않으며, macOS의 Xcode에 포함된 `sourcekit-lsp`를 사용합니다.
+
 ## 설치
 
 검증 가능한 기본 설치는 checkout의 관리 도구를 사용합니다. `gptpro`를 설치하면 matching `gptpro-mcp` companion도 먼저 설치하고 owner-only component descriptor에 정확한 entrypoint와 tree hash를 기록합니다.
@@ -37,6 +40,15 @@ python3 scripts/manage_skills.py install gptpro --update
 기본 위치는 `${CODEX_HOME:-~/.codex}/skills`입니다. 설치 전환과 레거시 MCP 상태가 있으면 관리 도구가 종료 증거나 residual ownership receipt 없이는 기존 코드를 제거하지 않습니다.
 
 Plugin marketplace와 GitHub Skill 설치는 패키지 탐색에는 사용할 수 있지만, 두 component의 exact descriptor를 만들어 준다는 보장은 없습니다. 실제 Desktop consultation 전에 `desktop-doctor`와 component handshake를 통과해야 합니다. 자세한 내용은 [설치 문서](docs/selective-installation.md)와 [Plugin 문서](docs/plugin-installation.md)를 참고하세요.
+
+Swift Intelligence는 marketplace 등록 후 Plugin으로 설치합니다.
+
+```bash
+codex plugin marketplace add oozoofrog/codex-skills --ref main
+codex plugin add swift-intelligence@codex-skills
+```
+
+설치 후 Codex를 다시 시작하고 새 작업을 여십시오. 자세한 요구 사항과 사용법은 [Swift Intelligence 설치 및 사용](plugins/swift-intelligence/docs/installation-and-usage.md)을 참고하세요.
 
 ## 첫 사용
 
@@ -102,6 +114,7 @@ python3 gptpro/scripts/validate_structure.py
 python3 gptpro-mcp/scripts/validate_structure.py
 python3 -m unittest discover -s gptpro/tests -v
 python3 -m unittest discover -s gptpro-mcp/tests -v
+python3 -m unittest discover -s plugins/swift-intelligence/tests -v
 python3 -m unittest discover -s scripts/tests -v
 python3 scripts/sync_skill_mirrors.py
 git diff --check

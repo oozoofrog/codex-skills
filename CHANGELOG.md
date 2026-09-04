@@ -1,11 +1,12 @@
 # Changelog
 
-이 저장소의 의미 있는 `gptpro` 변경을 기록합니다.
+이 저장소의 의미 있는 패키지 변경을 기록합니다.
 
 ## [Unreleased]
 
 ### Added
 
+- `swift-intelligence` Plugin `0.1.0+codex.20260904035318`: Xcode의 SourceKit-LSP를 사용해 Swift 정의, 참조, 구현, hover, 심볼 및 진단을 읽기 전용 MCP 도구로 제공
 - `gptpro` 0.3.0 Desktop-only workflow: visible ChatGPT macOS app control, Schema 4 read-only repository collaboration, deterministic Desktop submission/response observations, and machine-global bounded standing approval v2.
 - `gptpro-mcp` 0.2.0 companion: exact base handshake, immutable repository snapshot tools, Secure MCP Tunnel foreground lifecycle, owner-only global state, app-binding receipt, and legacy residual-ownership transition evidence.
 - Default repository installation now installs and verifies the companion before the base, then records exact entrypoints and tree hashes in an owner-only component descriptor.

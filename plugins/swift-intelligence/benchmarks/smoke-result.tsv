@@ -1,0 +1,3 @@
+case	mode	accuracy	input_tokens	output_tokens	tool_calls
+symbols-shapes	baseline	1.00	57525	814	4
+symbols-shapes	semantic	1.00	89762	765	4
