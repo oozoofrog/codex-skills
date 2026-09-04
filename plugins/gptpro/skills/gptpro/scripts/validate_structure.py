@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the Desktop-only gptpro orchestration Skill."""
+"""Validate the gptpro v0.6 Schema-6 isolated Electron Runner and mirror."""
 
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -17,16 +19,29 @@ REQUIRED_FILES = (
     "README.md",
     "agents/openai.yaml",
     "scripts/gptpro.py",
+    "scripts/chatgpt-desktop.js",
     "scripts/validate_structure.py",
-    "references/advisory-validation.md",
-    "references/desktop-workflow.md",
+    "runtime/__init__.py",
+    "runtime/gptpro_runtime/__init__.py",
+    "runtime/gptpro_runtime/approvals.py",
+    "runtime/gptpro_runtime/controller.py",
+    "runtime/gptpro_runtime/package.py",
+    "runtime/gptpro_runtime/receipts.py",
+    "runtime/gptpro_runtime/schema.py",
+    "runtime/gptpro_runtime/security.py",
+    "runtime/gptpro_runtime/state.py",
+    "runtime/chatgpt-desktop/async-queue.js",
+    "runtime/chatgpt-desktop/app-host-http.js",
+    "runtime/chatgpt-desktop/cdp-client.js",
+    "runtime/chatgpt-desktop/conversation-client.js",
+    "runtime/chatgpt-desktop/conversation-readback.js",
+    "runtime/chatgpt-desktop/delta-decoder.js",
+    "runtime/chatgpt-desktop/errors.js",
+    "runtime/chatgpt-desktop/model-catalog.js",
+    "runtime/chatgpt-desktop/private-bridge.js",
+    "references/electron-runtime.md",
     "references/failure-reporting.md",
-    "references/human-takeover.md",
-    "references/legacy-receipts.md",
-    "references/manifest-schema.md",
     "references/security.md",
-    "references/standing-approval.md",
-    "references/supplemental-documents.md",
     "references/user-manual.md",
     "references/workflow.md",
     "templates/base-prompt.md.tpl",
@@ -35,6 +50,7 @@ REQUIRED_FILES = (
     "templates/mode-debug.md.tpl",
     "templates/mode-plan.md.tpl",
     "templates/mode-review.md.tpl",
+    "tests/test_chatgpt_desktop.test.js",
     "tests/test_failure_reporting.py",
     "tests/test_gptpro.py",
     "tests/test_install_transitions.py",
@@ -56,10 +72,15 @@ EXPECTED_BASE_PLACEHOLDERS = {
     "TREE_SHA",
 }
 IGNORED_NAMES = {"__pycache__", ".DS_Store"}
+IGNORED_SUFFIXES = {".pyc", ".pyo"}
 
 
 class ValidationError(Exception):
     pass
+
+
+def ignored(relative: Path) -> bool:
+    return any(part in IGNORED_NAMES or " 2." in part for part in relative.parts) or relative.suffix in IGNORED_SUFFIXES
 
 
 def sha256_file(path: Path) -> str:
@@ -95,16 +116,22 @@ def validate_frontmatter(root: Path, errors: list[str]) -> None:
         return
     if set(values) != {"name", "description"}:
         errors.append("SKILL.md frontmatter keys must be exactly name and description")
-    if values.get("name") != root.name:
-        errors.append("SKILL.md name must match the Skill directory")
+    if values.get("name") != "gptpro":
+        errors.append("SKILL.md name must be gptpro")
+    description = values.get("description", "")
+    if "$gptpro" not in description or "explicit" not in description.lower():
+        errors.append("SKILL.md description must keep explicit-only $gptpro invocation wording")
     ui = (root / "agents/openai.yaml").read_text(encoding="utf-8")
     if "$gptpro" not in ui or "$gptpro-mcp" in ui:
-        errors.append("Base UI metadata must explicitly invoke only $gptpro")
+        errors.append("UI metadata must explicitly invoke only $gptpro")
 
 
 def validate_links(root: Path, errors: list[str]) -> None:
     pattern = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
     for source in sorted(root.rglob("*.md")):
+        relative_source = source.relative_to(root)
+        if ignored(relative_source):
+            continue
         text = source.read_text(encoding="utf-8")
         for raw in pattern.findall(text):
             target = raw.strip().strip("<>").split("#", 1)[0]
@@ -114,10 +141,10 @@ def validate_links(root: Path, errors: list[str]) -> None:
             try:
                 local.relative_to(root)
             except ValueError:
-                errors.append(f"Local link escapes Skill root: {source.relative_to(root)} -> {raw}")
+                errors.append(f"Local link escapes Skill root: {relative_source} -> {raw}")
                 continue
             if not local.exists():
-                errors.append(f"Broken local link: {source.relative_to(root)} -> {raw}")
+                errors.append(f"Broken local link: {relative_source} -> {raw}")
 
 
 def validate_templates(root: Path, errors: list[str]) -> None:
@@ -132,113 +159,185 @@ def validate_templates(root: Path, errors: list[str]) -> None:
 
 
 def validate_python(root: Path, errors: list[str]) -> None:
-    files = {
+    paths = [
         root / "scripts/gptpro.py",
         root / "scripts/validate_structure.py",
         *sorted((root / "runtime").rglob("*.py")),
         *sorted((root / "tests").rglob("*.py")),
-    }
-    for path in sorted(files):
+    ]
+    for path in paths:
+        if ignored(path.relative_to(root)):
+            continue
         try:
             compile(path.read_text(encoding="utf-8"), str(path), "exec")
         except (OSError, UnicodeError, SyntaxError) as exc:
             errors.append(f"Python validation failed for {path.relative_to(root)}: {exc}")
-    for relative in ("scripts/gptpro.py", "scripts/validate_structure.py"):
+    for relative in ("scripts/gptpro.py", "scripts/chatgpt-desktop.js", "scripts/validate_structure.py"):
         if (root / relative).stat().st_mode & 0o111 == 0:
             errors.append(f"Executable script lacks an execute bit: {relative}")
 
 
-def validate_base_boundary(root: Path, errors: list[str]) -> None:
+def validate_javascript(root: Path, errors: list[str], checks: list[str]) -> None:
+    node = shutil.which("node")
+    if node is None:
+        errors.append("Node is unavailable; JavaScript syntax was not validated")
+        checks.append("javascript-syntax-not-run")
+        return
+    try:
+        version = subprocess.run(
+            [node, "--version"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=5, check=False,
+        )
+        major = int(version.stdout.strip().lstrip("v").split(".", 1)[0])
+    except (OSError, ValueError, IndexError, subprocess.TimeoutExpired) as exc:
+        errors.append(f"Unable to validate the Node version: {exc}")
+        checks.append("javascript-syntax-not-run")
+        return
+    if version.returncode != 0 or major < 22:
+        errors.append("Node 22 or newer is required for the Electron runtime")
+    for path in [root / "scripts/chatgpt-desktop.js", *sorted((root / "runtime/chatgpt-desktop").glob("*.js"))]:
+        result = subprocess.run(
+            [node, "--check", str(path)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=10, check=False,
+        )
+        if result.returncode != 0:
+            errors.append(f"JavaScript syntax validation failed for {path.relative_to(root)}")
+    checks.append("javascript-syntax-node-check")
+
+
+def validate_runtime_boundary(root: Path, errors: list[str]) -> None:
+    source = (root / "scripts/gptpro.py").read_text(encoding="utf-8")
+    required = (
+        '"component": "gptpro"',
+        '"delivery_channels": ["desktop-electron"]',
+        '"context_transports": [CONTEXT_TRANSPORT]',
+        '"schema-6-inline-immutable-snapshot"',
+        '"authenticated-exact-message-readback"',
+        '"authenticated-response-readback"',
+        '"macos-user-launcher"',
+        '"local_functions": False',
+        '"server_tool_fallback": False',
+        '"mcp_runtime": False',
+        '"browser_delivery": False',
+        '"computer_use": False',
+        '"secure_mcp_tunnel": False',
+        '"electron_private_api": True',
+        '"minimum_node_major": 22',
+    )
+    missing = [token for token in required if token not in source]
+    if missing:
+        errors.append(f"Electron component boundary is incomplete: {missing}")
+    bridge_source = (root / "runtime/chatgpt-desktop/private-bridge.js").read_text(encoding="utf-8")
+    app_host_source = (root / "runtime/chatgpt-desktop/app-host-http.js").read_text(encoding="utf-8")
+    if "sendMessageFromView" in bridge_source or "sendMessageFromView" in app_host_source:
+        errors.append("The active Electron runtime must not use the unsupported sendMessageFromView HTTP path")
+    for token in ('"connect-app-host"', '"httpFetch"', '"fetch"', '"cancel"'):
+        if token not in app_host_source:
+            errors.append(f"The app-host HTTP compatibility boundary is missing {token}")
     forbidden_paths = (
+        root / "runtime/gptpro_mcp",
+        root / "runtime/gptpro_browser",
         root / "scripts/gptpro_mcp.py",
-        root / "runtime",
-        root / "references/request-correlation.md",
-        root / "references/web-mcp.md",
         root / "references/browser-first.md",
         root / "references/browser-handoff.md",
         root / "references/browser-policy.md",
         root / "references/response-monitor.md",
+        root / "references/request-correlation.md",
+        root / "references/secure-mcp-tunnel.md",
     )
     for path in forbidden_paths:
-        if path.is_file() or (path.is_dir() and any(item.is_file() for item in path.rglob("*"))):
-            errors.append(f"Desktop-only base retains a removed runtime path: {path.relative_to(root)}")
-    source = (root / "scripts/gptpro.py").read_text(encoding="utf-8")
-    required = (
-        '"component": "gptpro"',
-        '"mcp_runtime": False',
-        '"delivery_channels": ["desktop-ui"]',
-        '"browser_delivery": False',
-        '"cdp": False',
-        '"electron_private_api": False',
-        "GPTPRO_MCP_COMPONENT_REQUIRED",
-        "gptpro-context-export-v1",
+        if path.exists():
+            errors.append(f"Removed transport path remains in the package: {path.relative_to(root)}")
+    removed_tool_runtime = root / "runtime/gptpro_runtime/tools.py"
+    if removed_tool_runtime.exists():
+        errors.append("Removed local ToolRuntime module remains in the package")
+    private_contract_files: list[str] = []
+    for path in sorted((root / "runtime/chatgpt-desktop").glob("*.js")):
+        if "electronBridge" in path.read_text(encoding="utf-8"):
+            private_contract_files.append(path.name)
+    if private_contract_files != ["private-bridge.js"]:
+        errors.append(f"Electron renderer contract is not isolated: {private_contract_files}")
+    runtime_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in [root / "scripts/chatgpt-desktop.js", *sorted((root / "runtime/chatgpt-desktop").glob("*.js"))]
     )
-    missing = [token for token in required if token not in source]
-    if missing:
-        errors.append(f"Desktop-only component boundary is incomplete: {missing}")
-    forbidden_tokens = (
-        "runtime.gptpro_mcp",
-        "runtime.gptpro_browser",
-        "command_browser_plan",
-        "command_response_monitor_plan",
-        "remote-debugging-port",
-        "electronBridge",
+    credential_extractors = (
+        "document.cookie",
+        "indexedDB.databases",
+        "sessionStorage.getItem",
+        'localStorage.getItem("token',
+        "Authorization bearer",
     )
-    retained = [token for token in forbidden_tokens if token in source]
+    retained = [token for token in credential_extractors if token in runtime_text]
     if retained:
-        errors.append(f"Desktop-only base retains forbidden delivery code: {retained}")
+        errors.append(f"Credential/session extraction pattern is present: {retained}")
+    controller_text = (root / "runtime/gptpro_runtime/controller.py").read_text(encoding="utf-8")
+    conversation_text = (root / "runtime/chatgpt-desktop/conversation-client.js").read_text(encoding="utf-8")
+    readback_text = (root / "runtime/chatgpt-desktop/conversation-readback.js").read_text(encoding="utf-8")
+    for token in ("ToolRuntime", "local_function_signatures"):
+        if token in controller_text or token in conversation_text:
+            errors.append(f"Removed local-tool runtime contract remains active: {token}")
+    node_entrypoint_text = (root / "scripts/chatgpt-desktop.js").read_text(encoding="utf-8")
+    if "is an internal governed command; use gptpro.py" not in node_entrypoint_text:
+        errors.append("The internal Desktop ask/collect paths do not require the parent governance entrypoint")
+    schema_text = (root / "runtime/gptpro_runtime/schema.py").read_text(encoding="utf-8")
+    for token in (
+        'CONTEXT_TRANSPORT = "inline-immutable-snapshot"',
+        'INLINE_FORMAT = "gptpro-inline-context-v1"',
+        'MAX_OUTBOUND_BYTES = 256 * 1024',
+        'DEFAULT_MODEL_ID = "gpt-5-6-pro"',
+        'CHAT_HISTORY_MODE = "normal"',
+    ):
+        if token not in schema_text:
+            errors.append(f"Schema-6 inline boundary is missing: {token}")
+    package_text = (root / "runtime/gptpro_runtime/package.py").read_text(encoding="utf-8")
+    if "context.zip" in package_text or "zipfile" in package_text:
+        errors.append("The unsent duplicate ZIP package remains active")
+    if "continue_consultation" in controller_text or 'add_parser("continue")' in source:
+        errors.append("Unproven conversation continuation remains active")
+    for token in ('add_parser("launcher-install")', 'add_parser("launcher-status")', 'add_parser("launcher-uninstall")'):
+        if token not in source:
+            errors.append(f"User launcher CLI is incomplete: {token}")
+    for token in (
+        "LAUNCHER_BUNDLE_ID",
+        "GPTProLauncherScriptSHA256",
+        "RENAME_SWAP",
+        "RENAME_EXCL",
+        "_launcher_lock",
+        "GPTPRO_LAUNCHER_IDENTITY_CHANGED",
+        "GPTPRO_LAUNCHER_TRASH_CROSS_VOLUME",
+        "process_state_unknown",
+        "runner_verified",
+        "RUNNER_PORT = 9223",
+        "--user-data-dir=$runner_profile",
+        '"ordinary_chatgpt_relaunch_required": False',
+        "--remote-debugging-address=127.0.0.1",
+        "automatic_app_termination\": False",
+        "login_item_installed\": False",
+    ):
+        if token not in controller_text:
+            errors.append(f"User launcher safety boundary is incomplete: {token}")
+    if "waitForConversationResponse" not in conversation_text or 'add_parser("collect-response")' not in source:
+        errors.append("Authenticated exact-conversation readback recovery is incomplete")
+    for token in ("waitForConversationResponse", "response_readback", "conversation-readback-live-v1"):
+        if token not in conversation_text:
+            errors.append(f"Primary exact-message readback is incomplete: {token}")
+    for token in ('completion_source: "conversation-readback-v1"', 'final.status !== "finished_successfully"', "final.end_turn !== true"):
+        if token not in readback_text:
+            errors.append(f"Conversation readback integrity contract is missing: {token}")
 
 
-def validate_visible_app_identity(root: Path, errors: list[str]) -> None:
-    """Keep the Codex display name separate from the ChatGPT-visible app name."""
-
-    documents = {
-        "SKILL.md": (
-            "# GPT Pro Collaborator",
-            "--chatgpt-app-name 'gptpro'",
-            "`gptpro` is the ChatGPT plugin/app name",
-        ),
-        "README.md": (
-            "Skill 이름은 `GPT Pro Collaborator`",
-            "App 이름은 `gptpro`",
-        ),
-        "references/user-manual.md": (
-            "ChatGPT Plugins에 보이는 App 이름은 `gptpro`",
-            "Codex의 Skill/Plugin 목록에서는 `GPT Pro Collaborator`",
-        ),
-        "references/desktop-workflow.md": (
-            "`GPT Pro Collaborator`: Codex",
-            "`gptpro`: ChatGPT Plugins",
-            "`gpt-pro-collaborator`: owner-only",
-        ),
-    }
-    for relative, required in documents.items():
-        try:
-            text = (root / relative).read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            errors.append(f"Unable to inspect ChatGPT app identity in {relative}: {exc}")
-            continue
-        missing = [token for token in required if token not in text]
-        if missing:
-            errors.append(f"ChatGPT app identity contract is incomplete in {relative}: {missing}")
-    try:
-        skill = (root / "SKILL.md").read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return
-    if "--chatgpt-app-name 'GPT Pro Collaborator'" in skill:
-        errors.append("Copyable consult command conflates the Codex display name with the ChatGPT app")
-
-
-def package_files(root: Path) -> dict[str, str]:
-    result: dict[str, str] = {}
+def package_files(root: Path) -> dict[str, tuple[int, str]]:
+    result: dict[str, tuple[int, str]] = {}
     for path in sorted(root.rglob("*")):
-        if (
-            not path.is_file()
-            or any(part in IGNORED_NAMES for part in path.relative_to(root).parts)
-            or path.suffix in {".pyc", ".pyo"}
-        ):
+        relative = path.relative_to(root)
+        if ignored(relative):
             continue
-        result[path.relative_to(root).as_posix()] = sha256_file(path)
+        if path.is_symlink():
+            raise ValidationError(f"Symlink is not allowed: {relative.as_posix()}")
+        if not path.is_file():
+            continue
+        result[relative.as_posix()] = (path.stat().st_mode & 0o777, sha256_file(path))
     return result
 
 
@@ -246,8 +345,12 @@ def validate_mirror(root: Path, mirror: Path, errors: list[str]) -> None:
     if not mirror.is_dir():
         errors.append(f"Mirror directory not found: {mirror}")
         return
-    source_files = package_files(root)
-    mirror_files = package_files(mirror)
+    try:
+        source_files = package_files(root)
+        mirror_files = package_files(mirror)
+    except (OSError, ValidationError) as exc:
+        errors.append(str(exc))
+        return
     if source_files != mirror_files:
         errors.append(
             "Plugin mirror differs from standalone Skill; "
@@ -260,6 +363,14 @@ def validate_mirror(root: Path, mirror: Path, errors: list[str]) -> None:
 def validate(root_value: Path, mirror: Path | None) -> dict[str, object]:
     root = root_value.expanduser().resolve()
     errors: list[str] = []
+    checks = [
+        "required-files",
+        "frontmatter-and-ui-trigger",
+        "local-links",
+        "prompt-placeholders",
+        "python-syntax-and-mode",
+        "electron-runtime-boundary",
+    ]
     if not root.is_dir():
         errors.append(f"Skill directory not found: {root}")
     else:
@@ -271,24 +382,16 @@ def validate(root_value: Path, mirror: Path | None) -> dict[str, object]:
             validate_links(root, errors)
             validate_templates(root, errors)
             validate_python(root, errors)
-            validate_base_boundary(root, errors)
-            validate_visible_app_identity(root, errors)
+            validate_javascript(root, errors, checks)
+            validate_runtime_boundary(root, errors)
     if mirror is not None and root.is_dir():
         validate_mirror(root, mirror.expanduser().resolve(), errors)
+        checks.append("standalone-plugin-byte-and-mode-mirror")
     return {
         "valid": not errors,
         "skill_root": str(root),
         "mirror": str(mirror.expanduser().resolve()) if mirror else None,
-        "checks": [
-            "required-files",
-            "frontmatter",
-            "local-links",
-            "prompt-placeholders",
-            "python-syntax-and-mode",
-            "desktop-only-component-boundary",
-            "chatgpt-visible-app-identity",
-            *(("standalone-plugin-mirror",) if mirror else ()),
-        ],
+        "checks": checks,
         "errors": errors,
     }
 

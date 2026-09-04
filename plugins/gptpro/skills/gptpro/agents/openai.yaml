@@ -1,6 +1,6 @@
 interface:
   display_name: "GPT Pro Collaborator"
-  short_description: "Desktop ChatGPT Pro with read-only repository context"
-  default_prompt: "Use $gptpro for this explicitly requested ChatGPT Pro consultation. Prepare the smallest bounded read-only repository package, use the exact installed MCP companion and visible macOS ChatGPT new general Chat with Pro, send at most once, collect the bound response, and independently validate all advice."
+  short_description: "Send approved code once to ChatGPT Pro and collect its review"
+  default_prompt: "Use $gptpro for this explicit ChatGPT Pro consultation: select the smallest relevant files, secret-scan and approve one Schema-6 inline snapshot, send it once to the exact Pro model through the isolated loopback Electron Runner without relaunching the ordinary ChatGPT app, collect the response, and independently validate the advice."
 policy:
   allow_implicit_invocation: false

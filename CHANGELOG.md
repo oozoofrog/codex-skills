@@ -4,24 +4,36 @@
 
 ## [Unreleased]
 
+- Replaced the ChatGPT DOM completion observer with deterministic message-ID authenticated conversation polling after live Desktop E2E showed the current outer renderer exposes none of the expected turn, Stop, or Copy selectors. The one-POST tombstone and no-resend rule remain unchanged; `collect-response` keeps the same GET-only correlation as a recovery command.
+- `gptpro` 0.6 moves the normal Desktop endpoint to an isolated Runner process on loopback port 9223 with a dedicated owner-only profile. The ordinary ChatGPT app can remain open normally and no longer needs to be quit or relaunched with debugging flags. Listener verification binds the exact Runner profile and port; explicit alternate endpoints remain development diagnostics only.
+- Simplified the Schema-6 Electron consultation to its proven core: one secret-scanned `outbound.md`, one normal-Chat POST, automatic response capture, and independent Codex evaluation. Removed duplicate ZIP packaging, conversation continuation, and active legacy-schema verification.
+- Hardened the one-send boundary with a pre-POST parent/child handshake, a durable `submission_dispatching` no-resend tombstone, package locking with revision checks, and one overall deadline across attestation, POST, and authenticated response readback. Failures retain only a fixed content-free last-stage label.
+- A failed no-resend state or receipt write now stops before POST with `DISPATCH_EVIDENCE_WRITE_FAILED`; parent authorization failure and evidence-write failure have explicit zero-POST regression coverage. A transient listener process-table inspection failure is classified as retryable only while package diagnostics prove no submission was recorded.
+- Desktop response capture now polls authenticated GET correlation against the deterministic message ID and exact outbound body while the single POST reader remains open, then releases that reader after successful final response proof. The unproven signed response-topic and incompatible DOM-observer paths are absent; GET-only `collect-response` remains the explicit no-send recovery path.
+- Added an optional user-level `gptpro Launcher.app` plus install/status/uninstall commands. The deterministic native wrapper starts the real ChatGPT app with loopback-only CDP, refuses to stop an existing normal instance, installs no Login Item or daemon, and can be removed recoverably through Trash.
+- Hardened launcher replacement with one owner-only process lock, macOS atomic exclude/swap renames, pre/post identity checks, managed-script hashes, explicit process-unknown and cross-volume errors, non-destructive cleanup warnings, and six user-visible ChatGPT mode states. Completed consultations now remind the user that prepared mode remains active until ChatGPT is manually reopened normally.
+
 ### Added
 
-- `gptpro` 0.3.0 Desktop-only workflow: visible ChatGPT macOS app control, Schema 4 read-only repository collaboration, deterministic Desktop submission/response observations, and machine-global bounded standing approval v2.
-- `gptpro-mcp` 0.2.0 companion: exact base handshake, immutable repository snapshot tools, Secure MCP Tunnel foreground lifecycle, owner-only global state, app-binding receipt, and legacy residual-ownership transition evidence.
-- Default repository installation now installs and verifies the companion before the base, then records exact entrypoints and tree hashes in an owner-only component descriptor.
+- `gptpro` 0.5.0 clean-room Electron runtime for the logged-in macOS ChatGPT app. The Node 22+ CLI provides fail-closed `probe`, dynamic `models`, and one-message `ask` over loopback CDP to exactly `app://-/index.html`.
+- Schema 6 `inline-immutable-snapshot` packages with secret/path scanning, Git identity, owner-only `prompt.md`, `system-prompt.md`, exact `outbound.md`, exact approval, standing approval v4, deterministic response wrapping, and independent Codex evaluation receipts.
+- Package-specific canonical block framing verified directly from `outbound.md`. The fixed 262,144-byte limit, boundary collision check, raw newline preservation, exact model `gpt-5-6-pro`, normal-Chat mode, and outbound/system hashes are manifest- and approval-bound.
+- `desktop-doctor`, safe `desktop-launch`, and `consult` commands. The launcher never terminates a running app and reports the one-time human relaunch checkpoint when remote debugging is unavailable.
 
 ### Changed
 
-- Codex의 `GPT Pro Collaborator` 표시 이름, ChatGPT UI의 `gptpro` App 이름, 로컬 내부 binding key를 분리했습니다. Desktop package와 전송 증거는 이제 문서·copyable command·검증 테스트에서 실제 ChatGPT UI 이름 `gptpro`에 결속되며, Plugins의 “채팅에서 사용해 보기”가 `Work`를 열면 `Chat`으로 전환한 뒤 App pill과 Pro를 다시 확인합니다.
-- One account-level ChatGPT App/Tunnel profile is reused across local Git repositories; each consultation still creates a repository- and request-specific immutable package.
-- External strict UTF-8 documents use explicit `--evidence-file` snapshots and bounded `gptpro_artifact_read` access instead of UI file upload.
-- Response collection is an attended visible Desktop observation within the active Codex task. There is no hidden response supervisor, heartbeat, or automatic resend.
+- Consultation delivery now uses the ChatGPT Desktop-owned authentication, integrity, DeviceCheck, conversation POST, and authenticated response readback rather than UI automation or a custom ChatGPT App. Private contracts are isolated and explicitly treated as unstable rather than public OpenAI APIs.
+- Owner-only runtime state moves to `~/Library/Application Support/gptpro/desktop/v5/`. Each consultation binds disclosure and delivery separately as `context_transport=inline-immutable-snapshot` and `delivery_channel=desktop-electron`.
+- Model selection uses an exact ID from the live logged-in catalog and fails on missing or ambiguous intent. The default is `gpt-5-6-pro`; no static entitlement fallback or silent model downgrade exists.
+- Repository context is sent directly as one verified `outbound.md` user message in normal Chat. Context over 256 KiB is reduced by selecting fewer files, never by automatic summary, split, truncation, or omission. Follow-up questions use a new package.
+- Installation is a single-package atomic `gptpro` update. It retires an installed legacy companion only after terminal authorization, non-live controller, and exact-child stop evidence are verified; historical packages remain offline-auditable.
 
 ### Removed
 
-- All active ChatGPT Web, Chrome, browser-first, browser fallback, response-monitor, CDP, remote-debugging, and Electron-private runtime paths.
-- New schema-2/schema-3/browser consultation creation. Historical receipts remain offline-verification-only and cannot authorize a new Send.
-- Local ChatGPT tool calling for writes, shell, build/test, Git mutation, credentials, arbitrary filesystem, or arbitrary network access.
+- Browser, Chrome, Computer Use, manual Send/Copy, custom ChatGPT App, Developer Mode, Secure MCP Tunnel, and `gptpro-mcp` from the active consultation and distribution path.
+- Ungoverned direct Node submission, arbitrary Node `--output`, local-function signatures, repository tool-loop/audit, tool-result stdin continuation, conversation continuation, server-tool fallback, and the v0.4 local-tool capability gate. Internal `ask` now requires the parent approval handshake, and any non-`all` assistant or tool-author route fails as `UNEXPECTED_TOOL_ROUTE` without resend.
+- New Schema 3/4/5 consultations, active legacy-schema verification, and standing approval v3 reuse. Historical files remain untouched but require the matching historical release for verification; they cannot authorize Schema 6 delivery.
+- Repository writes, shell/build/test, Git mutation, arbitrary filesystem/network tools, credential extraction, remote CDP, and automatic resend after ambiguous dispatch.
 
 ## [0.2.x development history]
 

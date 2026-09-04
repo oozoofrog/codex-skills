@@ -1,1 +1,0 @@
-Answer the bounded question directly. Support material claims with supplied repository evidence, identify assumptions, and state what additional evidence would change the answer. Avoid expanding into unrelated implementation work.

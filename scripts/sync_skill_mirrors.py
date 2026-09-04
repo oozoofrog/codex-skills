@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-PACKAGES = ("gptpro", "gptpro-mcp")
+PACKAGES = ("gptpro",)
 IGNORED_NAMES = {".DS_Store", "__pycache__"}
 IGNORED_SUFFIXES = {".pyc", ".pyo"}
 
@@ -34,7 +34,7 @@ def package_files(root: Path) -> dict[str, tuple[int, str]]:
         relative = path.relative_to(root)
         if path.is_symlink():
             raise SyncError(f"Symlink is not allowed in Skill package: {relative.as_posix()}")
-        if any(part in IGNORED_NAMES for part in relative.parts):
+        if any(part in IGNORED_NAMES or " 2." in part for part in relative.parts):
             continue
         if path.is_dir() or path.suffix in IGNORED_SUFFIXES:
             continue
@@ -71,12 +71,12 @@ def sync_one(source: Path, mirror: Path, *, write: bool) -> dict[str, Any]:
     staged = temporary / source.name
     backup = mirror.parent / f".{source.name}.mirror-backup-{secrets.token_hex(4)}"
     try:
-        shutil.copytree(
-            source,
-            staged,
-            copy_function=shutil.copy2,
-            ignore=shutil.ignore_patterns(".DS_Store", "__pycache__", "*.pyc", "*.pyo"),
-        )
+        staged.mkdir()
+        for relative in source_files:
+            source_path = source / relative
+            destination = staged / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, destination)
         if package_files(staged) != source_files:
             raise SyncError(f"Staged mirror differs from source: {source.name}")
         if mirror.exists():

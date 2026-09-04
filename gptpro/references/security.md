@@ -1,28 +1,30 @@
-# Desktop-only security boundary
+# Security boundary
 
-## 공개 경계
+## Desktop connection
 
-활성 경로는 두 가지 공개 표면만 사용합니다.
+- Accept only credential-free loopback HTTP discovery and the loopback CDP WebSocket target.
+- Verify that the listener belongs to the current user, `/Applications/ChatGPT.app`, the exact gptpro Runner profile, and port 9223.
+- Attach only when exactly one renderer has `type=page` and `url=app://-/index.html`.
+- Start port 9223 only on loopback for the isolated Runner; never expose it through LAN forwarding, SSH tunnels, containers, or public interfaces. The ordinary ChatGPT process does not need a debugging port and may remain open normally.
+- The optional `~/Applications/gptpro Launcher.app` starts the isolated process/profile but installs no daemon or Login Item, never terminates either ChatGPT process, and does not replace the governed `desktop-doctor` checks.
+- The Runner never copies the ordinary ChatGPT profile, cookies, tokens, or Keychain values. If the separate profile requires login, the user completes it inside the Runner UI.
 
-1. macOS ChatGPT 앱의 사람이 볼 수 있는 general Chat UI
-2. OpenAI Secure MCP Tunnel을 통한 읽기 전용 MCP 도구
+## Disclosure
 
-Browser, Chrome, Web fallback, CDP, Electron renderer/IPC, private backend endpoint, cookie/token/session 추출은 구현하지 않습니다.
+The exact `outbound.md`, not a ZIP or live repository, is sent. Preparation rejects unsafe paths, symlinks, non-UTF-8 data, disallowed untracked files, detected secrets, boundary collisions, and output above 262,144 bytes. Verification checks every inline header, body size, body hash, and the final outbound hash.
 
-## Repository disclosure
+Approval binds the exact manifest, outbound and system-prompt hashes, model, `desktop-electron`, normal Chat, and inline format. Immediately before POST, the child reports the bytes it read and waits for the parent to re-verify approval and durably record `submission_dispatching`.
 
-각 package는 Git identity, exact path/size/SHA-256 set, immutable local archive, secret/exclusion 결과, tool catalog hash, disclosure 예산, expiry, app/workspace/model, delivery channel을 결속합니다. ChatGPT는 package의 verified archive만 read/search할 수 있고 실제 working tree나 임의 filesystem을 직접 열 수 없습니다.
+The send boundary has three simple states:
 
-MCP 도구는 read-only입니다. write, patch, shell, build, test, Git mutation, credential, 임의 network fetch, local function relay는 없습니다. Repository content와 Pro response는 prompt injection을 포함할 수 있는 untrusted data입니다.
+- Before `submission_dispatching`: no POST was authorized. A verified capability failure may be retried while the same approval remains valid.
+- At `submission_dispatching`: the package becomes permanently no-resend before the child receives permission to POST.
+- After that boundary: gptpro accepts a response only after authenticated exact-message GET correlation. Missing response evidence does not prove that nothing was sent. Use GET-only `collect-response` or inspect normal Chat; never resend the old package automatically.
 
-## Local state
+State and receipt are both retained deliberately. State provides the current lifecycle decision; the hash-chained receipt proves how that decision was reached after a crash.
 
-Desktop approval, handoff, app binding은 canonical current-user home 아래 owner-only state에 저장합니다. 디렉터리 `0700`, 파일 `0600`, no-follow/single-link 검증, atomic replace를 사용합니다. Raw App ID는 private `.app.json`에만 존재하고 repository, terminal result, package, receipt에는 넣지 않습니다. Tunnel ID/API key/session ID도 raw 상태로 package나 오류에 출력하지 않습니다.
+No local function, server-tool fallback, MCP, shell, build/test, file write, Git mutation, arbitrary filesystem, or arbitrary network tool is exposed. Any assistant recipient other than `all` fails closed. Ambiguous post-authorization state is never resent automatically.
 
-## UI evidence
+## Credentials and output
 
-새 general Chat, visible `Chat`, `Pro`, app, workspace, model, exact composer hash, visible user-turn hash가 모두 필요합니다. Send는 최대 한 번입니다. 모호한 전송은 retry authority가 아닙니다. Response는 exact request nonce, outbound hash, next assistant ordinal, visible completion과 copy action에 결속합니다.
-
-## Debugging limits
-
-Private request-correlation 진단은 지원되는 정확한 Tunnel build에서만 별도로 사용할 수 있습니다. 일반 read-only Tunnel compatibility와 혼동하지 않습니다. 진단 실패는 tool permission을 넓히지 않으며 raw request/account identifiers를 노출하지 않습니다.
+The runtime intentionally does not read cookies, passwords, MFA codes, OAuth/session tokens, Authorization values, or unrelated renderer storage. Authenticated conversation readback accepts only one branch whose deterministic message ID and outbound bytes match. Unrelated conversation titles and contents are not persisted or emitted. Raw request and conversation identifiers are not stored; receipts contain hashes. Raw and wrapped responses are stored separately, and model output remains untrusted until Codex validates it.

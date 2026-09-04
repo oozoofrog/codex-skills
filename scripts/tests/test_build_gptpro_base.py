@@ -11,7 +11,7 @@ TARGET = REPO_ROOT / "gptpro" / "scripts" / "gptpro.py"
 
 
 class BuildGptproBaseTests(unittest.TestCase):
-    def test_reviewed_base_boundary_is_current_and_mcp_execution_free(self) -> None:
+    def test_reviewed_base_boundary_is_current_and_electron_scoped(self) -> None:
         before = TARGET.read_bytes()
         result = subprocess.run(
             ["python3", str(SCRIPT), "--check"],
@@ -27,9 +27,15 @@ class BuildGptproBaseTests(unittest.TestCase):
         self.assertNotIn("runtime.gptpro_mcp", source)
         self.assertIn('"component": "gptpro"', source)
         self.assertIn('"mcp_runtime": False', source)
-        self.assertIn('"delivery_channels": ["desktop-ui"]', source)
-        self.assertIn("GPTPRO_MCP_COMPONENT_REQUIRED", source)
+        self.assertIn('"delivery_channels": ["desktop-electron"]', source)
+        self.assertIn('"electron_private_api": True', source)
+        self.assertIn('"context_transports": [CONTEXT_TRANSPORT]', source)
+        self.assertIn('"local_functions": False', source)
+        self.assertIn('"server_tool_fallback": False', source)
+        self.assertNotIn("ToolRuntime", source)
+        self.assertNotIn("GPTPRO_MCP_COMPONENT_REQUIRED", source)
         self.assertNotIn("command_response_monitor_plan", source)
+        self.assertTrue((REPO_ROOT / "gptpro" / "scripts" / "chatgpt-desktop.js").is_file())
 
 
 if __name__ == "__main__":
