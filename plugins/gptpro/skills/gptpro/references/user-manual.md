@@ -4,6 +4,8 @@
 
 Node.js 22 이상, Python 3.11 이상, `/Applications/ChatGPT.app`, 로그인된 ChatGPT Pro 계정이 필요합니다. npm, custom App, Developer Mode, MCP, Tunnel, Browser 자동화는 필요하지 않습니다.
 
+2026-09-05 Desktop `26.901.31953`에서 새 승인 canary가 signed-stream 완료, 자동 import와 독립 evaluation을 통과했습니다. 별도 `collect-response` 복구는 사용하지 않았고 normal `consult` 내부의 조건부 current-branch proof GET은 수행됐습니다. 이 결과는 한 번의 중단 없는 첫 응답을 검증하며, socket 재연결/offset resume이나 다중 turn을 검증하지 않습니다. Stream에 tool-role 후보가 있거나 assistant/delta 상태가 handoff 전후에 걸치면 조건부 proof GET은 최대 30초 실행될 수 있습니다.
+
 ```bash
 python3 scripts/manage_skills.py install gptpro --dry-run
 python3 scripts/manage_skills.py install gptpro --update
@@ -42,15 +44,17 @@ python3 <skill-dir>/scripts/gptpro.py launcher-uninstall --json
 
 ## 사용
 
+`$gptpro`는 사용자가 plan, ask, review, debug, architecture 상담을 명시적으로 요청할 때만 사용하며, 일반 Codex 작업이나 OpenAI API 호출에는 사용하지 않습니다.
+
 ```text
 $gptpro review 모드로 src와 tests의 현재 변경을 ChatGPT Pro와 함께 검토해주세요.
 ```
 
 Codex가 작은 관련 파일 집합을 선택하고 비밀정보를 검사합니다. `outbound.md`에는 질문, 선택 코드, diff, 필요한 외부 텍스트 원문이 들어갑니다. 256 KiB를 넘으면 전송하지 않고 파일 범위를 줄입니다.
 
-승인 후 gptpro가 exact `gpt-5-6-pro`의 일반 Chat에 한 번 보냅니다. 직접 응답 통로나 ChatGPT가 알려 준 서명된 응답 통로에서 완료된 답변을 자동 저장합니다. 해당 통로의 완료 신호가 늦거나 누락되면 같은 메시지 ID와 정확한 `outbound.md`를 가진 기존 대화를 읽기만 하여 자동 회수합니다.
+승인 후 gptpro가 exact `gpt-5-6-pro`의 일반 Chat에 한 번 보냅니다. POST의 SSE 응답이 반환한 raw `stream_handoff`에서 서명된 WebSocket topic을 얻고, 복구된 catchup과 실시간 delta를 순서대로 처리한 뒤 `done`이 확인된 답변을 자동 저장합니다. tool-role 후보 또는 handoff 전후에 걸친 assistant/delta 상태 때문에 branch provenance가 불명확하면 signed `done` 뒤 알려진 conversation 하나만 최대 30초 GET하여 현재 branch와 signed assistant ID·본문이 일치하는지 추가로 확인합니다. 이 GET은 응답을 대신 회수하거나 다른 대화를 검색하지 않습니다. Handoff가 없으면 직접 완료로 받아들이지 않습니다. POST 첫 frame과 signed topic에는 bounded timeout이 적용되며, 실패하더라도 자동 재전송하지 않습니다. raw topic과 서명 URL은 저장하지 않습니다.
 
-Codex나 Runner가 중간에 종료되었거나 자동 회수까지 실패했다면 같은 prompt를 다시 보내지 않습니다. 다음 명령은 기존 대화를 읽기만 하는 수동 복구 수단입니다.
+Codex나 Runner가 durable dispatch 승인 뒤 중간에 종료되었거나 signed stream 수집이 실패했다면 같은 prompt를 다시 보내지 않습니다. Child가 `submitted` event를 남기기 전에 종료된 경우도 다음 명령만 사용합니다. 이 명령은 기존 대화를 GET으로 읽기만 하는 명시적 수동 복구 수단입니다.
 
 ```bash
 python3 <skill-dir>/scripts/gptpro.py collect-response \

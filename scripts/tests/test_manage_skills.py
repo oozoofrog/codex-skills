@@ -72,6 +72,45 @@ class ManageSkillsTests(unittest.TestCase):
         self.run_cli("install", "gptpro", "--dest", str(self.destination), "--update")
         self.assertEqual(MANAGER.tree_hash(REPO_ROOT / "gptpro"), MANAGER.tree_hash(self.destination / "gptpro"))
 
+    def test_failed_publication_restores_existing_install(self) -> None:
+        self.run_cli("install", "gptpro", "--dest", str(self.destination))
+        target = self.destination / "gptpro"
+        (target / "README.md").write_text("existing user installation\n", encoding="utf-8")
+        before = MANAGER.tree_hash(target)
+        replace = os.replace
+
+        def fail_publication(source, destination):
+            if Path(source).name.startswith(".gptpro.stage-") and Path(destination) == target:
+                raise OSError("injected publication failure")
+            return replace(source, destination)
+
+        with mock.patch.object(MANAGER.os, "replace", side_effect=fail_publication):
+            with self.assertRaisesRegex(OSError, "publication failure"):
+                MANAGER.atomic_install(REPO_ROOT / "gptpro", target)
+        self.assertEqual(before, MANAGER.tree_hash(target))
+        self.assertEqual([], list(self.destination.glob(".gptpro.backup-*")))
+        self.assertEqual([], list(self.destination.glob(".gptpro.stage-*")))
+
+    def test_failed_rollback_preserves_recoverable_backup(self) -> None:
+        self.run_cli("install", "gptpro", "--dest", str(self.destination))
+        target = self.destination / "gptpro"
+        (target / "README.md").write_text("existing user installation\n", encoding="utf-8")
+        before = MANAGER.tree_hash(target)
+        replace = os.replace
+
+        def fail_publication_and_rollback(source, destination):
+            if Path(destination) == target:
+                raise OSError("injected publication or rollback failure")
+            return replace(source, destination)
+
+        with mock.patch.object(MANAGER.os, "replace", side_effect=fail_publication_and_rollback):
+            with self.assertRaisesRegex(OSError, "rollback failure"):
+                MANAGER.atomic_install(REPO_ROOT / "gptpro", target)
+        backups = list(self.destination.glob(".gptpro.backup-*"))
+        self.assertEqual(1, len(backups))
+        self.assertEqual(before, MANAGER.tree_hash(backups[0]))
+        self.assertEqual([], list(self.destination.glob(".gptpro.stage-*")))
+
     def _legacy_component(
         self,
         *,

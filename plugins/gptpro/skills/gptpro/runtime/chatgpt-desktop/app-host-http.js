@@ -298,6 +298,7 @@ function installAppHostHttpRuntime(configuration) {
   window.postMessage({ type: "connect-app-host", port: channel.port2 }, window.location.origin, [channel.port2]);
   const controllers = new Map();
   const tasks = new Map();
+  const sockets = new Map();
   const emit = (value) => {
     try { globalThis[bindingName](JSON.stringify({ marker: "gptpro-app-host-http-v1", ...value })); } catch {}
   };
@@ -310,7 +311,11 @@ function installAppHostHttpRuntime(configuration) {
     async probe() {
       const requestId = `gptpro-probe-${crypto.randomUUID()}`;
       await session.call(["services", "httpFetch", "cancel"], [requestId]);
-      return { ok: true, contract: "app-host-http-v1" };
+      return {
+        ok: true,
+        contract: "app-host-http-v1",
+        websocket_supported: typeof WebSocket === "function",
+      };
     },
     async request(request) {
       const requestId = request.requestId;
@@ -379,7 +384,48 @@ function installAppHostHttpRuntime(configuration) {
       await session.call(["services", "httpFetch", "cancel"], [requestId]).catch(() => {});
       await tasks.get(requestId)?.catch(() => {});
     },
+    openSocket(request) {
+      const socketId = request?.socketId;
+      if (typeof socketId !== "string" || !socketId || sockets.has(socketId)) {
+        throw new Error("Invalid or duplicate Desktop WebSocket ID.");
+      }
+      const url = new URL(String(request?.url ?? ""));
+      if (url.protocol !== "wss:" || url.hostname !== "ws.chatgpt.com" || url.username || url.password) {
+        throw new Error("Only credential-free wss://ws.chatgpt.com Desktop handoff URLs are accepted.");
+      }
+      const socket = new WebSocket(url.href);
+      sockets.set(socketId, socket);
+      socket.addEventListener("open", () => {
+        emit({ type: "gptpro-ws-open", socketId });
+      });
+      socket.addEventListener("message", (event) => {
+        if (typeof event.data === "string") emit({ type: "gptpro-ws-message", socketId, data: event.data });
+        else emit({ type: "gptpro-ws-error", socketId, errorCode: "NON_TEXT_FRAME" });
+      });
+      socket.addEventListener("error", () => {
+        emit({ type: "gptpro-ws-error", socketId, errorCode: "SOCKET_ERROR" });
+      });
+      socket.addEventListener("close", (event) => {
+        sockets.delete(socketId);
+        emit({ type: "gptpro-ws-close", socketId, code: event.code, reason: "" });
+      });
+      return socketId;
+    },
+    sendSocket(request) {
+      const socket = sockets.get(request?.socketId);
+      if (!socket || socket.readyState !== 1) throw new Error("Desktop handoff WebSocket is not open.");
+      if (typeof request?.data !== "string") throw new Error("Desktop handoff WebSocket accepts text frames only.");
+      socket.send(request.data);
+      return true;
+    },
+    closeSocket(socketId) {
+      const socket = sockets.get(socketId);
+      sockets.delete(socketId);
+      try { socket?.close(); } catch {}
+      return true;
+    },
     async close() {
+      for (const socketId of [...sockets.keys()]) runtime.closeSocket(socketId);
       await Promise.all([...controllers.keys()].map((requestId) => runtime.cancel(requestId)));
       session.abort(new Error("gptpro Desktop session closed."), false);
       if (window[hookName] === runtime) delete window[hookName];

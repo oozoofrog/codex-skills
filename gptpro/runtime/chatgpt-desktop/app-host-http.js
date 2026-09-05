@@ -390,8 +390,8 @@ function installAppHostHttpRuntime(configuration) {
         throw new Error("Invalid or duplicate Desktop WebSocket ID.");
       }
       const url = new URL(String(request?.url ?? ""));
-      if (url.protocol !== "wss:" || url.username || url.password) {
-        throw new Error("Only credential-free wss Desktop handoff URLs are accepted.");
+      if (url.protocol !== "wss:" || url.hostname !== "ws.chatgpt.com" || url.username || url.password) {
+        throw new Error("Only credential-free wss://ws.chatgpt.com Desktop handoff URLs are accepted.");
       }
       const socket = new WebSocket(url.href);
       sockets.set(socketId, socket);

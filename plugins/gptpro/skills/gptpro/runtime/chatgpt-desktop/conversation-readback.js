@@ -46,7 +46,10 @@ function currentBranch(conversation) {
   const reversed = [];
   const seen = new Set();
   let cursor = conversation.current_node;
-  while (typeof cursor === "string" && cursor && !seen.has(cursor)) {
+  while (typeof cursor === "string" && cursor) {
+    if (seen.has(cursor)) {
+      throw runtimeError("RESPONSE_READBACK_CONTRACT_CHANGED", "The Desktop conversation branch contains a cycle.", { submissionState: "ambiguous" });
+    }
     seen.add(cursor);
     const node = mapping[cursor];
     if (!object(node)) {
@@ -60,21 +63,34 @@ function currentBranch(conversation) {
 
 function responseFromConversation(conversation, { messageId, prompt }) {
   const branch = currentBranch(conversation);
-  const index = branch.findIndex((node) => node?.message?.id === messageId);
-  if (index < 0) return null;
+  const matches = branch
+    .map((node, index) => node?.message?.id === messageId ? index : -1)
+    .filter((index) => index >= 0);
+  if (matches.length === 0) return null;
+  if (matches.length !== 1) {
+    throw runtimeError("RESPONSE_CORRELATION_AMBIGUOUS", "The deterministic Desktop message ID appeared more than once on the current branch.", { submissionState: "ambiguous" });
+  }
+  const index = matches[0];
   const user = branch[index]?.message;
   if (
     user?.author?.role !== "user"
     || user?.content?.content_type !== "text"
+    || !Array.isArray(user.content.parts)
+    || user.content.parts.length !== 1
     || user.content.parts?.[0] !== prompt
   ) {
     throw runtimeError("RESPONSE_CORRELATION_MISMATCH", "The Desktop conversation message ID did not match the approved outbound bytes.", { submissionState: "ambiguous" });
   }
 
   let final = null;
+  let nextUserSeen = false;
   for (const node of branch.slice(index + 1)) {
     const message = node?.message;
     if (!object(message)) continue;
+    if (message.author?.role === "user") {
+      nextUserSeen = true;
+      break;
+    }
     if (
       message.author?.role === "tool"
       || (message.author?.role === "assistant" && typeof message.recipient === "string" && message.recipient !== "all")
@@ -85,28 +101,49 @@ function responseFromConversation(conversation, { messageId, prompt }) {
       message.author?.role === "assistant"
       && message.channel === "final"
       && message.content?.content_type === "text"
+      && (!Array.isArray(message.content.parts) || message.content.parts.length !== 1)
+    ) {
+      throw runtimeError("RESPONSE_READBACK_CONTRACT_CHANGED", "The completed Desktop response used an unsupported content shape.", { submissionState: "ambiguous" });
+    }
+    if (
+      message.author?.role === "assistant"
+      && message.channel === "final"
+      && message.content?.content_type === "text"
+      && Array.isArray(message.content.parts)
+      && message.content.parts.length === 1
       && typeof message.content.parts?.[0] === "string"
     ) {
       final = message;
     }
   }
   if (!final || final.status !== "finished_successfully" || final.end_turn !== true) {
+    if (nextUserSeen) {
+      throw runtimeError("RESPONSE_CORRELATION_MISMATCH", "The matched Desktop turn advanced to another user message before its response was proven.", { submissionState: "ambiguous" });
+    }
     return { pending: true };
   }
+  if (final.recipient !== "all") {
+    throw runtimeError("UNEXPECTED_TOOL_ROUTE", "The matched Desktop conversation did not prove a final all-recipient assistant response.", { submissionState: "ambiguous" });
+  }
   const text = final.content.parts[0];
+  if (typeof final.id !== "string" || !final.id || text.trim().length === 0) {
+    throw runtimeError("RESPONSE_READBACK_CONTRACT_CHANGED", "The completed Desktop response omitted its assistant identity or text.", { submissionState: "ambiguous" });
+  }
   return {
     pending: false,
     text,
     conversation_id: typeof conversation.id === "string" ? conversation.id : null,
-    parent_message_id: typeof final.id === "string" ? final.id : null,
-    assistant_message_id: typeof final.id === "string" ? final.id : null,
+    parent_message_id: final.id,
+    assistant_message_id: final.id,
     tool_routes: 0,
+    done: true,
     completion_source: "conversation-readback-v1",
   };
 }
 
-async function requestJson(bridge, method, url, { headers, signal, timeoutMs }) {
+async function requestJson(bridge, method, url, { headers, signal, timeoutMs, allowNotFound = false }) {
   const response = await bridge.request(method, url, { headers, signal, timeoutMs });
+  if (allowNotFound && response.status === 404) return null;
   if (response.status < 200 || response.status >= 300) {
     throw runtimeError("RESPONSE_READBACK_UNAVAILABLE", `Desktop response readback returned HTTP ${response.status}.`, { submissionState: "ambiguous" });
   }
@@ -125,7 +162,9 @@ async function waitForConversationResponse(bridge, options) {
   const requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
   const notBeforeMs = (options.notBeforeMs ?? Date.now()) - (options.lookbackMs ?? DEFAULT_LOOKBACK_MS);
   const seenUpdates = new Map();
-  let matchedConversationId = null;
+  let matchedConversationId = typeof options.conversationId === "string" && options.conversationId
+    ? options.conversationId
+    : null;
 
   while (true) {
     if (signal?.aborted) throw abortReason(signal);
@@ -159,8 +198,9 @@ async function waitForConversationResponse(bridge, options) {
         bridge,
         "GET",
         `/conversation/${encodeURIComponent(candidate.id)}`,
-        { headers, signal, timeoutMs: requestTimeoutMs },
+        { headers, signal, timeoutMs: requestTimeoutMs, allowNotFound: matchedConversationId !== null },
       );
+      if (detail === null) continue;
       const correlated = responseFromConversation(detail, { messageId, prompt });
       if (correlated) matches.push({ id: candidate.id, result: correlated });
     }

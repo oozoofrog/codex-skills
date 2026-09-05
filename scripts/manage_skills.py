@@ -203,18 +203,19 @@ def atomic_install(source: Path, target: Path) -> None:
         os.replace(stage, target)
         if tree_hash(target) != tree_hash(source):
             raise ManagerError("GPTPRO_INSTALL_HASH_MISMATCH: installed package differs from source")
+    except BaseException:
         if backup.exists():
-            shutil.rmtree(backup)
-    except Exception:
-        if target.exists() and backup.exists():
-            shutil.rmtree(target)
+            if target.exists():
+                shutil.rmtree(target)
             os.replace(backup, target)
         raise
     finally:
         if stage.exists():
             shutil.rmtree(stage)
-        if backup.exists():
-            shutil.rmtree(backup)
+    # Delete the old install only after publication and verification succeeded.
+    # If rollback itself fails, its backup must remain available for recovery.
+    if backup.exists():
+        shutil.rmtree(backup)
 
 
 def install(

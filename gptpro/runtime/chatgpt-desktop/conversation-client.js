@@ -3,7 +3,7 @@
 const crypto = require("node:crypto");
 const { PrivateDesktopBridge, headerRecord } = require("./private-bridge.js");
 const { waitForConversationResponse } = require("./conversation-readback.js");
-const { ConversationDecoder } = require("./delta-decoder.js");
+const { ConversationDecoder, visibleText } = require("./delta-decoder.js");
 const { normalizeCatalog, resolveModel } = require("./model-catalog.js");
 const { runtimeError } = require("./errors.js");
 const { handoffTopic, openStreamHandoff } = require("./stream-handoff.js");
@@ -13,6 +13,21 @@ const ATTACH_DESKTOP = "X-OpenAI-Attach-Desktop-Surface";
 const ATTACH_DEVICE = "X-OpenAI-Attach-DeviceCheck-Token";
 const ATTACH_INTEGRITY = "X-OpenAI-Attach-Integrity-State";
 const MAX_PROMPT_BYTES = 256 * 1024;
+const INITIAL_HANDOFF_TIMEOUT_MS = 60_000;
+const CURRENT_BRANCH_PROOF_TIMEOUT_MS = 30_000;
+
+function responseHeader(headers, name) {
+  const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  return entry?.[1] ?? "";
+}
+
+function withTimeout(promise, timeoutMs, error) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { timer = setTimeout(() => reject(error()), timeoutMs); }),
+  ]).finally(() => clearTimeout(timer));
+}
 
 function deadlineScope(upstreamSignal, timeoutMs, submissionRisk, currentStage, timeoutErrorFactory = null) {
   const controller = new AbortController();
@@ -251,49 +266,97 @@ class PrivateConversationClient {
         await stream.cancel(runtimeError("CONVERSATION_REJECTED", `The conversation request returned HTTP ${response.status}.`, { submissionState: "rejected" }));
         throw runtimeError("CONVERSATION_REJECTED", `The conversation request returned HTTP ${response.status}.`, { submissionState: "rejected" });
       }
+      if (!responseHeader(response.headers, "content-type").toLowerCase().includes("text/event-stream")) {
+        throw runtimeError("STREAM_PROTOCOL_ERROR", "The Desktop conversation response was not an SSE stream.", { submissionState: "ambiguous" });
+      }
       options.progress("response_stream");
-      let topicId = null;
-      let directComplete = false;
-      while (!topicId && !directComplete) {
-        const item = await iterator.next();
-        if (item.done || item.value?.type === "fetch-stream-complete") {
-          directComplete = true;
-          break;
+      const topicId = await withTimeout((async () => {
+        while (true) {
+          const item = await iterator.next();
+          if (item.done || item.value?.type === "fetch-stream-complete") return null;
+          if (item.value?.type !== "fetch-stream-event") continue;
+          const found = handoffTopic(item.value.data);
+          if (found) return found;
+          decoder.consume(item.value.event, item.value.data);
         }
-        if (item.value?.type !== "fetch-stream-event") continue;
-        const found = handoffTopic(item.value.data);
-        if (found) {
-          topicId = found;
-          break;
-        }
-        decoder.consume(item.value.event, item.value.data);
-      }
+      })(), Math.min(options.initialHandoffTimeoutMs ?? INITIAL_HANDOFF_TIMEOUT_MS, options.timeoutMs ?? INITIAL_HANDOFF_TIMEOUT_MS), () => (
+        Number(stream.receivedChunks) > 0
+          ? runtimeError("STREAM_HANDOFF_FRAME_TIMEOUT", "The Desktop POST returned body bytes but no valid stream_handoff before the initial-frame deadline.", { submissionState: "ambiguous" })
+          : runtimeError("STREAM_BODY_TIMEOUT", "The Desktop POST returned no body bytes before the initial-frame deadline.", { submissionState: "ambiguous" })
+      ));
 
-      let completionSource;
       let handoffTopicSha256 = null;
-      if (topicId) {
-        handoff = await openStreamHandoff(bridge, topicId, {
-          headers,
-          signal: options.signal,
-          timeoutMs: Math.min(options.timeoutMs ?? 30_000, 30_000),
-        });
-        handoffTopicSha256 = handoff.topicSha256;
-        drainPromise = (async () => {
-          while (true) {
-            const item = await iterator.next();
-            if (item.done || item.value?.type === "fetch-stream-complete") return;
-          }
-        })();
-        void drainPromise.catch(() => {});
-        for await (const event of handoff.events) decoder.consume(event.event, event.data);
-        completionSource = "signed-stream-handoff-v1";
-      } else {
-        completionSource = "direct-desktop-stream-v1";
+      if (!topicId) {
+        throw runtimeError("STREAM_HANDOFF_MISSING", "The Desktop POST completed without the required signed stream handoff.", { submissionState: "ambiguous" });
       }
+      options.progress("stream_handoff");
+      handoff = await openStreamHandoff(bridge, topicId, {
+        headers,
+        signal: options.signal,
+        timeoutMs: Math.min(options.timeoutMs ?? 30_000, 30_000),
+      });
+      handoffTopicSha256 = handoff.topicSha256;
+      drainPromise = (async () => {
+        while (true) {
+          const item = await iterator.next();
+          if (item.done || item.value?.type === "fetch-stream-complete") return;
+        }
+      })();
+      void drainPromise.catch(() => {});
+      for await (const event of handoff.events) decoder.consume(event.event, event.data, { signed: true });
 
-      const result = decoder.finish();
+      const result = decoder.finish({ transportDone: handoff?.completed === true });
       if (result.done !== true) {
         throw runtimeError("STREAM_INTERRUPTED", "The Desktop response stream ended without a completed assistant turn.", { submissionState: "ambiguous" });
+      }
+      if (handoff && decoder.signedAssistantEvidence !== true) {
+        throw runtimeError("STREAM_INTERRUPTED", "The signed Desktop handoff contained no final assistant evidence.", { submissionState: "ambiguous" });
+      }
+      if (handoff && handoff.conversationId !== result.conversation_id) {
+        throw runtimeError("STREAM_BRANCH_MISMATCH", "The signed response mixed different conversation identities.", { submissionState: "ambiguous" });
+      }
+      const currentBranchProofRequired = (
+        decoder.toolRouteCandidate
+        || decoder.preHandoffAssistantEvidence
+        || decoder.signedDeltaContinuationObserved
+      );
+      if (currentBranchProofRequired) {
+        if (handoff?.completed !== true) {
+          throw runtimeError("UNEXPECTED_TOOL_ROUTE", "The Desktop stream required current-branch proof without signed completion.", { submissionState: "ambiguous" });
+        }
+        options.progress("current_branch_proof");
+        const proofScope = deadlineScope(
+          options.signal,
+          Math.min(options.branchProofTimeoutMs ?? CURRENT_BRANCH_PROOF_TIMEOUT_MS, options.timeoutMs ?? CURRENT_BRANCH_PROOF_TIMEOUT_MS),
+          () => true,
+          () => "current_branch_proof",
+          () => runtimeError("CURRENT_BRANCH_PROOF_TIMEOUT", "The signed response could not be proven on the current branch before its bounded deadline.", {
+            submissionState: "ambiguous",
+            recovery: "Run collect-response. It performs GET readback only and never resends the prompt.",
+            stage: "current_branch_proof",
+          }),
+        );
+        let verified;
+        try {
+          verified = await waitForConversationResponse(bridge, {
+            headers,
+            signal: proofScope.signal,
+            messageId,
+            prompt: options.prompt,
+            conversationId: result.conversation_id,
+            pollIntervalMs: options.branchProofPollIntervalMs,
+            requestTimeoutMs: Math.min(options.branchProofTimeoutMs ?? CURRENT_BRANCH_PROOF_TIMEOUT_MS, 30_000),
+          });
+        } finally {
+          proofScope.close();
+        }
+        if (
+          verified.conversation_id !== result.conversation_id
+          || verified.assistant_message_id !== result.assistant_message_id
+          || visibleText(verified.text) !== result.text
+        ) {
+          throw runtimeError("STREAM_BRANCH_MISMATCH", "The signed response did not match the authenticated zero-tool conversation branch.", { submissionState: "ambiguous" });
+        }
       }
       await stream.cancel(runtimeError("CANCELLED", "The completed Desktop response stream was released.", { submissionState: "ambiguous" }));
       if (drainPromise) await drainPromise.catch(() => {});
@@ -301,8 +364,14 @@ class PrivateConversationClient {
       return {
         ...result,
         done: true,
-        completion_source: completionSource,
+        completion_source: "signed-stream-handoff-v1",
         stream_handoff_topic_sha256: handoffTopicSha256,
+        current_branch_proof: currentBranchProofRequired ? "authenticated-exact-message-readback-v1" : null,
+        current_branch_proof_required: currentBranchProofRequired,
+        tool_route_candidate_observed: decoder.toolRouteCandidate,
+        pre_handoff_assistant_observed: decoder.preHandoffAssistantEvidence,
+        signed_delta_continuation_observed: decoder.signedDeltaContinuationObserved,
+        signed_assistant_evidence: decoder.signedAssistantEvidence,
       };
     } catch (error) {
       await stream.cancel(error);

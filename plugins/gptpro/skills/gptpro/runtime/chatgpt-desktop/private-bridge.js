@@ -24,6 +24,7 @@ class PrivateDesktopBridge {
     this.hookName = hookName;
     this.environment = environment;
     this.pending = new Map();
+    this.sockets = new Map();
     this.closed = false;
     this.bindingHandler = (params) => this.#binding(params);
     this.closedHandler = (error) => this.#failAll(error);
@@ -41,7 +42,11 @@ class PrivateDesktopBridge {
       await cdp.send("Runtime.addBinding", { name: bindingName });
       await cdp.evaluate(`(()=>{${installationExpression(bindingName, hookName)};return true;})()`);
       const appHostProbe = await cdp.evaluate(callExpression(hookName, "probe", {}), 5_000);
-      if (appHostProbe?.ok !== true || appHostProbe?.contract !== "app-host-http-v1") {
+      if (
+        appHostProbe?.ok !== true
+        || appHostProbe?.contract !== "app-host-http-v1"
+        || appHostProbe?.websocket_supported !== true
+      ) {
         throw new Error("app-host HTTP probe failed");
       }
       const environment = await cdp.evaluate(`(async()=>{
@@ -58,6 +63,7 @@ class PrivateDesktopBridge {
           device_check_supported:(await bridge.isDeviceCheckSupported?.())===true,
           desktop_environment_readable:typeof bridge.getSentryInitOptions==="function",
           stream_bridge:typeof MessageChannel==="function"&&typeof window.postMessage==="function"&&typeof globalThis[${JSON.stringify(bindingName)}]==="function"&&typeof window[${JSON.stringify(hookName)}]?.startStream==="function",
+          websocket_bridge:typeof WebSocket==="function"&&typeof window[${JSON.stringify(hookName)}]?.openSocket==="function"&&typeof window[${JSON.stringify(hookName)}]?.sendSocket==="function",
           bridge_contract:"app-host-http-v1",
           device_id:deviceId,
           language:navigator.language||"en",
@@ -100,7 +106,7 @@ class PrivateDesktopBridge {
       };
       const timer = setTimeout(() => {
         cancel();
-        finish(reject, runtimeError("TIMEOUT", `Desktop request ${method} ${url} timed out.`, { retryable: true }));
+        finish(reject, runtimeError("TIMEOUT", "Desktop request timed out.", { retryable: true }));
       }, options.timeoutMs ?? 30_000);
       this.pending.set(requestId, {
         kind: "request",
@@ -164,7 +170,16 @@ class PrivateDesktopBridge {
       () => cancel(runtimeError("TIMEOUT", "The Desktop conversation stream timed out.", { submissionState: "ambiguous" })),
       options.timeoutMs ?? 600_000,
     );
-    this.pending.set(requestId, { kind: "stream", events, fail, complete, sse: "", format: options.format ?? "sse" });
+    const pending = {
+      kind: "stream",
+      events,
+      fail,
+      complete,
+      sse: "",
+      format: options.format ?? "sse",
+      receivedChunks: 0,
+    };
+    this.pending.set(requestId, pending);
     options.signal?.addEventListener("abort", abort, { once: true });
     try {
       await this.runtimeCall("startStream", {
@@ -181,13 +196,108 @@ class PrivateDesktopBridge {
       fail(error);
       throw error;
     }
-    return { requestId, events, cancel };
+    return {
+      requestId,
+      events,
+      cancel,
+      get receivedChunks() { return pending.receivedChunks; },
+    };
+  }
+
+  async openWebSocket(value, options = {}) {
+    let url;
+    try { url = new URL(value); } catch (cause) {
+      throw runtimeError("STREAM_HANDOFF_URL_INVALID", "The Desktop handoff URL is invalid.", { cause, submissionState: "ambiguous" });
+    }
+    if (url.protocol !== "wss:" || url.hostname !== "ws.chatgpt.com" || url.username || url.password) {
+      throw runtimeError("STREAM_HANDOFF_URL_INVALID", "The Desktop handoff requires the credential-free wss://ws.chatgpt.com origin.", { submissionState: "ambiguous" });
+    }
+    if (options.signal?.aborted) throw signalError(options.signal, runtimeError("CANCELLED", "The Desktop handoff was cancelled.", { submissionState: "ambiguous" }));
+
+    const socketId = crypto.randomUUID();
+    const events = new AsyncQueue();
+    let opened = false;
+    let terminal = false;
+    let resolveOpen;
+    let rejectOpen;
+    const openedPromise = new Promise((resolve, reject) => { resolveOpen = resolve; rejectOpen = reject; });
+    const cleanup = () => {
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", abort);
+      this.sockets.delete(socketId);
+    };
+    const closeRemote = () => void this.runtimeCall("closeSocket", socketId).catch(() => {});
+    const fail = (error) => {
+      if (terminal) return;
+      terminal = true;
+      cleanup();
+      if (!opened) rejectOpen(error);
+      events.fail(error);
+      closeRemote();
+    };
+    const end = (remote = true) => {
+      if (terminal) return;
+      terminal = true;
+      cleanup();
+      if (!opened) rejectOpen(runtimeError("STREAM_INTERRUPTED", "The Desktop handoff closed before connecting.", { submissionState: "ambiguous" }));
+      events.end();
+      if (remote) closeRemote();
+    };
+    const abort = () => fail(signalError(
+      options.signal,
+      runtimeError("CANCELLED", "The Desktop handoff was cancelled.", { submissionState: "ambiguous" }),
+    ));
+    const timer = setTimeout(
+      () => fail(runtimeError("STREAM_HANDOFF_CONNECT_TIMEOUT", "The Desktop handoff WebSocket did not connect in time.", { submissionState: "ambiguous" })),
+      options.connectTimeoutMs ?? 5_000,
+    );
+    this.sockets.set(socketId, {
+      receive: (raw) => {
+        if (raw.type === "gptpro-ws-open") {
+          if (opened || terminal) return;
+          opened = true;
+          clearTimeout(timer);
+          resolveOpen();
+        } else if (raw.type === "gptpro-ws-message" && opened && typeof raw.data === "string") {
+          events.push(raw.data);
+        } else if (raw.type === "gptpro-ws-error") {
+          fail(runtimeError("STREAM_INTERRUPTED", "The Desktop handoff WebSocket failed.", { submissionState: "ambiguous" }));
+        } else if (raw.type === "gptpro-ws-close") {
+          if (opened) events.push({ type: "close", code: Number(raw.code) || null });
+          end(false);
+        }
+      },
+      fail,
+      end,
+    });
+    options.signal?.addEventListener("abort", abort, { once: true });
+    try {
+      await this.runtimeCall("openSocket", { socketId, url: url.href }, (options.connectTimeoutMs ?? 5_000) + 5_000, options.signal);
+      await openedPromise;
+    } catch (cause) {
+      const error = cause?.code
+        ? cause
+        : runtimeError("STREAM_HANDOFF_CONNECT_FAILED", "The Desktop handoff WebSocket could not be opened.", { cause, submissionState: "ambiguous" });
+      fail(error);
+      throw error;
+    }
+    return {
+      events,
+      send: async (data) => {
+        if (terminal || typeof data !== "string") {
+          throw runtimeError("STREAM_INTERRUPTED", "The Desktop handoff WebSocket is not writable.", { submissionState: "ambiguous" });
+        }
+        await this.runtimeCall("sendSocket", { socketId, data }, 5_000, options.signal);
+      },
+      close: async () => end(true),
+    };
   }
 
   async close() {
     if (this.closed) return;
     this.closed = true;
     this.#failAll(runtimeError("CANCELLED", "The Desktop bridge session closed."));
+    for (const socket of this.sockets.values()) socket.fail(runtimeError("CANCELLED", "The Desktop bridge session closed.", { submissionState: "ambiguous" }));
     this.cdp.off("binding", this.bindingHandler);
     this.cdp.off("closed", this.closedHandler);
     try {
@@ -202,11 +312,16 @@ class PrivateDesktopBridge {
     let raw;
     try { raw = JSON.parse(params.payload); } catch { return; }
     if (raw?.marker === "gptpro-app-host-http-v1") {
+      if (typeof raw.type === "string" && raw.type.startsWith("gptpro-ws-")) {
+        this.sockets.get(raw.socketId)?.receive(raw);
+        return;
+      }
       const pending = this.pending.get(raw.requestId);
       if (!pending || pending.kind !== "stream") return;
       if (raw.type === "gptpro-http-response") {
         pending.events.push({ type: "fetch-stream-response", status: Number(raw.status), headers: headerRecord(raw.headers) });
       } else if (raw.type === "gptpro-http-chunk" && typeof raw.data === "string") {
+        pending.receivedChunks += 1;
         this.#streamChunk(pending, raw.data, false);
       } else if (raw.type === "gptpro-http-error") {
         pending.fail(runtimeError("SUBMISSION_AMBIGUOUS", "The Desktop app-host response failed after dispatch; it will not be resent.", { submissionState: "ambiguous" }));
@@ -239,7 +354,11 @@ class PrivateDesktopBridge {
     if (boundary < 0 && !final) return;
     const complete = final ? normalized : normalized.slice(0, boundary + 2);
     pending.sse = final ? "" : normalized.slice(boundary + 2);
-    for (const event of parseSse(complete)) pending.events.push({ type: "fetch-stream-event", ...event });
+    try {
+      for (const event of parseSse(complete)) pending.events.push({ type: "fetch-stream-event", ...event });
+    } catch (error) {
+      pending.fail(error);
+    }
   }
 
   #failAll(error) {

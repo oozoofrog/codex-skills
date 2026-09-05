@@ -36,6 +36,9 @@ PROGRESS_STAGES = {
     "dispatch_authorized",
     "submitted",
     "response_headers",
+    "response_stream",
+    "stream_handoff",
+    "current_branch_proof",
     "response_dom",  # Preserve verification of receipts created by the retired DOM observer.
     "response_readback",
     "complete",
@@ -589,6 +592,7 @@ def desktop_doctor(skill_root: Path, *, endpoint: str | None = None) -> dict[str
     if (
         result.get("desktop_bridge") is not True
         or result.get("stream_bridge") is not True
+        or result.get("response_stream_supported") is not True
         or result.get("response_readback_supported") is not True
     ):
         raise ControllerError("BRIDGE_UNAVAILABLE", "The required ChatGPT Desktop request/stream bridge is unavailable.")
@@ -832,12 +836,27 @@ def _record_response_capture_failure(
 
 def _runtime_error(stderr: str, *, submitted: bool, last_stage: str) -> ControllerError:
     error = _runtime_error_value(stderr)
+    child_submission_state = str(error.get("submission_state", "ambiguous" if submitted else "not_started"))
+    if submitted and child_submission_state not in {"rejected", "completed"}:
+        return ControllerError(
+            str(error.get("code", "DESKTOP_RUNTIME_ERROR")),
+            str(error.get("message", "The Desktop runtime failed.")),
+            retryable=False,
+            recovery="Run collect-response. It performs GET readback only and never resends the prompt.",
+            submission_state="ambiguous",
+            stage=error.get("stage") if isinstance(error.get("stage"), str) else last_stage,
+        )
+    recovery = str(error.get("recovery", "Run desktop-doctor and inspect the package state."))
+    if submitted and child_submission_state == "rejected":
+        recovery = "Do not resend this package. Inspect the rejection before preparing and approving a fresh package."
+    elif submitted and child_submission_state == "completed":
+        recovery = "Inspect the saved response evidence. Do not resend this package."
     return ControllerError(
         str(error.get("code", "DESKTOP_RUNTIME_ERROR")),
         str(error.get("message", "The Desktop runtime failed.")),
         retryable=error.get("retryable") is True and not submitted,
-        recovery=str(error.get("recovery", "Run desktop-doctor and inspect the package state.")),
-        submission_state=str(error.get("submission_state", "ambiguous" if submitted else "not_started")),
+        recovery=recovery,
+        submission_state=child_submission_state,
         stage=error.get("stage") if isinstance(error.get("stage"), str) else last_stage,
     )
 
@@ -876,25 +895,97 @@ def _finalize_response(
     wrapped_path = response_dir / "response.md"
     completion_source = complete.get("completion_source")
     accepted_sources = {
-        "consult": {"conversation-readback-live-v1"},
-        "collect-response": {"conversation-readback-v1"},
+        "consult": ("signed-stream-handoff-v1",),
+        "collect-response": ("conversation-readback-v1",),
     }
-    if completion_source not in accepted_sources.get(operation, set()):
+    if not isinstance(completion_source, str) or completion_source not in accepted_sources.get(operation, ()):
         raise ControllerError(
             "RESPONSE_COMPLETION_UNPROVEN",
             "The Desktop runtime did not prove completion through the expected response path.",
             submission_state="ambiguous",
             stage="complete",
         )
-    if complete.get("tool_routes") != 0:
-        error = ControllerError(
+    topic_hash = complete.get("stream_handoff_topic_sha256")
+    if (
+        (completion_source == "signed-stream-handoff-v1" and (
+            not isinstance(topic_hash, str)
+            or len(topic_hash) != 64
+            or any(character not in "0123456789abcdef" for character in topic_hash)
+        ))
+        or (completion_source != "signed-stream-handoff-v1" and topic_hash is not None)
+    ):
+        raise ControllerError(
+            "RESPONSE_COMPLETION_UNPROVEN",
+            "The Desktop runtime returned invalid signed stream-handoff evidence.",
+            submission_state="ambiguous",
+            stage="complete",
+        )
+    branch_proof = complete.get("current_branch_proof")
+    branch_proof_required = complete.get("current_branch_proof_required")
+    tool_candidate = complete.get("tool_route_candidate_observed")
+    pre_handoff_assistant = complete.get("pre_handoff_assistant_observed")
+    signed_delta_continuation = complete.get("signed_delta_continuation_observed")
+    signed_assistant_evidence = complete.get("signed_assistant_evidence")
+    invalid_branch_proof = branch_proof not in (None, "authenticated-exact-message-readback-v1")
+    if operation == "consult":
+        invalid_branch_proof = (
+            invalid_branch_proof
+            or not isinstance(branch_proof_required, bool)
+            or not isinstance(tool_candidate, bool)
+            or not isinstance(pre_handoff_assistant, bool)
+            or not isinstance(signed_delta_continuation, bool)
+        )
+        invalid_branch_proof = invalid_branch_proof or branch_proof_required != (
+            tool_candidate or pre_handoff_assistant or signed_delta_continuation
+        )
+        invalid_branch_proof = invalid_branch_proof or (
+            branch_proof_required
+            and branch_proof != "authenticated-exact-message-readback-v1"
+        )
+        invalid_branch_proof = invalid_branch_proof or (not branch_proof_required and branch_proof is not None)
+        invalid_branch_proof = invalid_branch_proof or (tool_candidate and not branch_proof_required)
+        invalid_branch_proof = invalid_branch_proof or signed_assistant_evidence is not True
+    else:
+        invalid_branch_proof = (
+            invalid_branch_proof
+            or (tool_candidate is not None and tool_candidate is not False)
+            or (pre_handoff_assistant is not None and pre_handoff_assistant is not False)
+            or (signed_delta_continuation is not None and signed_delta_continuation is not False)
+            or (branch_proof_required is not None and branch_proof_required is not False)
+            or branch_proof is not None
+            or signed_assistant_evidence is not None
+        )
+    if invalid_branch_proof:
+        raise ControllerError(
+            "RESPONSE_COMPLETION_UNPROVEN",
+            "The Desktop runtime returned invalid current-branch proof evidence.",
+            submission_state="ambiguous",
+            stage="complete",
+        )
+    if type(complete.get("tool_routes")) is not int or complete["tool_routes"] != 0:
+        raise ControllerError(
             "UNEXPECTED_TOOL_ROUTE",
             "The Desktop runtime did not prove a zero-tool inline response.",
             submission_state="ambiguous",
             stage="complete",
         )
-        _record_failure(handoff, manifest, state, error, True, "complete")
-        raise error
+    conversation_id = complete.get("conversation_id")
+    assistant_message_id = complete.get("assistant_message_id")
+    parent_message_id = complete.get("parent_message_id")
+    if (
+        complete.get("done") is not True
+        or not isinstance(conversation_id, str)
+        or not conversation_id
+        or not isinstance(assistant_message_id, str)
+        or not assistant_message_id
+        or parent_message_id != assistant_message_id
+    ):
+        raise ControllerError(
+            "RESPONSE_COMPLETION_UNPROVEN",
+            "The Desktop runtime returned incomplete assistant identity evidence.",
+            submission_state="ambiguous",
+            stage="complete",
+        )
     text = complete.get("text")
     if not isinstance(text, str) or not text.strip():
         error = ControllerError(
@@ -912,8 +1003,6 @@ def _finalize_response(
         _record_response_capture_failure(handoff, manifest, state, error, raw_path=raw_path)
         raise
 
-    conversation_id = complete.get("conversation_id")
-    parent_message_id = complete.get("parent_message_id")
     receipt_fields = {
         "channel": DELIVERY_CHANNEL,
         "chat_history_mode": CHAT_HISTORY_MODE,
@@ -923,6 +1012,13 @@ def _finalize_response(
         "wrapped_response_sha256": sha256_file(wrapped_path),
         "runtime_wrapped": True,
         "completion_source": completion_source,
+        "stream_handoff_topic_sha256": topic_hash,
+        "current_branch_proof": branch_proof,
+        "current_branch_proof_required": bool(branch_proof_required),
+        "tool_route_candidate_observed": bool(tool_candidate),
+        "pre_handoff_assistant_observed": bool(pre_handoff_assistant),
+        "signed_delta_continuation_observed": bool(signed_delta_continuation),
+        "signed_assistant_evidence": signed_assistant_evidence,
         "conversation_id_sha256": sha256_bytes(conversation_id.encode("utf-8")) if isinstance(conversation_id, str) and conversation_id else None,
         "parent_message_id_sha256": sha256_bytes(parent_message_id.encode("utf-8")) if isinstance(parent_message_id, str) and parent_message_id else None,
         "outbound_sha256": manifest["hashes"]["outbound_sha256"],
@@ -952,6 +1048,12 @@ def _finalize_response(
         "receipt": str(handoff / "receipt.json"),
         "outbound_sha256": manifest["hashes"]["outbound_sha256"],
         "completion_source": completion_source,
+        "current_branch_proof": branch_proof,
+        "current_branch_proof_required": bool(branch_proof_required),
+        "tool_route_candidate_observed": bool(tool_candidate),
+        "pre_handoff_assistant_observed": bool(pre_handoff_assistant),
+        "signed_delta_continuation_observed": bool(signed_delta_continuation),
+        "signed_assistant_evidence": signed_assistant_evidence,
         "tool_routes": 0,
         "advisory_only": True,
         "desktop_session": {
@@ -1041,6 +1143,9 @@ def _run_consultation_locked(skill_root: Path, handoff: Path, *, timeout_seconds
         process.kill()
         raise ControllerError("DESKTOP_RUNTIME_UNAVAILABLE", "The Desktop controller pipes are unavailable.")
 
+    stderr_parts: list[str] = []
+    stderr_thread = threading.Thread(target=lambda: stderr_parts.append(process.stderr.read()), daemon=True)
+    stderr_thread.start()
     dispatch_authorized = False
     submitted = False
     complete: dict[str, Any] | None = None
@@ -1082,7 +1187,7 @@ def _run_consultation_locked(skill_root: Path, handoff: Path, *, timeout_seconds
 
             if event["type"] == "progress":
                 stage = event.get("stage")
-                if stage not in PROGRESS_STAGES:
+                if not isinstance(stage, str) or stage not in PROGRESS_STAGES:
                     raise ControllerError(
                         "DESKTOP_RUNTIME_PROTOCOL_ERROR",
                         "The Desktop runtime emitted an invalid progress stage.",
@@ -1165,6 +1270,11 @@ def _run_consultation_locked(skill_root: Path, handoff: Path, *, timeout_seconds
                         submission_state="ambiguous",
                         stage=last_stage,
                     ) from exc
+                finally:
+                    try:
+                        process.stdin.close()
+                    except OSError:
+                        pass
                 continue
             if event["type"] == "submitted":
                 last_stage = "submitted"
@@ -1221,7 +1331,8 @@ def _run_consultation_locked(skill_root: Path, handoff: Path, *, timeout_seconds
             )
 
         return_code = process.wait(timeout=10)
-        error_text = process.stderr.read()
+        stderr_thread.join()
+        error_text = "".join(stderr_parts)
         if deadline_reached.is_set():
             raise ControllerError(
                 "TIMEOUT",
@@ -1273,17 +1384,23 @@ def _run_consultation_locked(skill_root: Path, handoff: Path, *, timeout_seconds
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=3)
+        stderr_thread.join(timeout=1)
 
     assert complete is not None
-    return _finalize_response(
-        handoff,
-        manifest,
-        state,
-        complete,
-        model=model,
-        effort=effort,
-        operation="consult",
-    )
+    try:
+        return _finalize_response(
+            handoff,
+            manifest,
+            state,
+            complete,
+            model=model,
+            effort=effort,
+            operation="consult",
+        )
+    except ControllerError as error:
+        if error.submission_state == "ambiguous":
+            _record_failure(handoff, manifest, state, error, True, error.stage or "complete")
+        raise
 
 
 def run_consultation(
@@ -1308,7 +1425,7 @@ def _run_collection_locked(skill_root: Path, handoff: Path, *, timeout_seconds: 
             "This package already has an imported response.",
             recovery="Use status and the saved response file; do not collect or resend it again.",
         )
-    if state.get("phase") not in {"submitted", "submission_ambiguous", "response_capture_failed"}:
+    if state.get("phase") not in {"dispatching", "submitted", "submission_ambiguous", "response_capture_failed"}:
         raise ControllerError(
             "RESPONSE_COLLECTION_NOT_AVAILABLE",
             "Response collection requires a package with a durable submitted request.",
@@ -1318,7 +1435,7 @@ def _run_collection_locked(skill_root: Path, handoff: Path, *, timeout_seconds: 
     receipt = load_receipt(handoff / "receipt.json", package_id=manifest["package_id"])
     dispatching = [event for event in receipt["events"] if event.get("event") == "submission_dispatching" and event.get("turn") == 1]
     dispatched = [event for event in receipt["events"] if event.get("event") == "submission_dispatched" and event.get("turn") == 1]
-    if len(dispatching) != 1 or len(dispatched) != 1:
+    if len(dispatching) != 1 or len(dispatched) > 1:
         raise ControllerError(
             "RESPONSE_COLLECTION_EVIDENCE_INVALID",
             "The package does not contain exactly one durable Desktop dispatch boundary.",
@@ -1334,7 +1451,11 @@ def _run_collection_locked(skill_root: Path, handoff: Path, *, timeout_seconds: 
             submission_state="ambiguous",
         )
     model = state.get("resolved_model")
-    if not isinstance(model, dict) or model.get("id") != dispatched[0].get("backend_model_id"):
+    if (
+        not isinstance(model, dict)
+        or model.get("id") != dispatching[0].get("backend_model_id")
+        or (dispatched and dispatched[0].get("backend_model_id") != dispatching[0].get("backend_model_id"))
+    ):
         raise ControllerError(
             "RESPONSE_COLLECTION_EVIDENCE_INVALID",
             "The resolved Desktop model does not match the dispatch receipt.",
@@ -1360,7 +1481,7 @@ def _run_collection_locked(skill_root: Path, handoff: Path, *, timeout_seconds: 
         "--message-id",
         message_id,
         "--not-before",
-        str(dispatched[0]["recorded_at"]),
+        str(dispatching[0]["recorded_at"]),
         "--events-jsonl",
     ]
     try:
@@ -1404,7 +1525,11 @@ def _run_collection_locked(skill_root: Path, handoff: Path, *, timeout_seconds: 
                 submission_state="ambiguous",
                 stage="response_readback",
             ) from exc
-        if not isinstance(event, dict) or event.get("type") not in {"progress", "complete"}:
+        if (
+            not isinstance(event, dict)
+            or not isinstance(event.get("type"), str)
+            or event["type"] not in {"progress", "complete"}
+        ):
             raise ControllerError(
                 "DESKTOP_RUNTIME_PROTOCOL_ERROR",
                 "The Desktop response collector emitted an unexpected event.",
@@ -1412,7 +1537,7 @@ def _run_collection_locked(skill_root: Path, handoff: Path, *, timeout_seconds: 
                 stage="response_readback",
             )
         if event["type"] == "progress":
-            if event.get("stage") not in {"response_readback", "complete"}:
+            if not isinstance(event.get("stage"), str) or event["stage"] not in {"response_readback", "complete"}:
                 raise ControllerError(
                     "DESKTOP_RUNTIME_PROTOCOL_ERROR",
                     "The Desktop response collector emitted an invalid progress stage.",

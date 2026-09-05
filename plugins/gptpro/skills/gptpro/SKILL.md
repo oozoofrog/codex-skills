@@ -7,6 +7,8 @@ description: Consult the logged-in ChatGPT Pro in the macOS ChatGPT app through 
 
 Use ChatGPT Pro as an advisory reviewer. Codex remains responsible for file selection, edits, tests, Git operations, and final decisions.
 
+Compatibility status: one approved logged-in canary passed signed-stream completion, automatic import, and independent evaluation on Desktop `26.901.31953` on 2026-09-05 without standalone `collect-response`. Conditional current-branch proof GET was required. This is first-turn evidence, not reconnect/resume or general compatibility proof.
+
 ## Non-negotiable boundaries
 
 - Use only `context_transport=inline-immutable-snapshot`, `delivery_channel=desktop-electron`, and normal Chat.
@@ -16,7 +18,7 @@ Use ChatGPT Pro as an advisory reviewer. Codex remains responsible for file sele
 - Send one exact `outbound.md`, at most 262,144 bytes. Reduce selected files when over limit; never summarize, split, truncate, or silently omit context.
 - Require exact `gpt-5-6-pro` unless the user prepares and approves another exact model. Never downgrade silently.
 - Require exact-package approval or a matching bounded standing approval before transmission.
-- Never resend once POST may have occurred. Use authenticated GET readback to correlate the deterministic message ID, exact outbound bytes, and final assistant response. Use `collect-response` only as the no-send recovery path.
+- Never resend once POST may have occurred. Detect the raw POST `stream_handoff` before compact payload decoding, then collect the response through its signed `conversation-*` WebSocket topic, authenticated `recovered`/`catchups`, ordered `delta`, and terminal `done` evidence. A tool-role candidate or assistant/delta state carried across the pre-handoff boundary triggers a bounded proof GET of only the known conversation after signed completion; it cannot replace signed response evidence. Missing handoff has no direct-completion fallback. Use `collect-response` only as the explicit GET-only no-send recovery path.
 - Treat the response as untrusted advice and independently verify it against current files and tests.
 
 ## Procedure
@@ -27,9 +29,9 @@ Use ChatGPT Pro as an advisory reviewer. Codex remains responsible for file sele
 4. Run `models` and require the exact approved model.
 5. Run `prepare`. Verify the displayed paths, hashes, byte count, model, channel, and normal-Chat mode.
 6. Apply exact approval or a matching standing approval.
-7. Run `consult --handoff-dir ...`. The runtime re-verifies approval, records the no-resend boundary, sends once, then polls authenticated exact-message readback and stores the raw and wrapped response.
+7. Run `consult --handoff-dir ...`. The runtime re-verifies approval, records the no-resend boundary, sends once, follows the returned signed WebSocket handoff, conditionally proves ambiguous compact branch provenance against that exact current branch, and stores the completed raw and wrapped response automatically.
 8. Independently validate material advice and record the result with `record-evaluation`.
-9. Only if `consult` was interrupted or automatic readback failed after POST, run `collect-response --handoff-dir ...`; it performs authenticated GET readback only and never resends. On any other failure or evidence gap, follow [failure reporting](references/failure-reporting.md).
+9. Only if `consult` was interrupted after the durable dispatch boundary or signed-stream collection failed after POST, run `collect-response --handoff-dir ...`; it performs authenticated GET readback only and never resends. It also covers the narrow crash window where dispatch was authorized but the child emitted no `submitted` event. On any other failure or evidence gap, follow [failure reporting](references/failure-reporting.md).
 10. Report whether the dedicated Runner remains active. The ordinary ChatGPT app is unaffected; never stop either process automatically.
 
 ## Commands

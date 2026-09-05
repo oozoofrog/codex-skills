@@ -121,8 +121,12 @@ function visibleText(raw) {
   return result;
 }
 
-function assertNoToolRoute(message) {
-  if (message?.author?.role === "tool" || (message?.author?.role === "assistant" && message.recipient !== "all")) {
+function assertNoToolRoute(message, requireRecipient = false) {
+  if (
+    message?.author?.role === "tool"
+    || (message?.author?.role === "assistant" && message.recipient != null && message.recipient !== "all")
+    || (requireRecipient && message?.author?.role === "assistant" && message.recipient !== "all")
+  ) {
     throw runtimeError(
       "UNEXPECTED_TOOL_ROUTE",
       "ChatGPT selected a local, server, app, search, connector, or other tool route during an inline-only consultation.",
@@ -142,49 +146,87 @@ class ConversationDecoder {
     this.parentMessageId = null;
     this.assistantMessageId = null;
     this.finalText = "";
+    this.finalRecipientAll = false;
+    this.toolRouteCandidate = false;
+    this.preHandoffAssistantEvidence = false;
+    this.preHandoffDeltaSeen = false;
+    this.signedDeltaEncodingSeen = false;
+    this.signedDeltaContinuationObserved = false;
+    this.signedAssistantEvidence = false;
     this.done = false;
   }
 
-  consume(event, data) {
+  consume(event, data, options = {}) {
+    const signed = options.signed === true;
     if (event === "delta_encoding") {
       if (String(data) !== "v1") throw runtimeError("STREAM_PROTOCOL_ERROR", "The Desktop delta encoding is unsupported.", { submissionState: "ambiguous" });
       this.delta = new DeltaState();
-      return;
+      if (signed) this.signedDeltaEncodingSeen = true;
+      return null;
     }
     let value = data;
     if (event === "delta") {
       if (!this.delta) throw runtimeError("STREAM_PROTOCOL_ERROR", "A Desktop delta arrived before its encoding.", { submissionState: "ambiguous" });
+      if (signed && this.preHandoffDeltaSeen && !this.signedDeltaEncodingSeen) {
+        this.signedDeltaContinuationObserved = true;
+      } else if (!signed) {
+        this.preHandoffDeltaSeen = true;
+      }
       value = this.delta.apply(data);
     }
-    if (data === "[DONE]") { this.done = true; return; }
-    this.#observe(value);
+    if (data === "[DONE]") { this.done = true; return data; }
+    this.#observe(value, signed);
+    return value;
   }
 
-  #observe(value) {
+  #observe(value, signed) {
     if (!object(value)) return;
     if (typeof value.conversation_id === "string") this.conversationId = value.conversation_id;
     if (value.type === "message_stream_complete") this.done = true;
     const message = value.message;
     if (!object(message)) return;
+    if (!signed && message.author?.role === "assistant") this.preHandoffAssistantEvidence = true;
+    if (message.author?.role === "tool") {
+      this.toolRouteCandidate = true;
+      return;
+    }
     assertNoToolRoute(message);
     if (message.author?.role === "assistant" && message.channel === "final" && message.content?.content_type === "text") {
-      this.finalText = visibleText(message.content.parts?.[0] ?? "");
-      if (typeof message.id === "string") {
-        this.assistantMessageId = message.id;
-        this.parentMessageId = message.id;
+      if (
+        message.content.parts !== undefined
+        && (
+          !Array.isArray(message.content.parts)
+          || message.content.parts.length > 1
+          || (message.content.parts.length === 1 && typeof message.content.parts[0] !== "string")
+        )
+      ) {
+        throw runtimeError("STREAM_PROTOCOL_ERROR", "The Desktop final assistant content shape is unsupported.", { submissionState: "ambiguous" });
       }
-      if (message.status === "finished_successfully" && message.end_turn === true) this.done = true;
+      this.finalText = visibleText(message.content.parts?.[0] ?? "");
+      this.finalRecipientAll = message.recipient === "all";
+      this.assistantMessageId = typeof message.id === "string" ? message.id : null;
+      this.parentMessageId = this.assistantMessageId;
+      if (signed && this.finalText.trim().length > 0 && this.finalRecipientAll && this.assistantMessageId) {
+        this.signedAssistantEvidence = true;
+      }
+      if (message.status === "finished_successfully" && message.end_turn === true) {
+        assertNoToolRoute(message, true);
+        this.done = true;
+      }
     }
   }
 
-  finish() {
+  finish(options = {}) {
     return {
       text: this.finalText,
       conversation_id: this.conversationId,
       parent_message_id: this.parentMessageId,
       assistant_message_id: this.assistantMessageId,
       tool_routes: 0,
-      done: this.done,
+      done: (this.done || options.transportDone === true)
+        && this.finalText.trim().length > 0
+        && this.finalRecipientAll
+        && typeof this.assistantMessageId === "string",
     };
   }
 }
@@ -202,7 +244,9 @@ function parseSse(value) {
     const raw = data.join("\n").trim();
     if (raw === "[DONE]") events.push({ event, data: raw });
     else {
-      try { events.push({ event, data: JSON.parse(raw) }); } catch {}
+      try { events.push({ event, data: JSON.parse(raw) }); } catch {
+        throw runtimeError("STREAM_PROTOCOL_ERROR", "The Desktop SSE stream contained invalid JSON.", { submissionState: "ambiguous" });
+      }
     }
   }
   return events;

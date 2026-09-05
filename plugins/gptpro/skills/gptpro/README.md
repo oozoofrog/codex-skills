@@ -1,6 +1,6 @@
 # gptpro 0.6
 
-`gptpro` lets Codex send one selected, secret-scanned code snapshot to the logged-in ChatGPT Pro in the macOS ChatGPT app and collect its answer automatically.
+`gptpro` lets Codex send one selected, secret-scanned code snapshot to the logged-in ChatGPT Pro in the macOS ChatGPT app and collect the answer automatically through its signed stream. One approved canary passed logged-in completion, automatic import, and independent evaluation on Desktop `26.901.31953` on 2026-09-05, including conditional current-branch proof and without standalone recovery. It runs only when the user explicitly requests `$gptpro` for plan, ask, review, debug, or architecture work; ordinary Codex work and OpenAI API calls never trigger it.
 
 ```text
 $gptpro
@@ -8,11 +8,12 @@ $gptpro
   -> build exact outbound.md (maximum 256 KiB)
   -> exact or bounded standing approval
   -> loopback Electron delivery to exact gpt-5-6-pro in normal Chat
-  -> one POST and exact authenticated response readback
+  -> one POST and signed WebSocket response handoff
+  -> provenance-triggered exact current-branch proof
   -> independent Codex validation
 ```
 
-ChatGPT receives only the text inside `outbound.md`. It receives no live filesystem, shell, write, build, test, Git, MCP, Browser, or server-tool access. After the single POST, authenticated conversation GETs poll for the deterministic message ID and verify the exact outbound bytes, tool-free final status, and response body. This avoids unstable ChatGPT DOM selectors. `collect-response` remains a GET-only recovery command for process interruption or automatic collection failure.
+ChatGPT receives only the text inside `outbound.md`. It receives no live filesystem, shell, write, build, test, Git, MCP, Browser, or server-tool access. After the single POST, the runtime follows its raw `stream_handoff`, obtains the signed `conversation-*` WebSocket URL, validates recovered catchups and ordered stream items, and stores the answer only after terminal `done` plus final assistant evidence. A tool-role candidate or assistant/delta state carried across the pre-handoff boundary additionally requires a bounded authenticated GET of that known conversation whose current branch, assistant ID, and visible text match the signed result; this GET does not supply completion content. There is no direct-completion fallback when the handoff is absent. The raw topic and signed URL are not persisted. `collect-response` remains a separate explicit GET-only recovery command for process interruption or signed-stream failure. The canary proves one uninterrupted first turn; socket reconnect/offset resume and multi-turn continuation are not implemented.
 
 ## Requirements
 

@@ -106,7 +106,7 @@ class PrivateDesktopBridge {
       };
       const timer = setTimeout(() => {
         cancel();
-        finish(reject, runtimeError("TIMEOUT", `Desktop request ${method} ${url} timed out.`, { retryable: true }));
+        finish(reject, runtimeError("TIMEOUT", "Desktop request timed out.", { retryable: true }));
       }, options.timeoutMs ?? 30_000);
       this.pending.set(requestId, {
         kind: "request",
@@ -170,7 +170,16 @@ class PrivateDesktopBridge {
       () => cancel(runtimeError("TIMEOUT", "The Desktop conversation stream timed out.", { submissionState: "ambiguous" })),
       options.timeoutMs ?? 600_000,
     );
-    this.pending.set(requestId, { kind: "stream", events, fail, complete, sse: "", format: options.format ?? "sse" });
+    const pending = {
+      kind: "stream",
+      events,
+      fail,
+      complete,
+      sse: "",
+      format: options.format ?? "sse",
+      receivedChunks: 0,
+    };
+    this.pending.set(requestId, pending);
     options.signal?.addEventListener("abort", abort, { once: true });
     try {
       await this.runtimeCall("startStream", {
@@ -187,7 +196,12 @@ class PrivateDesktopBridge {
       fail(error);
       throw error;
     }
-    return { requestId, events, cancel };
+    return {
+      requestId,
+      events,
+      cancel,
+      get receivedChunks() { return pending.receivedChunks; },
+    };
   }
 
   async openWebSocket(value, options = {}) {
@@ -195,8 +209,8 @@ class PrivateDesktopBridge {
     try { url = new URL(value); } catch (cause) {
       throw runtimeError("STREAM_HANDOFF_URL_INVALID", "The Desktop handoff URL is invalid.", { cause, submissionState: "ambiguous" });
     }
-    if (url.protocol !== "wss:" || url.username || url.password) {
-      throw runtimeError("STREAM_HANDOFF_URL_INVALID", "The Desktop handoff requires a credential-free wss URL.", { submissionState: "ambiguous" });
+    if (url.protocol !== "wss:" || url.hostname !== "ws.chatgpt.com" || url.username || url.password) {
+      throw runtimeError("STREAM_HANDOFF_URL_INVALID", "The Desktop handoff requires the credential-free wss://ws.chatgpt.com origin.", { submissionState: "ambiguous" });
     }
     if (options.signal?.aborted) throw signalError(options.signal, runtimeError("CANCELLED", "The Desktop handoff was cancelled.", { submissionState: "ambiguous" }));
 
@@ -307,6 +321,7 @@ class PrivateDesktopBridge {
       if (raw.type === "gptpro-http-response") {
         pending.events.push({ type: "fetch-stream-response", status: Number(raw.status), headers: headerRecord(raw.headers) });
       } else if (raw.type === "gptpro-http-chunk" && typeof raw.data === "string") {
+        pending.receivedChunks += 1;
         this.#streamChunk(pending, raw.data, false);
       } else if (raw.type === "gptpro-http-error") {
         pending.fail(runtimeError("SUBMISSION_AMBIGUOUS", "The Desktop app-host response failed after dispatch; it will not be resent.", { submissionState: "ambiguous" }));
@@ -339,7 +354,11 @@ class PrivateDesktopBridge {
     if (boundary < 0 && !final) return;
     const complete = final ? normalized : normalized.slice(0, boundary + 2);
     pending.sse = final ? "" : normalized.slice(boundary + 2);
-    for (const event of parseSse(complete)) pending.events.push({ type: "fetch-stream-event", ...event });
+    try {
+      for (const event of parseSse(complete)) pending.events.push({ type: "fetch-stream-event", ...event });
+    } catch (error) {
+      pending.fail(error);
+    }
   }
 
   #failAll(error) {

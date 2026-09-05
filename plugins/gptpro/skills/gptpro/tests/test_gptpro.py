@@ -22,6 +22,7 @@ from runtime.gptpro_runtime.schema import (  # noqa: E402
     CHAT_HISTORY_MODE,
     CONTEXT_TRANSPORT,
     DEFAULT_MODEL_ID,
+    DELIVERY_CHANNEL,
     INLINE_FORMAT,
     MAX_OUTBOUND_BYTES,
 )
@@ -319,11 +320,20 @@ class PackageCase(unittest.TestCase):
         self.assertEqual("approved", approvals.load_state(handoff, package_id)["phase"])
 
 
+class RecordingInput(io.StringIO):
+    def close(self) -> None:
+        self.final_value = super().getvalue()
+        super().close()
+
+    def getvalue(self) -> str:
+        return self.final_value if self.closed else super().getvalue()
+
+
 class FakeProcess:
     def __init__(self, lines: list[dict], *, return_code: int = 0, error: dict | None = None) -> None:
         self.lines = list(lines)
         self.stdout = io.StringIO("".join(json.dumps(item) + "\n" for item in lines))
-        self.stdin = io.StringIO()
+        self.stdin = RecordingInput()
         self.stderr = io.StringIO(json.dumps({"ok": False, "error": error}) + "\n" if error else "")
         self.return_code = return_code
         self.killed = False
@@ -416,8 +426,17 @@ class ControllerCase(PackageCase):
                     "text": "README.md의 needle을 확인했습니다.",
                     "conversation_id": "conversation",
                     "parent_message_id": "message",
+                    "assistant_message_id": "message",
                     "tool_routes": 0,
-                    "completion_source": "conversation-readback-live-v1",
+                    "done": True,
+                    "completion_source": "signed-stream-handoff-v1",
+                    "stream_handoff_topic_sha256": "a" * 64,
+                    "current_branch_proof": "authenticated-exact-message-readback-v1",
+                    "current_branch_proof_required": True,
+                    "tool_route_candidate_observed": True,
+                    "pre_handoff_assistant_observed": False,
+                    "signed_delta_continuation_observed": False,
+                    "signed_assistant_evidence": True,
                     "sources": [],
                 },
             ]
@@ -442,7 +461,67 @@ class ControllerCase(PackageCase):
         dispatching = next(item for item in receipt["events"] if item["event"] == "submission_dispatching")
         self.assertEqual(prepared["outbound_sha256"], dispatching["prompt_sha256"])
         self.assertLess(dispatching["sequence"], dispatched["sequence"])
+        captured = next(item for item in receipt["events"] if item["event"] == "response_captured")
+        self.assertEqual("signed-stream-handoff-v1", captured["completion_source"])
+        self.assertEqual("a" * 64, captured["stream_handoff_topic_sha256"])
+        self.assertEqual("authenticated-exact-message-readback-v1", captured["current_branch_proof"])
+        self.assertTrue(captured["current_branch_proof_required"])
+        self.assertTrue(captured["tool_route_candidate_observed"])
+        self.assertTrue(captured["signed_assistant_evidence"])
         self.assertTrue(fake.stdin.getvalue().endswith("\n"))
+        self.assertTrue(fake.stdin.closed)
+
+    def test_child_stderr_is_drained_before_stdout_eof(self) -> None:
+        _, handoff = self.approved()
+        read_started = controller.threading.Event()
+
+        class CoordinatedStderr(io.StringIO):
+            def read(self, *args, **kwargs):
+                read_started.set()
+                return super().read(*args, **kwargs)
+
+        class ExitAfterStderrDrain:
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if not read_started.wait(1):
+                    raise AssertionError("stderr was not drained concurrently")
+                raise StopIteration
+
+        class StderrProcess(FakeProcess):
+            def bind(self, command, **kwargs):
+                super().bind(command, **kwargs)
+                self.stdout = ExitAfterStderrDrain()
+                self.stderr = CoordinatedStderr(json.dumps({
+                    "ok": False,
+                    "error": {"code": "CHILD_TERMINAL_ERROR", "message": "terminal error"},
+                }) + "\n")
+                return self
+
+        fake = StderrProcess([], return_code=3)
+        with (
+            mock.patch.object(controller, "desktop_models", return_value=self.catalog()),
+            mock.patch.object(controller, "node_binary", return_value=Path("/usr/bin/node")),
+            mock.patch.object(controller, "node_entrypoint", return_value=Path("/tmp/chatgpt-desktop.js")),
+            mock.patch.object(controller.subprocess, "Popen", side_effect=fake.bind),
+            self.assertRaises(controller.ControllerError) as raised,
+        ):
+            controller.run_consultation(SKILL_ROOT, handoff)
+        self.assertEqual("CHILD_TERMINAL_ERROR", raised.exception.code)
+
+    def test_signed_stream_handoff_progress_is_accepted(self) -> None:
+        _, handoff = self.approved()
+        fake = FakeProcess([
+            {"type": "submitted", "request_id": "request-1"},
+            {"type": "progress", "stage": "stream_handoff"},
+            {"type": "progress", "stage": "current_branch_proof"},
+            {"type": "complete", "text": "완료", "conversation_id": "c", "parent_message_id": "m", "assistant_message_id": "m", "tool_routes": 0, "done": True, "completion_source": "signed-stream-handoff-v1", "stream_handoff_topic_sha256": "a" * 64, "current_branch_proof": "authenticated-exact-message-readback-v1", "current_branch_proof_required": True, "tool_route_candidate_observed": False, "pre_handoff_assistant_observed": True, "signed_delta_continuation_observed": False, "signed_assistant_evidence": True},
+        ])
+        result, _ = self.run_fake(handoff, fake)
+        self.assertEqual("imported", result["phase"])
+        self.assertTrue(result["current_branch_proof_required"])
+        self.assertTrue(result["pre_handoff_assistant_observed"])
 
     def test_thinking_effort_is_forwarded_to_the_exact_runtime_model(self) -> None:
         prepared = self.prepare(includes=["README.md"], thinking_effort="high")
@@ -450,7 +529,7 @@ class ControllerCase(PackageCase):
         approvals.approve_exact(handoff, confirm_transmission=True, confirm_disclosure=True, expires_minutes=60)
         fake = FakeProcess([
             {"type": "submitted", "request_id": "request-1"},
-            {"type": "complete", "text": "완료", "conversation_id": "c", "parent_message_id": "m", "tool_routes": 0, "completion_source": "conversation-readback-live-v1"},
+            {"type": "complete", "text": "완료", "conversation_id": "c", "parent_message_id": "m", "assistant_message_id": "m", "tool_routes": 0, "done": True, "completion_source": "signed-stream-handoff-v1", "stream_handoff_topic_sha256": "a" * 64, "current_branch_proof_required": False, "tool_route_candidate_observed": False, "pre_handoff_assistant_observed": False, "signed_delta_continuation_observed": False, "signed_assistant_evidence": True},
         ])
         _, popen = self.run_fake(handoff, fake)
         command = popen.call_args.args[0]
@@ -563,7 +642,9 @@ class ControllerCase(PackageCase):
                         "text": "회수 완료",
                         "conversation_id": "conversation",
                         "parent_message_id": "assistant",
+                        "assistant_message_id": "assistant",
                         "tool_routes": 0,
+                        "done": True,
                         "completion_source": "conversation-readback-v1",
                     },
                 ]
@@ -590,6 +671,68 @@ class ControllerCase(PackageCase):
         with self.assertRaises(controller.ControllerError) as second:
             controller.collect_response(SKILL_ROOT, handoff)
         self.assertEqual("RESPONSE_ALREADY_IMPORTED", second.exception.code)
+
+    def test_collect_response_recovers_dispatch_authorized_crash_window_without_post(self) -> None:
+        prepared, handoff = self.approved()
+        manifest = read_json(handoff / "manifest.json")
+        state = read_json(handoff / "state.json")
+        model = self.catalog()["models"][0]
+        message_id = controller._message_id(prepared["package_id"], prepared["outbound_sha256"])
+        state["phase"] = "dispatching"
+        state["resolved_model"] = model
+        state["last_submission"] = {
+            "status": "dispatching",
+            "recorded_at": controller.utc_now(),
+            "turn": 1,
+            "message_id_sha256": sha256_bytes(message_id.encode("utf-8")),
+        }
+        approvals.save_state(handoff, state)
+        from runtime.gptpro_runtime.receipts import append_receipt
+        dispatching = append_receipt(
+            handoff / "receipt.json",
+            prepared["package_id"],
+            "submission_dispatching",
+            {
+                "channel": DELIVERY_CHANNEL,
+                "chat_history_mode": CHAT_HISTORY_MODE,
+                "backend_model_id": model["id"],
+                "thinking_effort": None,
+                "prompt_sha256": prepared["outbound_sha256"],
+                "prompt_bytes": prepared["outbound_bytes"],
+                "system_prompt_sha256": manifest["hashes"]["system_prompt_sha256"],
+                "message_id_sha256": sha256_bytes(message_id.encode("utf-8")),
+                "turn": 1,
+            },
+        )
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="\n".join([
+                json.dumps({"type": "progress", "stage": "response_readback"}),
+                json.dumps({
+                    "type": "complete",
+                    "text": "crash-window recovery",
+                    "conversation_id": "conversation",
+                    "parent_message_id": "assistant",
+                    "assistant_message_id": "assistant",
+                    "tool_routes": 0,
+                    "done": True,
+                    "completion_source": "conversation-readback-v1",
+                }),
+            ]) + "\n",
+            stderr="",
+        )
+        with (
+            mock.patch.object(controller, "node_binary", return_value=Path("/usr/bin/node")),
+            mock.patch.object(controller, "node_entrypoint", return_value=Path("/tmp/chatgpt-desktop.js")),
+            mock.patch.object(controller.subprocess, "run", return_value=completed) as run,
+        ):
+            result = controller.collect_response(SKILL_ROOT, handoff, timeout_seconds=30)
+        self.assertEqual("imported", result["phase"])
+        command = run.call_args.args[0]
+        self.assertEqual(dispatching["recorded_at"], command[command.index("--not-before") + 1])
+        events = load_receipt(handoff / "receipt.json")["events"]
+        self.assertNotIn("submission_dispatched", [event["event"] for event in events])
 
     def test_primary_consultation_rejects_recovery_readback_source(self) -> None:
         _, handoff = self.approved()
@@ -629,6 +772,107 @@ class ControllerCase(PackageCase):
             self.run_fake(handoff, fake)
         self.assertEqual("RESPONSE_COMPLETION_UNPROVEN", raised.exception.code)
 
+    def test_signed_stream_completion_requires_topic_hash_evidence(self) -> None:
+        _, handoff = self.approved()
+        fake = FakeProcess(
+            [
+                {"type": "submitted", "request_id": "request-1"},
+                {
+                    "type": "complete",
+                    "text": "완료",
+                    "conversation_id": "conversation",
+                    "parent_message_id": "assistant",
+                    "tool_routes": 0,
+                    "completion_source": "signed-stream-handoff-v1",
+                    "stream_handoff_topic_sha256": None,
+                },
+            ]
+        )
+        with self.assertRaises(controller.ControllerError) as raised:
+            self.run_fake(handoff, fake)
+        self.assertEqual("RESPONSE_COMPLETION_UNPROVEN", raised.exception.code)
+
+    def test_current_branch_proof_is_valid_only_for_signed_completion(self) -> None:
+        _, handoff = self.approved()
+        fake = FakeProcess(
+            [
+                {"type": "submitted", "request_id": "request-1"},
+                {
+                    "type": "complete",
+                    "text": "완료",
+                    "conversation_id": "conversation",
+                    "parent_message_id": "assistant",
+                    "tool_routes": 0,
+                    "completion_source": "direct-desktop-stream-v1",
+                    "stream_handoff_topic_sha256": None,
+                    "current_branch_proof": "authenticated-exact-message-readback-v1",
+                },
+            ]
+        )
+        with self.assertRaises(controller.ControllerError) as raised:
+            self.run_fake(handoff, fake)
+        self.assertEqual("RESPONSE_COMPLETION_UNPROVEN", raised.exception.code)
+
+    def test_parent_requires_signed_provenance_candidate_equivalence_and_identity(self) -> None:
+        base = {
+            "type": "complete",
+            "text": "완료",
+            "conversation_id": "RAW_CONVERSATION_SENTINEL",
+            "parent_message_id": "RAW_ASSISTANT_SENTINEL",
+            "assistant_message_id": "RAW_ASSISTANT_SENTINEL",
+            "tool_routes": 0,
+            "done": True,
+            "completion_source": "signed-stream-handoff-v1",
+            "stream_handoff_topic_sha256": "a" * 64,
+            "current_branch_proof": None,
+            "current_branch_proof_required": False,
+            "tool_route_candidate_observed": False,
+            "pre_handoff_assistant_observed": False,
+            "signed_delta_continuation_observed": False,
+            "signed_assistant_evidence": True,
+            "topic_id": "RAW_TOPIC_SENTINEL",
+            "websocket_url": "wss://ws.chatgpt.com/RAW_SIGNED_URL_SENTINEL",
+        }
+        for change in (
+            {"tool_route_candidate_observed": True},
+            {"completion_source": []},
+            {"pre_handoff_assistant_observed": True},
+            {"signed_delta_continuation_observed": True},
+            {"current_branch_proof": "authenticated-exact-message-readback-v1"},
+            {"current_branch_proof_required": True},
+            {"signed_assistant_evidence": False},
+            {"assistant_message_id": ""},
+            {"done": False},
+        ):
+            _, handoff = self.approved()
+            fake = FakeProcess([{"type": "submitted", "request_id": "request-1"}, {**base, **change}])
+            with self.assertRaises(controller.ControllerError) as raised:
+                self.run_fake(handoff, fake)
+            self.assertEqual("RESPONSE_COMPLETION_UNPROVEN", raised.exception.code)
+            self.assertEqual("submission_ambiguous", read_json(handoff / "state.json")["phase"])
+            receipt = load_receipt(handoff / "receipt.json")
+            self.assertEqual("submission_ambiguous", receipt["events"][-1]["event"])
+            self.assertFalse(receipt["events"][-1]["automatic_retry_allowed"])
+            serialized_receipt = json.dumps(receipt)
+            for sentinel in (
+                "RAW_CONVERSATION_SENTINEL",
+                "RAW_ASSISTANT_SENTINEL",
+                "RAW_TOPIC_SENTINEL",
+                "RAW_SIGNED_URL_SENTINEL",
+            ):
+                self.assertNotIn(sentinel, serialized_receipt)
+
+        for tool_routes in (False, 0.0, "0", None, [], {}):
+            _, handoff = self.approved()
+            fake = FakeProcess([
+                {"type": "submitted", "request_id": "request-1"},
+                {**base, "tool_routes": tool_routes},
+            ])
+            with self.assertRaises(controller.ControllerError) as raised:
+                self.run_fake(handoff, fake)
+            self.assertEqual("UNEXPECTED_TOOL_ROUTE", raised.exception.code)
+            self.assertEqual("submission_ambiguous", read_json(handoff / "state.json")["phase"])
+
     def test_parent_deadline_marks_dispatched_submission_ambiguous(self) -> None:
         _, handoff = self.approved()
 
@@ -636,7 +880,7 @@ class ControllerCase(PackageCase):
             def __init__(self) -> None:
                 super().__init__([
                     {"type": "submitted", "request_id": "request-1"},
-                    {"type": "progress", "stage": "response_readback"},
+                    {"type": "progress", "stage": "response_stream"},
                 ])
                 self.return_code = None
 
@@ -669,7 +913,53 @@ class ControllerCase(PackageCase):
         self.assertEqual("submission_ambiguous", read_json(handoff / "state.json")["phase"])
         receipt = load_receipt(handoff / "receipt.json")
         self.assertEqual("TIMEOUT", receipt["events"][-1]["error_code"])
-        self.assertEqual("response_readback", receipt["events"][-1]["last_stage"])
+        self.assertEqual("response_stream", receipt["events"][-1]["last_stage"])
+
+    def test_child_failure_after_dispatch_cannot_recommend_resend(self) -> None:
+        _, handoff = self.approved()
+        fake = FakeProcess(
+            [{"type": "submitted", "request_id": "request-1"}],
+            return_code=3,
+            error={
+                "code": "TIMEOUT",
+                "message": "child timeout",
+                "retryable": True,
+                "submission_state": "not_started",
+                "recovery": "Retry the consultation.",
+                "stage": "current_branch_proof",
+            },
+        )
+        with self.assertRaises(controller.ControllerError) as raised:
+            self.run_fake(handoff, fake)
+        self.assertEqual("TIMEOUT", raised.exception.code)
+        self.assertFalse(raised.exception.retryable)
+        self.assertEqual("ambiguous", raised.exception.submission_state)
+        self.assertEqual("current_branch_proof", raised.exception.stage)
+        self.assertIn("collect-response", raised.exception.recovery)
+        self.assertNotIn("Retry the consultation", raised.exception.recovery)
+        self.assertEqual("submission_ambiguous", read_json(handoff / "state.json")["phase"])
+        receipt = load_receipt(handoff / "receipt.json")
+        self.assertFalse(receipt["events"][-1]["automatic_retry_allowed"])
+        self.assertEqual("current_branch_proof", receipt["events"][-1]["last_stage"])
+
+        for child_state in ("rejected", "completed"):
+            error = controller._runtime_error(
+                json.dumps({
+                    "error": {
+                        "code": "CHILD_ERROR",
+                        "message": "child error",
+                        "retryable": True,
+                        "submission_state": child_state,
+                        "recovery": "Run desktop-doctor before retrying.",
+                    }
+                }),
+                submitted=True,
+                last_stage="submitted",
+            )
+            self.assertFalse(error.retryable)
+            self.assertEqual(child_state, error.submission_state)
+            self.assertIn("Do not resend this package", error.recovery)
+            self.assertNotIn("before retrying", error.recovery)
 
     def test_operator_interrupt_after_dispatch_is_sanitized_and_recorded(self) -> None:
         _, handoff = self.approved()
@@ -740,7 +1030,7 @@ class ControllerCase(PackageCase):
         fake = FakeProcess(
             [
                 {"type": "submitted", "request_id": "request-1"},
-                {"type": "complete", "text": f"collision {marker}", "conversation_id": "c", "parent_message_id": "m", "tool_routes": 0, "completion_source": "conversation-readback-live-v1"},
+                {"type": "complete", "text": f"collision {marker}", "conversation_id": "c", "parent_message_id": "m", "assistant_message_id": "m", "tool_routes": 0, "done": True, "completion_source": "signed-stream-handoff-v1", "stream_handoff_topic_sha256": "a" * 64, "current_branch_proof_required": False, "tool_route_candidate_observed": False, "pre_handoff_assistant_observed": False, "signed_delta_continuation_observed": False, "signed_assistant_evidence": True},
             ]
         )
         with self.assertRaises(controller.ControllerError) as raised:
@@ -762,12 +1052,24 @@ class ControllerCase(PackageCase):
         self.assertEqual("DESKTOP_RUNTIME_PROTOCOL_ERROR", raised.exception.code)
         self.assertEqual("submission_ambiguous", read_json(handoff / "state.json")["phase"])
 
+    def test_non_string_child_progress_stage_is_protocol_error(self) -> None:
+        _, handoff = self.approved()
+        fake = FakeProcess([
+            {"type": "submitted", "request_id": "request-1"},
+            {"type": "progress", "stage": []},
+        ])
+        with self.assertRaises(controller.ControllerError) as raised:
+            self.run_fake(handoff, fake)
+        self.assertEqual("DESKTOP_RUNTIME_PROTOCOL_ERROR", raised.exception.code)
+        self.assertEqual("submission_ambiguous", read_json(handoff / "state.json")["phase"])
+        self.assertEqual("submitted", load_receipt(handoff / "receipt.json")["events"][-1]["last_stage"])
+
     def test_nonzero_tool_route_is_never_imported(self) -> None:
         _, handoff = self.approved()
         fake = FakeProcess(
             [
                 {"type": "submitted", "request_id": "request-1"},
-                {"type": "complete", "text": "tool answer", "tool_routes": 1, "completion_source": "conversation-readback-live-v1"},
+                {"type": "complete", "text": "tool answer", "conversation_id": "c", "parent_message_id": "m", "assistant_message_id": "m", "tool_routes": 1, "done": True, "completion_source": "signed-stream-handoff-v1", "stream_handoff_topic_sha256": "a" * 64, "current_branch_proof_required": False, "tool_route_candidate_observed": False, "pre_handoff_assistant_observed": False, "signed_delta_continuation_observed": False, "signed_assistant_evidence": True},
             ]
         )
         with self.assertRaises(controller.ControllerError) as raised:
@@ -780,6 +1082,7 @@ class ControllerCase(PackageCase):
         base = {
             "desktop_bridge": True,
             "stream_bridge": True,
+            "response_stream_supported": True,
             "response_readback_supported": True,
             "desktop_environment_readable": True,
             "device_check_supported": True,

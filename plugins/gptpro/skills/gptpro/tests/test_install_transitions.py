@@ -44,6 +44,27 @@ class InstallTransitionContractTests(unittest.TestCase):
         self.assertEqual(6, value["schema_version"])
         self.assertEqual("gpt-5-6-pro", value["default_model_id"])
         self.assertEqual("normal", value["chat_history_mode"])
+        self.assertIn("signed-stream-handoff-v1", value["features"])
+        self.assertIn("authenticated-exact-message-branch-proof", value["features"])
+        self.assertIn("authenticated-exact-message-readback-recovery", value["features"])
+        self.assertEqual(
+            {
+                "primary": "signed-stream-handoff-v1",
+                "conditional_branch_proof": "authenticated-exact-message-readback-v1",
+                "conditional_branch_proof_get_only": True,
+                "conditional_branch_proof_timeout_seconds": 30,
+                "conditional_branch_proof_when": [
+                    "tool-route-candidate",
+                    "pre-handoff-assistant-evidence",
+                    "signed-delta-continuation",
+                ],
+                "direct_completion_fallback": False,
+                "recovery": "conversation-readback-v1",
+                "collect_response_get_only": True,
+                "collect_response_role": "recovery-only",
+            },
+            value["response_collection"],
+        )
         self.assertFalse(value["tools_enabled"])
         self.assertFalse(value["local_functions"])
         self.assertFalse(value["server_tool_fallback"])

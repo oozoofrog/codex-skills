@@ -39,6 +39,7 @@ REQUIRED_FILES = (
     "runtime/chatgpt-desktop/errors.js",
     "runtime/chatgpt-desktop/model-catalog.js",
     "runtime/chatgpt-desktop/private-bridge.js",
+    "runtime/chatgpt-desktop/stream-handoff.js",
     "references/electron-runtime.md",
     "references/failure-reporting.md",
     "references/security.md",
@@ -212,8 +213,14 @@ def validate_runtime_boundary(root: Path, errors: list[str]) -> None:
         '"delivery_channels": ["desktop-electron"]',
         '"context_transports": [CONTEXT_TRANSPORT]',
         '"schema-6-inline-immutable-snapshot"',
-        '"authenticated-exact-message-readback"',
-        '"authenticated-response-readback"',
+        '"signed-stream-handoff-v1"',
+        '"authenticated-exact-message-branch-proof"',
+        '"authenticated-exact-message-readback-recovery"',
+        '"primary": "signed-stream-handoff-v1"',
+        '"conditional_branch_proof": "authenticated-exact-message-readback-v1"',
+        '"conditional_branch_proof_get_only": True',
+        '"recovery": "conversation-readback-v1"',
+        '"collect_response_get_only": True',
         '"macos-user-launcher"',
         '"local_functions": False',
         '"server_tool_fallback": False',
@@ -231,9 +238,15 @@ def validate_runtime_boundary(root: Path, errors: list[str]) -> None:
     app_host_source = (root / "runtime/chatgpt-desktop/app-host-http.js").read_text(encoding="utf-8")
     if "sendMessageFromView" in bridge_source or "sendMessageFromView" in app_host_source:
         errors.append("The active Electron runtime must not use the unsupported sendMessageFromView HTTP path")
-    for token in ('"connect-app-host"', '"httpFetch"', '"fetch"', '"cancel"'):
+    for token in ('"connect-app-host"', '"httpFetch"', '"fetch"', '"cancel"', "openSocket(request)", "sendSocket(request)", "closeSocket(socketId)"):
         if token not in app_host_source:
             errors.append(f"The app-host HTTP compatibility boundary is missing {token}")
+    for label, text in (("app-host runtime", app_host_source), ("private bridge", bridge_source)):
+        if 'url.hostname !== "ws.chatgpt.com"' not in text:
+            errors.append(f"The signed WebSocket origin boundary is missing from the {label}")
+    for token in ('this.send(["release", id, 1])', "receivedChunks"):
+        if token not in app_host_source + bridge_source:
+            errors.append(f"The streamed Response lifetime diagnostic is incomplete: {token}")
     forbidden_paths = (
         root / "runtime/gptpro_mcp",
         root / "runtime/gptpro_browser",
@@ -273,7 +286,9 @@ def validate_runtime_boundary(root: Path, errors: list[str]) -> None:
         errors.append(f"Credential/session extraction pattern is present: {retained}")
     controller_text = (root / "runtime/gptpro_runtime/controller.py").read_text(encoding="utf-8")
     conversation_text = (root / "runtime/chatgpt-desktop/conversation-client.js").read_text(encoding="utf-8")
+    decoder_text = (root / "runtime/chatgpt-desktop/delta-decoder.js").read_text(encoding="utf-8")
     readback_text = (root / "runtime/chatgpt-desktop/conversation-readback.js").read_text(encoding="utf-8")
+    handoff_text = (root / "runtime/chatgpt-desktop/stream-handoff.js").read_text(encoding="utf-8")
     for token in ("ToolRuntime", "local_function_signatures"):
         if token in controller_text or token in conversation_text:
             errors.append(f"Removed local-tool runtime contract remains active: {token}")
@@ -319,10 +334,145 @@ def validate_runtime_boundary(root: Path, errors: list[str]) -> None:
             errors.append(f"User launcher safety boundary is incomplete: {token}")
     if "waitForConversationResponse" not in conversation_text or 'add_parser("collect-response")' not in source:
         errors.append("Authenticated exact-conversation readback recovery is incomplete")
-    for token in ("waitForConversationResponse", "response_readback", "conversation-readback-live-v1"):
+    for token in ("waitForConversationResponse", "response_readback", "async collect(options)"):
         if token not in conversation_text:
-            errors.append(f"Primary exact-message readback is incomplete: {token}")
-    for token in ('completion_source: "conversation-readback-v1"', 'final.status !== "finished_successfully"', "final.end_turn !== true"):
+            errors.append(f"GET-only exact-message readback recovery is incomplete: {token}")
+    for token in (
+        '"primary": "signed-stream-handoff-v1"',
+        '"conditional_branch_proof_timeout_seconds": 30',
+        '"tool-route-candidate"',
+        '"pre-handoff-assistant-evidence"',
+        '"signed-delta-continuation"',
+        '"direct_completion_fallback": False',
+        '"collect_response_role": "recovery-only"',
+    ):
+        if token not in source:
+            errors.append(f"Desktop response capability contract is incomplete: {token}")
+    if 'completionSource = "conversation-readback-v1"' in conversation_text:
+        errors.append("Authenticated conversation readback must not be the primary consult completion path")
+    for token in (
+        "stream_handoff",
+        "turn_exchange_id",
+        "subscribe_ws_topic",
+        "^conversation-.+",
+        'offset: "0"',
+        '"/celsius/ws/user"',
+        "conversation-turn-stream",
+        "recovered",
+        "catchups",
+        "stream-item",
+        "conversation_id",
+        "turn_id",
+        "parent_stream_item_id",
+        "encoded_item",
+        'payload.type === "done"',
+        "topicHash",
+        "STREAM_HANDOFF_INITIAL_TIMEOUT",
+        "STREAM_HANDOFF_IDLE_TIMEOUT",
+        "STREAM_INTERRUPTED",
+        "options.initialTimeoutMs ?? 5_000",
+        "options.idleTimeoutMs ?? 30_000",
+        "this.completed = true",
+    ):
+        if token not in handoff_text:
+            errors.append(f"Signed stream-handoff contract is incomplete: {token}")
+    for token in (
+        "handoffTopic",
+        "openStreamHandoff",
+        'options.progress("stream_handoff")',
+        'completion_source: "signed-stream-handoff-v1"',
+        'INITIAL_HANDOFF_TIMEOUT_MS = 60_000',
+        'CURRENT_BRANCH_PROOF_TIMEOUT_MS = 30_000',
+        'responseHeader(response.headers, "content-type")',
+        '"STREAM_BODY_TIMEOUT"',
+        '"STREAM_HANDOFF_FRAME_TIMEOUT"',
+        '"STREAM_HANDOFF_MISSING"',
+        "handoff?.completed === true",
+        "decoder.toolRouteCandidate",
+        "handoff?.completed !== true",
+        'options.progress("current_branch_proof")',
+        '"CURRENT_BRANCH_PROOF_TIMEOUT"',
+        "conversationId: result.conversation_id",
+        '"STREAM_BRANCH_MISMATCH"',
+        "visibleText(verified.text) !== result.text",
+        'current_branch_proof: currentBranchProofRequired ? "authenticated-exact-message-readback-v1" : null',
+        "current_branch_proof_required: currentBranchProofRequired",
+        "tool_route_candidate_observed: decoder.toolRouteCandidate",
+        "pre_handoff_assistant_observed: decoder.preHandoffAssistantEvidence",
+        "signed_delta_continuation_observed: decoder.signedDeltaContinuationObserved",
+        "signed_assistant_evidence: decoder.signedAssistantEvidence",
+    ):
+        if token not in conversation_text:
+            errors.append(f"Primary signed stream completion is incomplete: {token}")
+    raw_handoff = conversation_text.find("handoffTopic(item.value.data)")
+    prehandoff_decode = conversation_text.find("decoder.consume(item.value.event, item.value.data)", raw_handoff)
+    if raw_handoff < 0 or prehandoff_decode < raw_handoff:
+        errors.append("The raw stream_handoff frame must be detected before compact payload decoding")
+    for token in (
+        "options.transportDone === true",
+        "this.finalText.trim().length > 0",
+        "this.finalRecipientAll",
+        'typeof this.assistantMessageId === "string"',
+        "this.toolRouteCandidate = false",
+        "this.preHandoffAssistantEvidence = false",
+        "this.preHandoffDeltaSeen = false",
+        "this.signedDeltaContinuationObserved = false",
+        "this.signedAssistantEvidence = false",
+        "options.signed === true",
+        'message.author?.role === "tool"',
+        'typeof message.content.parts[0] !== "string"',
+    ):
+        if token not in decoder_text:
+            errors.append(f"Signed stream completion evidence is incomplete: {token}")
+    for token in ("process.stdin.close()", "process.stderr.read()", "stderr_thread.start()"):
+        if token not in controller_text:
+            errors.append(f"Desktop child process lifecycle is incomplete: {token}")
+    for token in (
+        '"consult": ("signed-stream-handoff-v1",)',
+        '"collect-response": ("conversation-readback-v1",)',
+        "not isinstance(completion_source, str)",
+        'not isinstance(stage, str) or stage not in PROGRESS_STAGES',
+        '"current_branch_proof"',
+        'child_submission_state not in {"rejected", "completed"}',
+        'recovery="Run collect-response. It performs GET readback only and never resends the prompt."',
+        'branch_proof not in (None, "authenticated-exact-message-readback-v1")',
+        'not isinstance(tool_candidate, bool)',
+        'not isinstance(branch_proof_required, bool)',
+        'not isinstance(pre_handoff_assistant, bool)',
+        'not isinstance(signed_delta_continuation, bool)',
+        'tool_candidate and not branch_proof_required',
+        'signed_assistant_evidence is not True',
+        'type(complete.get("tool_routes")) is not int',
+        'complete.get("done") is not True',
+        'parent_message_id != assistant_message_id',
+        '"current_branch_proof": branch_proof',
+        '"current_branch_proof_required": bool(branch_proof_required)',
+        '"tool_route_candidate_observed": bool(tool_candidate)',
+        '"pre_handoff_assistant_observed": bool(pre_handoff_assistant)',
+        '"signed_delta_continuation_observed": bool(signed_delta_continuation)',
+        '"signed_assistant_evidence": signed_assistant_evidence',
+        '"dispatching", "submitted", "submission_ambiguous", "response_capture_failed"',
+        "len(dispatching) != 1 or len(dispatched) > 1",
+        'str(dispatching[0]["recorded_at"])',
+    ):
+        if token not in controller_text:
+            errors.append(f"Controller response-source boundary is incomplete: {token}")
+    for token in (
+        'completion_source: "conversation-readback-v1"',
+        "done: true",
+        'final.status !== "finished_successfully"',
+        "final.end_turn !== true",
+        'final.recipient !== "all"',
+        "options.conversationId",
+        "allowNotFound = false",
+        "allowNotFound: matchedConversationId !== null",
+        'message.author?.role === "user"',
+        "The Desktop conversation branch contains a cycle.",
+        "The deterministic Desktop message ID appeared more than once",
+        "user.content.parts.length !== 1",
+        "message.content.parts.length === 1",
+        "message.content.parts.length !== 1",
+    ):
         if token not in readback_text:
             errors.append(f"Conversation readback integrity contract is missing: {token}")
 
@@ -370,6 +520,7 @@ def validate(root_value: Path, mirror: Path | None) -> dict[str, object]:
         "prompt-placeholders",
         "python-syntax-and-mode",
         "electron-runtime-boundary",
+        "signed-stream-handoff-contract",
     ]
     if not root.is_dir():
         errors.append(f"Skill directory not found: {root}")
