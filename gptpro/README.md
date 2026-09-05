@@ -69,6 +69,8 @@ Launcher 표시명은 **gptpro Launcher**이며, 아이콘은 원본 ChatGPT 테
 
 **불변 컨텍스트 패키지**는 선택 당시의 원문을 보존합니다. `outbound.md`에는 질문과 모드 지침, 정렬된 파일 블록, 선택 경로의 `git diff HEAD`, 선택적 보충 문서가 들어갑니다. 블록마다 경로 또는 label, 바이트 수와 SHA-256을 기록합니다. `manifest.json`은 Git 기준 상태와 공개 범위를 결속하고, `verify`는 패키지와 각 블록의 크기·해시를 재검증합니다. 준비 이후 live worktree의 변경을 자동 반영하지 않습니다.
 
+선택된 파일명은 Git 패턴으로 다시 해석하지 않으며 상위 디렉터리의 symlink도 거부합니다. HEAD 대비 삭제 파일은 stage 전후 모두 선택할 수 있습니다. 삭제된 원문은 diff에 포함되고, 삭제 경로는 manifest의 `diff.deleted_paths`와 inline diff header의 `deleted_paths`에 기록되어 같은 선택·제외·비밀정보 검사와 지속 승인 범위 검사를 받습니다. `prepare` 결과의 `files`는 현재 파일 수, `deleted_files`는 삭제 파일 수입니다.
+
 전송할 `outbound.md`의 상한은 **256 KiB(262,144 bytes)**입니다. 넘으면 선택 범위를 줄여 새로 준비하며 자동 요약, 분할 전송, 잘라내기로 통과시키지 않습니다. 별도 ZIP은 만들지 않습니다. 저장소의 코드·diff·보충 문서 공개는 `outbound.md` 한 사용자 메시지에 담기며, 함께 보내는 고정 `system-prompt.md`도 해시와 승인에 결속됩니다.
 
 저장소 밖의 텍스트가 필요할 때는 `--supplement LABEL=/absolute/path`로 추가합니다. 소유자·권한·크기 제한을 만족하는 일반 UTF-8 파일만 읽고, 전송 메타데이터에는 원래 절대 경로 대신 label과 패키지 내부 artifact 경로를 사용합니다. 보충 문서 본문도 공개 대상이며 전체 256 KiB 한도에 포함됩니다.

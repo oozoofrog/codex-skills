@@ -14,6 +14,8 @@
 
 The exact `outbound.md`, not a ZIP or live repository, is sent. Preparation rejects unsafe paths, symlinks, non-UTF-8 data, disallowed untracked files, detected secrets, boundary collisions, and output above 262,144 bytes. Verification checks every inline header, body size, body hash, and the final outbound hash.
 
+Selected Git filenames are always literal pathspecs. Repository reads walk each parent directory from the repository descriptor with `O_DIRECTORY | O_NOFOLLOW` and open the final file relative to that descriptor; an ancestor symlink cannot substitute outside content. HEAD-relative deletions remain selectable before and after staging, including deletion-only file lists. They use the same include/exclude and secret-path rules, and their patch content is secret-scanned. Deleted paths are recorded in the manifest's `diff.deleted_paths` and the inline diff header's `deleted_paths`, count toward the file limit, and participate in standing approval path checks. Existing Schema-6 packages without this optional field retain their original verification format.
+
 Approval binds the exact manifest, outbound and system-prompt hashes, model, `desktop-electron`, normal Chat, and inline format. Immediately before POST, the child reports the bytes it read and waits for the parent to re-verify approval and durably record `submission_dispatching`.
 
 The send boundary has three simple states:

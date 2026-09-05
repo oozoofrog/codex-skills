@@ -219,6 +219,161 @@ class PackageCase(unittest.TestCase):
             self.prepare(supplements=["note=relative.txt"])
         self.assertEqual("SUPPLEMENT_INVALID", supplement.exception.code)
 
+    def test_file_list_diff_uses_literal_paths_under_standing_approval(self) -> None:
+        chosen = self.repo / "src/[id].txt"
+        other = self.repo / "src/i.txt"
+        chosen.write_text("selected original\n")
+        other.write_text("outside original\n")
+        git(self.repo, "--literal-pathspecs", "add", "src/[id].txt", "src/i.txt")
+        git(self.repo, "commit", "-qm", "literal paths")
+        file_list = self.root / "selected.txt"
+        file_list.write_text("src/[id].txt\n")
+        first = Path(self.prepare(includes=[], file_list=file_list)["handoff_dir"])
+        approval = approvals.create_standing(
+            first, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state,
+        )
+        chosen.write_text("selected edit\n")
+        other.write_text("OUT_OF_SCOPE_DIFF_SENTINEL\n")
+        handoff = Path(self.prepare(includes=[], file_list=file_list)["handoff_dir"])
+        manifest = package.verify_package(handoff)["manifest"]
+        outbound = (handoff / "outbound.md").read_text()
+        self.assertEqual(["src/[id].txt"], [item["path"] for item in manifest["files"]])
+        self.assertIn("+selected edit", outbound)
+        self.assertNotIn("OUT_OF_SCOPE_DIFF_SENTINEL", outbound)
+        self.assertNotIn("src/i.txt", outbound)
+        with mock.patch.object(approvals, "state_root", return_value=self.state):
+            approvals.apply_standing(handoff, approval_id=approval["approval_id"])
+            approvals.verify_active_approval(handoff)
+
+    def test_parent_symlink_rejected_before_packaging_with_standing_approval(self) -> None:
+        first = Path(self.prepare(includes=["src/**"])["handoff_dir"])
+        approvals.create_standing(
+            first, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state,
+        )
+        external = self.root / "external"
+        external.mkdir()
+        (external / "main.py").write_text("OUTSIDE_REPOSITORY_SENTINEL\n")
+        (self.repo / "src").rename(self.repo / "original-src")
+        (self.repo / "src").symlink_to(external, target_is_directory=True)
+        before = sorted(self.state.rglob("manifest.json"))
+        with self.assertRaises(PackageError) as raised:
+            self.prepare(includes=["src/**"])
+        self.assertEqual("FILE_UNSAFE", raised.exception.code)
+        self.assertEqual(before, sorted(self.state.rglob("manifest.json")))
+
+    def test_secure_read_rejects_nested_and_final_symlinks_and_hardlinks(self) -> None:
+        external = self.root / "external.txt"
+        external.write_text("outside\n")
+        nested = self.repo / "src/nested"
+        nested.mkdir()
+        (nested / "linked.txt").symlink_to(external)
+        (self.repo / "src/linked-dir").symlink_to(nested, target_is_directory=True)
+        os.link(external, nested / "hardlink.txt")
+        for relative in ("src/nested/linked.txt", "src/linked-dir/linked.txt", "src/nested/hardlink.txt"):
+            with self.subTest(relative=relative), self.assertRaises(PackageError) as raised:
+                package._read_regular(self.repo, relative, maximum=1024)
+            self.assertEqual("FILE_UNSAFE", raised.exception.code)
+
+    def test_secure_read_detects_content_change_during_read(self) -> None:
+        source = self.repo / "src/main.py"
+        real_read = os.read
+
+        def changing_read(descriptor, size):
+            result = real_read(descriptor, size)
+            source.write_text("changed while being read\n")
+            return result
+
+        with mock.patch.object(package.os, "read", side_effect=changing_read), self.assertRaises(PackageError) as raised:
+            package._read_regular(self.repo, "src/main.py", maximum=1024)
+        self.assertEqual("FILE_CHANGED", raised.exception.code)
+
+    def test_selected_deletions_obey_includes_file_list_and_excludes(self) -> None:
+        removed = self.repo / "src/[id].txt"
+        excluded = self.repo / "src/excluded.txt"
+        removed.write_text("REMOVED_FILE_SENTINEL\n")
+        excluded.write_text("EXCLUDED_DELETION_SENTINEL\n")
+        git(self.repo, "--literal-pathspecs", "add", "src/[id].txt", "src/excluded.txt")
+        git(self.repo, "commit", "-qm", "deletion fixtures")
+        file_list = self.root / "selected.txt"
+        file_list.write_text("src/[id].txt\n")
+        for staged in (False, True):
+            git(self.repo, "reset", "--hard", "HEAD")
+            removed.unlink()
+            excluded.unlink()
+            if staged:
+                git(self.repo, "add", "-u")
+            for directed_list in (False, True):
+                with self.subTest(staged=staged, file_list=directed_list):
+                    prepared = self.prepare(
+                        includes=[] if directed_list else ["src/**"],
+                        file_list=file_list if directed_list else None,
+                        excludes=["src/excluded.txt"],
+                    )
+                    handoff = Path(prepared["handoff_dir"])
+                    manifest = package.verify_package(handoff)["manifest"]
+                    self.assertEqual(["src/[id].txt"], manifest["diff"]["deleted_paths"])
+                    self.assertEqual(1, prepared["deleted_files"])
+                    self.assertGreater(manifest["diff"]["size"], 0)
+                    if directed_list:
+                        self.assertEqual([], manifest["files"])
+                    outbound = (handoff / "outbound.md").read_text()
+                    self.assertIn("-REMOVED_FILE_SENTINEL", outbound)
+                    self.assertNotIn("EXCLUDED_DELETION_SENTINEL", outbound)
+
+    def test_deleted_paths_are_bound_to_standing_approval_and_inline_header(self) -> None:
+        file_list = self.root / "selected.txt"
+        file_list.write_text("src/main.py\n")
+        first = Path(self.prepare(includes=[], file_list=file_list)["handoff_dir"])
+        created = approvals.create_standing(
+            first, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state,
+        )
+        (self.repo / "src/main.py").unlink()
+        git(self.repo, "add", "-u")
+        handoff = Path(self.prepare(includes=[], file_list=file_list)["handoff_dir"])
+        with mock.patch.object(approvals, "state_root", return_value=self.state):
+            approvals.apply_standing(handoff, approval_id=created["approval_id"])
+            approvals.verify_active_approval(handoff)
+        # An approval created from a deletion-only file list also retains its exact path.
+        deletion_approval = approvals.create_standing(
+            handoff, confirm_transmission=True, confirm_disclosure=True, expires_hours=1,
+            root=self.root / "other-state",
+        )
+        self.assertEqual(["src/main.py"], deletion_approval["scope"]["path_rules"]["exact_paths"])
+        (self.repo / "README.md").unlink()
+        outside = Path(self.prepare(includes=["README.md"])["handoff_dir"])
+        with self.assertRaises(ApprovalError) as raised:
+            approvals.apply_standing(outside, approval_id=created["approval_id"], root=self.state)
+        self.assertEqual("APPROVAL_REQUIRED", raised.exception.code)
+        manifest = read_json(handoff / "manifest.json")
+        manifest["diff"]["deleted_paths"] = ["README.md"]
+        write_json(handoff / "manifest.json", manifest)
+        with self.assertRaises(PackageError) as tampered:
+            package.verify_package(handoff)
+        self.assertEqual("PACKAGE_TAMPERED", tampered.exception.code)
+
+    def test_deleted_secret_paths_and_diff_content_are_rejected(self) -> None:
+        (self.repo / "src/main.py").write_text("api_key='abcdefghijklmnopqrstuv'\n")
+        (self.repo / ".env").write_text("SAFE=placeholder\n")
+        git(self.repo, "add", "src/main.py", ".env")
+        git(self.repo, "commit", "-qm", "secret deletion fixtures")
+        (self.repo / "src/main.py").unlink()
+        (self.repo / ".env").unlink()
+        git(self.repo, "add", "-u")
+        for path, code in ((".env", "SECRET_PATH_REJECTED"), ("src/main.py", "SECRET_DETECTED")):
+            with self.subTest(path=path), self.assertRaises(PackageError) as raised:
+                self.prepare(includes=[path])
+            self.assertEqual(code, raised.exception.code)
+
+    def test_selected_rename_does_not_disclose_excluded_destination(self) -> None:
+        git(self.repo, "mv", "src/main.py", "outside.py")
+        prepared = self.prepare(includes=["src/**"])
+        handoff = Path(prepared["handoff_dir"])
+        manifest = package.verify_package(handoff)["manifest"]
+        self.assertEqual(["src/main.py"], manifest["diff"]["deleted_paths"])
+        outbound = (handoff / "outbound.md").read_text()
+        self.assertIn("deleted file mode", outbound)
+        self.assertNotIn("outside.py", outbound)
+
     def test_package_symlink_and_permissions_fail_closed(self) -> None:
         fresh = Path(self.prepare()["handoff_dir"])
         link = self.root / "handoff-link"

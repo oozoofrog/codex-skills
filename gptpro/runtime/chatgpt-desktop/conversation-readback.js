@@ -161,7 +161,6 @@ async function waitForConversationResponse(bridge, options) {
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
   const notBeforeMs = (options.notBeforeMs ?? Date.now()) - (options.lookbackMs ?? DEFAULT_LOOKBACK_MS);
-  const seenUpdates = new Map();
   let matchedConversationId = typeof options.conversationId === "string" && options.conversationId
     ? options.conversationId
     : null;
@@ -185,9 +184,6 @@ async function waitForConversationResponse(bridge, options) {
         if (!object(item) || typeof item.id !== "string" || !item.id) continue;
         const updated = timestampMs(item.update_time ?? item.create_time);
         if (updated !== null && updated < notBeforeMs) continue;
-        const updateKey = String(item.update_time ?? item.create_time ?? "");
-        if (seenUpdates.get(item.id) === updateKey) continue;
-        seenUpdates.set(item.id, updateKey);
         candidates.push(item);
       }
     }
