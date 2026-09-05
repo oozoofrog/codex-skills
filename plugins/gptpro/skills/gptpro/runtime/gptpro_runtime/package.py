@@ -546,7 +546,8 @@ def prepare_package(
     tree = str(_git(repo, "rev-parse", f"{head}^{{tree}}"))
     dirty_output = str(_git(repo, "status", "--porcelain=v1", "--untracked-files=normal"))
     dirty = bool(dirty_output)
-    diff = _git(repo, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--binary", head, "--", *pathspec, binary=True)
+    # Keep deleted content visible to strict UTF-8 validation and secret scanning.
+    diff = _git(repo, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--text", head, "--", *pathspec, binary=True)
     assert isinstance(diff, bytes)
     if len(diff) > MAX_DIFF_BYTES:
         raise PackageError("DIFF_LIMIT_EXCEEDED", "The selected Git diff exceeds the hard byte limit.")
@@ -812,6 +813,12 @@ def _verify_inline_context(manifest: dict[str, Any], prompt: bytes, outbound: by
             text = body.decode("utf-8", "strict")
         except UnicodeError as exc:
             raise PackageError("PACKAGE_TAMPERED", "An inline context body is not strict UTF-8.") from exc
+        if header["kind"] == "git_diff" and b"GIT binary patch" in body.split(b"\n"):
+            raise PackageError(
+                "DIFF_BINARY_ENCODED",
+                "An encoded Git binary patch cannot be secret-scanned.",
+                recovery="Prepare a new package using text-only diffs.",
+            )
         findings = secret_detectors(text)
         if findings:
             raise PackageError("SECRET_DETECTED", f"An inline context block matched secret detector {findings[0]}.")

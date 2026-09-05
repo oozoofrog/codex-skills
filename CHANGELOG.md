@@ -4,7 +4,9 @@
 
 ## [Unreleased]
 
-- PR #42 후속 수정: 선택 파일명을 Git literal pathspec으로 전달하고, 저장소 descriptor부터 각 상위 디렉터리와 마지막 파일을 symlink를 따라가지 않고 엽니다. HEAD 대비 삭제 파일은 stage 여부와 관계없이 같은 선택·제외·비밀정보 정책을 적용하며, 삭제 patch와 `diff.deleted_paths`를 inline header·manifest·지속 승인에 결속합니다. 삭제가 없는 기존 Schema-6 패키지는 계속 검증할 수 있습니다.
+- 삭제 diff를 강제 텍스트로 생성해 `.gitattributes`의 `-diff` 또는 NUL 바이트가 삭제 내용을 Git binary patch로 인코딩하여 비밀 탐지·UTF-8 검증을 우회하던 문제를 수정했습니다. staged/unstaged 비밀·잘못된 UTF-8 삭제 차단과 안전한 literal 경로 삭제의 원문 표시·지속 승인을 회귀 테스트로 확인했습니다. 기존에 생성된 Git binary patch 포함 패키지도 검증·승인에서 `DIFF_BINARY_ENCODED`로 차단하여 재준비를 요구하며, 정상 text-only Schema-6와 일반 문서·텍스트 diff의 같은 문구는 계속 허용합니다.
+
+- PR #42 후속 수정: 선택 파일명을 Git literal pathspec으로 전달하고, 저장소 descriptor부터 각 상위 디렉터리와 마지막 파일을 symlink를 따라가지 않고 엽니다. HEAD 대비 삭제 파일은 stage 여부와 관계없이 같은 선택·제외·비밀정보 정책을 적용하며, 삭제 patch와 `diff.deleted_paths`를 inline header·manifest·지속 승인에 결속합니다. Git binary patch가 없는 기존 Schema-6 패키지는 계속 검증할 수 있습니다.
 - GET-only `collect-response`가 목록의 `update_time`이 같아도 불일치 detail을 다시 조회하도록 수정했습니다. 정확한 메시지 ID·본문 대조와 최근 20개 제한을 유지합니다. 네 결함의 회귀 테스트를 추가하고 배포·실행 경로에서 제외된 ` 2.` 복사본 86개를 제거했습니다.
 
 - Launcher의 파일명·plist 표시명·오류 대화상자 제목을 `gptpro Launcher`로 통일하고, 원본 ChatGPT 테마에 주황색 실행 배지를 더한 PNG·macOS `.icns`와 재생성 스크립트를 추가했습니다. 설치·상태 확인에 아이콘 무결성 검사를 포함하며 기존 Launcher의 atomic 갱신·Trash 복구를 유지합니다. 실행된 Runner의 Dock·Cmd-Tab·메뉴·기본 창은 원본 ChatGPT 표시를 유지한다는 제한을 상태 출력과 문서에 명시했습니다.

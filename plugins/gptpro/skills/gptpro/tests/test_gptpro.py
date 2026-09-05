@@ -364,6 +364,121 @@ class PackageCase(unittest.TestCase):
                 self.prepare(includes=[path])
             self.assertEqual(code, raised.exception.code)
 
+    def test_binary_deleted_content_cannot_bypass_scanning_with_standing_approval(self) -> None:
+        chosen = self.repo / "src/config.txt"
+        chosen.write_text("safe original\n")
+        git(self.repo, "add", "src/config.txt")
+        git(self.repo, "commit", "-qm", "safe deletion approval fixture")
+        first = Path(self.prepare(includes=["src/config.txt"])["handoff_dir"])
+        approvals.create_standing(
+            first, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state,
+        )
+        cases = (
+            (True, b"api_key='abcdefghijklmnopqrstuv'\n", "SECRET_DETECTED"),
+            (False, b"\0api_key='abcdefghijklmnopqrstuv'\n", "SECRET_DETECTED"),
+            (True, b"invalid utf-8: \xff\n", "DIFF_NOT_UTF8"),
+            (False, b"\0invalid utf-8: \xff\n", "DIFF_NOT_UTF8"),
+        )
+        for binary_attribute, content, code in cases:
+            (self.repo / ".gitattributes").write_text("src/config.txt -diff\n" if binary_attribute else "")
+            chosen.write_bytes(content)
+            git(self.repo, "add", ".gitattributes", "src/config.txt")
+            git(self.repo, "commit", "-qm", "binary deletion fixture")
+            for staged in (False, True):
+                git(self.repo, "reset", "--hard", "HEAD")
+                chosen.unlink()
+                if staged:
+                    git(self.repo, "add", "-u")
+                before = sorted(self.state.rglob("manifest.json"))
+                with self.subTest(binary_attribute=binary_attribute, code=code, staged=staged):
+                    with self.assertRaises(PackageError) as raised:
+                        self.prepare(includes=["src/config.txt"])
+                    self.assertEqual(code, raised.exception.code)
+                    self.assertEqual(before, sorted(self.state.rglob("manifest.json")))
+
+    def test_binary_attribute_safe_deletion_is_literal_reviewable_and_approvable(self) -> None:
+        chosen = self.repo / "src/[id].txt"
+        other = self.repo / "src/i.txt"
+        chosen.write_bytes("선택한 첫 줄\r\n마지막 줄".encode("utf-8"))
+        other.write_text("OUTSIDE_DELETION_SENTINEL\n")
+        (self.repo / ".gitattributes").write_text("src/*.txt -diff\n")
+        git(self.repo, "--literal-pathspecs", "add", ".gitattributes", "src/[id].txt", "src/i.txt")
+        git(self.repo, "commit", "-qm", "reviewable binary attribute fixture")
+        file_list = self.root / "selected.txt"
+        file_list.write_text("src/[id].txt\n")
+        first = Path(self.prepare(includes=[], file_list=file_list)["handoff_dir"])
+        approval = approvals.create_standing(
+            first, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state,
+        )
+        for staged in (False, True):
+            git(self.repo, "reset", "--hard", "HEAD")
+            chosen.unlink()
+            other.unlink()
+            if staged:
+                git(self.repo, "add", "-u")
+            with self.subTest(staged=staged):
+                handoff = Path(self.prepare(includes=[], file_list=file_list)["handoff_dir"])
+                manifest = package.verify_package(handoff)["manifest"]
+                self.assertEqual([], manifest["files"])
+                self.assertEqual(["src/[id].txt"], manifest["diff"]["deleted_paths"])
+                outbound = (handoff / "outbound.md").read_bytes()
+                self.assertIn("-선택한 첫 줄\r\n-마지막 줄\n".encode("utf-8"), outbound)
+                self.assertIn(b"deleted file mode", outbound)
+                self.assertNotIn(b"OUTSIDE_DELETION_SENTINEL", outbound)
+                self.assertNotIn(b"src/i.txt", outbound)
+                with mock.patch.object(approvals, "state_root", return_value=self.state):
+                    approvals.apply_standing(handoff, approval_id=approval["approval_id"])
+                    approvals.verify_active_approval(handoff)
+
+    def test_legacy_binary_diff_is_rejected_by_verification_and_approval(self) -> None:
+        first = Path(self.prepare(includes=["src/main.py"])["handoff_dir"])
+        approval = approvals.create_standing(
+            first, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state,
+        )
+        (self.repo / ".gitattributes").write_text("src/main.py -diff\n")
+        (self.repo / "src/main.py").write_text("api_key='abcdefghijklmnopqrstuv'\n")
+        git(self.repo, "add", ".gitattributes", "src/main.py")
+        git(self.repo, "commit", "-qm", "legacy binary patch fixture")
+        (self.repo / "src/main.py").unlink()
+        real_git = package._git
+
+        def legacy_git(repo, *arguments, **options):
+            return real_git(repo, *("--binary" if arg == "--text" else arg for arg in arguments), **options)
+
+        # Reproduce the old generator with real Git binary-patch bytes and valid package hashes.
+        with mock.patch.object(package, "_git", side_effect=legacy_git):
+            handoff = Path(self.prepare(includes=["src/main.py"])["handoff_dir"])
+        outbound = (handoff / "outbound.md").read_bytes()
+        self.assertIn(b"\nGIT binary patch\n", outbound)
+        self.assertNotIn(b"abcdefghijklmnopqrstuv", outbound)
+        for operation in (
+            lambda: package.verify_package(handoff),
+            lambda: approvals.approve_exact(handoff, confirm_transmission=True, confirm_disclosure=True),
+            lambda: approvals.apply_standing(handoff, approval_id=approval["approval_id"], root=self.state),
+            lambda: approvals.verify_active_approval(handoff),
+        ):
+            with self.assertRaises(PackageError) as raised:
+                operation()
+            self.assertEqual("DIFF_BINARY_ENCODED", raised.exception.code)
+        self.assertEqual("prepared", read_json(handoff / "state.json")["phase"])
+
+    def test_binary_marker_text_in_files_and_text_hunks_remains_valid(self) -> None:
+        (self.repo / "README.md").write_text("GIT binary patch\n")
+        deleted = self.repo / "src/deleted.txt"
+        deleted.write_text("GIT binary patch\n")
+        git(self.repo, "add", "README.md", "src/deleted.txt")
+        git(self.repo, "commit", "-qm", "ordinary marker text")
+        (self.repo / "README.md").write_text("GIT binary patch\nmore documentation\n")
+        (self.repo / "src/main.py").write_text("print('hello')\nGIT binary patch\n")
+        deleted.unlink()
+        handoff = Path(self.prepare()["handoff_dir"])
+        package.verify_package(handoff)
+        outbound = (handoff / "outbound.md").read_bytes()
+        for prefix in (b"", b" ", b"-", b"+"):
+            self.assertIn(b"\n" + prefix + b"GIT binary patch\n", outbound)
+        approvals.approve_exact(handoff, confirm_transmission=True, confirm_disclosure=True)
+        approvals.verify_active_approval(handoff)
+
     def test_selected_rename_does_not_disclose_excluded_destination(self) -> None:
         git(self.repo, "mv", "src/main.py", "outside.py")
         prepared = self.prepare(includes=["src/**"])

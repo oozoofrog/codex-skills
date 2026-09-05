@@ -17,5 +17,5 @@
 - Check every copyable `gptpro.py prepare` example uses directed `--include` or `--file-list` selection unless whole-repository disclosure is explicit and explained.
 - Check local links and path references for breakage.
 - Check user-visible additions against `CHANGELOG.md`.
-- For package scope changes, cover literal Git filenames, ancestor symlinks, and staged/unstaged deletions through outbound verification and standing approval; checking `manifest.files` alone does not prove disclosure scope.
+- For package scope changes, cover literal Git filenames, ancestor symlinks, and staged/unstaged deletions through outbound verification and standing approval; checking `manifest.files` alone does not prove disclosure scope. Cover `.gitattributes -diff` and NUL-triggered binary diff encoding, including secret/UTF-8 checks and verification/approval regressions for previously generated packages.
 - If a rule was missing and caused rework, update the relevant context document instead of fixing code only.
