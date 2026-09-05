@@ -1,0 +1,4 @@
+interface:
+  display_name: "Astra Orchestrator"
+  short_description: "Astra 리더·워커·Git Steward·독립 검토 역할 조정"
+  default_prompt: "$astra-orchestrator로 리더·워커·Git Steward·독립 리뷰어를 나누고 역할별 Astra 추론을 선택해 현재 목표를 완료해 주세요."

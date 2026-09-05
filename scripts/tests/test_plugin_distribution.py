@@ -36,24 +36,25 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertEqual("codex-skills", marketplace["name"])
         self.assertEqual("Codex Skills", marketplace["interface"]["displayName"])
         self.assertEqual(
-            ["gptpro", "swift-intelligence"],
+            ["gptpro", "swift-intelligence", "astra-orchestrator"],
             [plugin["name"] for plugin in marketplace["plugins"]],
         )
-        entry = marketplace["plugins"][0]
-        self.assertEqual({"source": "local", "path": "./plugins/gptpro"}, entry["source"])
-        self.assertEqual("AVAILABLE", entry["policy"]["installation"])
-        self.assertEqual("ON_INSTALL", entry["policy"]["authentication"])
-
-        swift_entry = next(
-            plugin for plugin in marketplace["plugins"] if plugin["name"] == "swift-intelligence"
-        )
-        self.assertEqual(
-            {"source": "local", "path": "./plugins/swift-intelligence"},
-            swift_entry["source"],
-        )
-        self.assertEqual("AVAILABLE", swift_entry["policy"]["installation"])
-        self.assertEqual("ON_INSTALL", swift_entry["policy"]["authentication"])
-        self.assertEqual("Productivity", swift_entry["category"])
+        for entry in marketplace["plugins"]:
+            with self.subTest(plugin=entry["name"]):
+                self.assertEqual(
+                    {"source": "local", "path": f"./plugins/{entry['name']}"},
+                    entry["source"],
+                )
+                self.assertEqual("AVAILABLE", entry["policy"]["installation"])
+                self.assertEqual("ON_INSTALL", entry["policy"]["authentication"])
+                self.assertEqual("Productivity", entry["category"])
+                plugin_root = REPO_ROOT / entry["source"]["path"]
+                manifest = json.loads(
+                    (plugin_root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(entry["name"], manifest["name"])
+                skill_root = plugin_root / manifest["skills"] / entry["name"]
+                self.assertTrue((skill_root / "SKILL.md").is_file())
 
     def test_plugin_manifest_describes_the_electron_runtime(self) -> None:
         manifest = json.loads(
