@@ -1,6 +1,6 @@
 # codex-skills
 
-이 저장소는 Codex가 로그인된 macOS ChatGPT 앱의 ChatGPT Pro를 인라인 코드 분석 파트너로 호출하는 `$gptpro`와 Swift 의미론 탐색용 `swift-intelligence` Plugin을 제공합니다. `$gptpro`는 사용자가 명시적으로 요청한 plan, ask, review, debug, architecture 작업에만 실행되며 일반 Codex 작업이나 OpenAI API 호출에서는 자동 호출되지 않습니다.
+이 저장소는 Codex가 로그인된 macOS ChatGPT 앱의 ChatGPT Pro를 인라인 코드 분석 파트너로 호출하는 `$gptpro`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 Astra 분업용 `astra-orchestrator` Plugin을 제공합니다. `$gptpro`는 사용자가 명시적으로 요청한 plan, ask, review, debug, architecture 작업에만 실행되며 일반 Codex 작업이나 OpenAI API 호출에서는 자동 호출되지 않습니다.
 
 ## v0.6 흐름
 
@@ -23,9 +23,11 @@ Codex $gptpro
 
 `swift-intelligence`는 Xcode의 SourceKit-LSP로 Swift 정의, 참조, 구현, 타입, 심볼 및 진단을 읽기 전용으로 조회합니다. MCP 서버가 필요한 Plugin이므로 `plugins/swift-intelligence/`에만 제공합니다. Python 3 외의 Python 패키지나 외부 MCP 바이너리를 추가로 설치하지 않습니다.
 
+`astra-orchestrator`는 GPT-6 Astra 리더·워커·Git Steward·독립 리뷰어를 조정하는 스킬입니다. 역할별 추론 자동 선택, 리더·워커 분업, Git 전담 워커를 통한 병렬 결과 통합을 요청하거나 직접 호출할 때 사용하며, 단순 모델 추천·스킬 작성·일반 단일 작업에는 자동 적용하지 않습니다. 모델과 추론 수준을 지정할 수 있는 Codex 서브에이전트 도구가 필요합니다. [Astra Orchestrator 설치와 사용](plugins/astra-orchestrator/README.md)을 참고하세요.
+
 ## 설치
 
-Node.js 22 이상, Python 3.11 이상, `/Applications/ChatGPT.app`이 필요합니다. npm 설치는 없습니다.
+`gptpro`는 Node.js 22 이상, Python 3.11 이상, `/Applications/ChatGPT.app`이 필요합니다. npm 설치는 없습니다.
 
 ```bash
 python3 scripts/manage_skills.py list
@@ -45,6 +47,14 @@ codex plugin add swift-intelligence@codex-skills
 ```
 
 Swift Intelligence 설치 후 Codex를 다시 시작하고 새 작업을 여십시오. 자세한 요구 사항과 사용법은 [Swift Intelligence 설치 및 사용](plugins/swift-intelligence/docs/installation-and-usage.md)을 참고하세요.
+
+Astra Orchestrator도 같은 marketplace에서 필요한 Plugin만 선택해 설치합니다. 아래 명령은 이 버전이 marketplace에 반영된 뒤 사용할 수 있습니다.
+
+```bash
+codex plugin add astra-orchestrator@codex-skills
+```
+
+설치 후 새 작업에서 `$astra-orchestrator:astra-orchestrator`로 호출합니다. 기존 로컬 `astra-orchestrator`와 중복 설치하지 않도록 배포 경로를 선택하세요. Plugin 설치는 실행 중인 리더의 모델·추론 설정을 변경하지 않습니다.
 
 ## 첫 사용
 
