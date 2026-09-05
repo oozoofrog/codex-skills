@@ -17,18 +17,6 @@
       "category": "Productivity"
     },
     {
-      "name": "gptpro-mcp",
-      "source": {
-        "source": "local",
-        "path": "./plugins/gptpro-mcp"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "category": "Productivity"
-    },
-    {
       "name": "swift-intelligence",
       "source": {
         "source": "local",

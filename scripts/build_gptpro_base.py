@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the reviewed Desktop-only gptpro base orchestration boundary."""
+"""Validate the reviewed gptpro v0.6 isolated Electron Runner boundary."""
 
 from __future__ import annotations
 
@@ -14,25 +14,29 @@ TARGET = ROOT / "gptpro" / "scripts" / "gptpro.py"
 REQUIRED = (
     '"component": "gptpro"',
     '"mcp_runtime": False',
-    '"delivery_channels": ["desktop-ui"]',
+    '"delivery_channels": ["desktop-electron"]',
+    '"context_transports": [CONTEXT_TRANSPORT]',
+    '"local_functions": False',
+    '"server_tool_fallback": False',
     '"browser_delivery": False',
-    '"cdp": False',
-    '"electron_private_api": False',
-    "GPTPRO_MCP_COMPONENT_REQUIRED",
+    '"secure_mcp_tunnel": False',
+    '"electron_private_api": True',
+    "runtime.gptpro_runtime",
 )
 FORBIDDEN = (
     "runtime.gptpro_mcp",
     "runtime.gptpro_browser",
     "command_browser_plan",
     "command_response_monitor_plan",
-    "remote-debugging-port",
     "electronBridge",
+    "GPTPRO_MCP_COMPONENT_REQUIRED",
+    "ToolRuntime",
 )
 
 
 def validate() -> list[str]:
     if not TARGET.is_file():
-        return ["Desktop-only base entrypoint is missing"]
+        return ["Electron base entrypoint is missing"]
     source = TARGET.read_text(encoding="utf-8")
     errors: list[str] = []
     try:
@@ -46,6 +50,12 @@ def validate() -> list[str]:
     for token in FORBIDDEN:
         if token in source:
             errors.append(f"Forbidden runtime or delivery path remains: {token}")
+    node_entrypoint = ROOT / "gptpro" / "scripts" / "chatgpt-desktop.js"
+    private_bridge = ROOT / "gptpro" / "runtime" / "chatgpt-desktop" / "private-bridge.js"
+    if not node_entrypoint.is_file() or not private_bridge.is_file():
+        errors.append("The clean-room private Desktop runtime is incomplete")
+    elif "electronBridge" not in private_bridge.read_text(encoding="utf-8"):
+        errors.append("The private Electron contract is not isolated in private-bridge.js")
     return errors
 
 

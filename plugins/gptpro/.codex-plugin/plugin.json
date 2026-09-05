@@ -1,7 +1,7 @@
 {
   "name": "gptpro",
-  "version": "0.3.0",
-  "description": "Desktop-only ChatGPT Pro repository collaboration with a read-only MCP companion.",
+  "version": "0.6.0",
+  "description": "ChatGPT Pro collaboration through an isolated loopback-only Desktop Electron Runner and one approved inline repository snapshot.",
   "author": {
     "name": "oozoofrog",
     "url": "https://github.com/oozoofrog"
@@ -11,23 +11,23 @@
   "keywords": [
     "chatgpt-pro",
     "codex",
-    "handoff",
+    "electron",
     "review"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "GPT Pro Collaborator",
-    "shortDescription": "Desktop ChatGPT Pro with read-only repository context",
-    "longDescription": "For an explicitly requested repository consultation, use the visible ChatGPT macOS app together with the exact installed gptpro-mcp companion and Secure MCP Tunnel. Prepare an immutable Schema 4 package, enforce secret scanning and approval, send at most once from an empty new general Chat through visible Desktop UI, expose only bounded read-only repository tools, collect the matching response, and independently validate all advice. Browser delivery, CDP, Electron-private APIs, local writes, shell commands, and automatic resend are not supported.",
+    "shortDescription": "Electron ChatGPT Pro with an approved inline code snapshot",
+    "longDescription": "For an explicitly requested plan, ask, review, debug, or architecture consultation, prepare one secret-scanned immutable Schema-6 inline repository snapshot, require exact or bounded standing approval, connect only to the isolated current-user gptpro Runner profile on loopback, resolve exact gpt-5-6-pro, send one normal-Chat user message, collect and import the response through its signed WebSocket handoff, and independently validate all advice. A conditional exact-current-branch GET may verify a signed result; GET response readback is explicit recovery only. Do not use gptpro for ordinary Codex work or OpenAI API calls. The ordinary ChatGPT app does not need to be relaunched. Browser, Computer Use, manual Send/Copy, custom ChatGPT Apps, Developer Mode, MCP, Secure MCP Tunnel, local functions, server tools, writes, shell commands, conversation continuation, and automatic resend are not supported.",
     "developerName": "oozoofrog",
     "category": "Productivity",
     "capabilities": [
       "Interactive"
     ],
     "defaultPrompt": [
-      "Use $gptpro to prepare a bounded Desktop Pro review with read-only repository access.",
-      "Use $gptpro to submit one approved prompt through the visible ChatGPT macOS app and never resend.",
-      "Use $gptpro to independently validate ChatGPT Pro advice before applying it."
+      "Use $gptpro to prepare and run an approved Electron ChatGPT Pro review with one immutable inline repository snapshot.",
+      "Use $gptpro to send one approved inline repository snapshot without automatic resend or channel fallback.",
+      "Use $gptpro to independently validate the captured ChatGPT Pro advice before applying it."
     ]
   }
 }
