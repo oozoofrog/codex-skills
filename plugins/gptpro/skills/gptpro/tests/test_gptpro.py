@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import plistlib
 import subprocess
 import tempfile
 import unittest
@@ -1123,6 +1124,13 @@ class ControllerCase(PackageCase):
             self.assertTrue(installed["current"])
             launcher = applications / controller.LAUNCHER_NAME
             executable = launcher / "Contents" / "MacOS" / controller.LAUNCHER_EXECUTABLE
+            info = plistlib.loads((launcher / "Contents" / "Info.plist").read_bytes())
+            icon = launcher / "Contents" / "Resources" / info["CFBundleIconFile"]
+            self.assertEqual("gptpro Launcher", info["CFBundleDisplayName"])
+            self.assertEqual("gptpro Launcher", info["CFBundleName"])
+            self.assertEqual(controller._launcher_icon(), icon.read_bytes())
+            self.assertEqual(sha256_file(icon), info["GPTProLauncherIconSHA256"])
+            self.assertFalse(installed["runner_native_identity_customized"])
             self.assertEqual(0o755, executable.stat().st_mode & 0o777)
             script = executable.read_text(encoding="utf-8")
             self.assertIn("--remote-debugging-address=127.0.0.1", script)
@@ -1154,6 +1162,67 @@ class ControllerCase(PackageCase):
                 self.assertTrue(removed["removed"])
                 self.assertFalse(launcher.exists())
                 self.assertTrue(Path(removed["trashed_path"]).is_dir())
+
+    def test_launcher_upgrades_legacy_name_without_icon_and_preserves_backup(self) -> None:
+        applications = self.root / "Applications"
+        fake_chatgpt = self.root / "ChatGPT.app"
+        fake_chatgpt.mkdir()
+        trash = self.root / ".Trash"
+        with (
+            mock.patch.object(controller, "CHATGPT_APP", fake_chatgpt),
+            mock.patch.object(controller, "_runner_pids", return_value=[]),
+            mock.patch.object(controller, "_app_pids", return_value=[]),
+            mock.patch.object(controller, "_port_open", return_value=False),
+        ):
+            controller.launcher_install(applications_dir=applications)
+            launcher = applications / controller.LAUNCHER_NAME
+            info_path = launcher / "Contents" / "Info.plist"
+            info = plistlib.loads(info_path.read_bytes())
+            info.pop("CFBundleIconFile")
+            info.pop("GPTProLauncherIconSHA256")
+            info.update(CFBundleName="gptpro Runner", CFBundleDisplayName="gptpro Runner", CFBundleVersion="1")
+            info_path.write_bytes(plistlib.dumps(info))
+            (launcher / "Contents" / "Resources" / controller.LAUNCHER_ICON).unlink()
+            self.assertTrue(controller._launcher_managed(launcher))
+            self.assertFalse(controller._launcher_current(launcher))
+            result = controller.launcher_install(applications_dir=applications, trash_dir=trash)
+            self.assertTrue(result["current"])
+            backup = next(trash.glob("*.app"))
+            self.assertEqual(info, plistlib.loads((backup / "Contents" / "Info.plist").read_bytes()))
+
+    def test_launcher_rejects_changed_missing_or_linked_icon(self) -> None:
+        fake_chatgpt = self.root / "ChatGPT.app"
+        fake_chatgpt.mkdir()
+        for damage in ("changed", "missing", "symlink", "hardlink", "resources_symlink"):
+            with (
+                self.subTest(damage=damage),
+                mock.patch.object(controller, "CHATGPT_APP", fake_chatgpt),
+                mock.patch.object(controller, "_runner_pids", return_value=[]),
+                mock.patch.object(controller, "_app_pids", return_value=[]),
+                mock.patch.object(controller, "_port_open", return_value=False),
+            ):
+                applications = self.root / damage
+                controller.launcher_install(applications_dir=applications)
+                launcher = applications / controller.LAUNCHER_NAME
+                resources = launcher / "Contents" / "Resources"
+                icon = resources / controller.LAUNCHER_ICON
+                if damage == "changed":
+                    icon.write_bytes(b"corrupted")
+                elif damage == "missing":
+                    icon.unlink()
+                elif damage == "symlink":
+                    icon.unlink()
+                    icon.symlink_to(SKILL_ROOT / "assets" / controller.LAUNCHER_ICON)
+                elif damage == "hardlink":
+                    os.link(icon, applications / "extra-icon.icns")
+                else:
+                    resources.rename(applications / "external-resources")
+                    resources.symlink_to(applications / "external-resources")
+                self.assertFalse(controller._launcher_managed(launcher))
+                self.assertFalse(controller.launcher_status(applications_dir=applications)["current"])
+                with self.assertRaises(controller.ControllerError) as raised:
+                    controller.launcher_install(applications_dir=applications)
+                self.assertEqual("GPTPRO_LAUNCHER_CONFLICT", raised.exception.code)
 
     def test_user_launcher_refuses_foreign_item_and_status_does_not_create(self) -> None:
         applications = self.root / "Applications"

@@ -45,6 +45,8 @@ PROGRESS_STAGES = {
 }
 CHATGPT_APP = Path("/Applications/ChatGPT.app")
 LAUNCHER_NAME = "gptpro Launcher.app"
+LAUNCHER_DISPLAY_NAME = "gptpro Launcher"
+LAUNCHER_ICON = "gptpro-launcher.icns"
 LAUNCHER_BUNDLE_ID = "com.oozoofrog.gptpro-launcher"
 LAUNCHER_EXECUTABLE = "gptpro-launcher"
 LAUNCHER_VERSION = "0.6.0"
@@ -70,13 +72,13 @@ runner_profile="$runner_root/profile"
 runner_endpoint='http://127.0.0.1:__RUNNER_PORT__'
 
 if [[ ! -d "$chatgpt" ]]; then
-  /usr/bin/osascript -e 'display dialog "ChatGPT.app을 /Applications에서 찾을 수 없습니다." buttons {"OK"} default button "OK" with title "gptpro Runner"' >/dev/null
+  /usr/bin/osascript -e 'display dialog "ChatGPT.app을 /Applications에서 찾을 수 없습니다." buttons {"OK"} default button "OK" with title "gptpro Launcher"' >/dev/null
   exit 2
 fi
 
 for path in "$HOME/Library/Application Support/gptpro" "$HOME/Library/Application Support/gptpro/runner" "$runner_root" "$runner_profile"; do
   if [[ -L "$path" ]]; then
-    /usr/bin/osascript -e 'display dialog "gptpro Runner 프로필 경로가 심볼릭 링크입니다. 안전을 위해 실행하지 않았습니다." buttons {"OK"} default button "OK" with title "gptpro Runner"' >/dev/null
+    /usr/bin/osascript -e 'display dialog "gptpro Runner 프로필 경로가 심볼릭 링크입니다. 안전을 위해 실행하지 않았습니다." buttons {"OK"} default button "OK" with title "gptpro Launcher"' >/dev/null
     exit 2
   fi
 done
@@ -85,7 +87,7 @@ done
 
 current_uid=$(/usr/bin/id -u)
 if ! process_list=$(/bin/ps -axo uid=,command=); then
-  /usr/bin/osascript -e 'display dialog "gptpro Runner 실행 상태를 확인할 수 없습니다. 잠시 후 다시 시도하세요." buttons {"OK"} default button "OK" with title "gptpro Runner"' >/dev/null
+  /usr/bin/osascript -e 'display dialog "gptpro Runner 실행 상태를 확인할 수 없습니다. 잠시 후 다시 시도하세요." buttons {"OK"} default button "OK" with title "gptpro Launcher"' >/dev/null
   exit 2
 fi
 if print -r -- "$process_list" | /usr/bin/awk -v uid="$current_uid" -v executable="$chatgpt_executable" '
@@ -102,12 +104,12 @@ if print -r -- "$process_list" | /usr/bin/awk -v uid="$current_uid" -v executabl
     fi
     /bin/sleep 0.25
   done
-  /usr/bin/osascript -e 'display dialog "gptpro Runner 프로세스가 실행 중이지만 준비되지 않았습니다. 해당 Runner 창을 닫은 뒤 다시 시도하세요." buttons {"OK"} default button "OK" with title "gptpro Runner"' >/dev/null
+  /usr/bin/osascript -e 'display dialog "gptpro Runner 프로세스가 실행 중이지만 준비되지 않았습니다. 해당 Runner 창을 닫은 뒤 다시 시도하세요." buttons {"OK"} default button "OK" with title "gptpro Launcher"' >/dev/null
   exit 2
 fi
 
 if /usr/bin/curl --fail --silent --max-time 1 "$runner_endpoint/json" >/dev/null 2>&1; then
-  /usr/bin/osascript -e 'display dialog "다른 프로그램이 gptpro Runner 포트를 사용 중입니다. 해당 프로그램을 종료한 뒤 다시 시도하세요." buttons {"OK"} default button "OK" with title "gptpro Runner"' >/dev/null
+  /usr/bin/osascript -e 'display dialog "다른 프로그램이 gptpro Runner 포트를 사용 중입니다. 해당 프로그램을 종료한 뒤 다시 시도하세요." buttons {"OK"} default button "OK" with title "gptpro Launcher"' >/dev/null
   exit 2
 fi
 
@@ -119,23 +121,29 @@ exec /usr/bin/open -na "$chatgpt" --args \
     return script.replace("__RUNNER_PORT__", str(RUNNER_PORT)).encode("utf-8")
 
 
+def _launcher_icon() -> bytes:
+    return (Path(__file__).resolve().parents[2] / "assets" / LAUNCHER_ICON).read_bytes()
+
+
 def _launcher_plist() -> bytes:
     script_hash = sha256_bytes(_launcher_script())
     return plistlib.dumps(
         {
             "CFBundleDevelopmentRegion": "en",
-            "CFBundleDisplayName": "gptpro Runner",
+            "CFBundleDisplayName": LAUNCHER_DISPLAY_NAME,
             "CFBundleExecutable": LAUNCHER_EXECUTABLE,
             "CFBundleIdentifier": LAUNCHER_BUNDLE_ID,
             "CFBundleInfoDictionaryVersion": "6.0",
-            "CFBundleName": "gptpro Runner",
+            "CFBundleName": LAUNCHER_DISPLAY_NAME,
+            "CFBundleIconFile": LAUNCHER_ICON,
             "CFBundlePackageType": "APPL",
             "CFBundleShortVersionString": LAUNCHER_VERSION,
-            "CFBundleVersion": "1",
+            "CFBundleVersion": "2",
             "LSMinimumSystemVersion": "13.0",
             "LSUIElement": True,
             "GPTProLauncherManaged": True,
             "GPTProLauncherScriptSHA256": script_hash,
+            "GPTProLauncherIconSHA256": sha256_bytes(_launcher_icon()),
             "GPTProRunnerIsolatedProfile": True,
             "GPTProRunnerPort": RUNNER_PORT,
         },
@@ -165,6 +173,24 @@ def _launcher_managed(path: Path) -> bool:
     except (OSError, plistlib.InvalidFileException):
         return False
     recorded_script_hash = value.get("GPTProLauncherScriptSHA256")
+    recorded_icon_hash = value.get("GPTProLauncherIconSHA256")
+    if recorded_icon_hash is not None:
+        resources = path / "Contents" / "Resources"
+        icon = resources / LAUNCHER_ICON
+        try:
+            icon_stat = icon.lstat()
+            if (
+                resources.is_symlink()
+                or not resources.is_dir()
+                or value.get("CFBundleIconFile") != LAUNCHER_ICON
+                or not stat.S_ISREG(icon_stat.st_mode)
+                or icon_stat.st_uid != os.getuid()
+                or icon_stat.st_nlink != 1
+                or sha256_file(icon) != recorded_icon_hash
+            ):
+                return False
+        except OSError:
+            return False
     script_hash_matches = recorded_script_hash == script_hash or (
         recorded_script_hash is None
         and value.get("CFBundleShortVersionString") == "0.5.0"
@@ -194,6 +220,7 @@ def _launcher_current(path: Path) -> bool:
             info.read_bytes() == _launcher_plist()
             and executable.read_bytes() == _launcher_script()
             and executable.stat().st_mode & 0o777 == 0o755
+            and (path / "Contents" / "Resources" / LAUNCHER_ICON).read_bytes() == _launcher_icon()
         )
     except OSError:
         return False
@@ -330,6 +357,10 @@ def launcher_status(
         "installed": exists,
         "managed_by_gptpro": managed,
         "current": _launcher_current(destination) if managed else False,
+        "launcher_expected_display_name": LAUNCHER_DISPLAY_NAME,
+        "launcher_expected_icon": LAUNCHER_ICON,
+        "runner_native_identity_customized": False,
+        "runner_identity_note": "Runner shares the original ChatGPT app's Dock, app switcher, menu and window identity. Launcher branding does not change it.",
         "chatgpt_running": True if process_state == "running" else False if process_state == "not_running" else None,
         "chatgpt_process_state": process_state,
         "chatgpt_mode": mode,
@@ -376,13 +407,18 @@ def launcher_install(
             os.chmod(staged / "Contents", 0o755)
             info = staged / "Contents" / "Info.plist"
             executable = executable_dir / LAUNCHER_EXECUTABLE
+            resources = staged / "Contents" / "Resources"
+            resources.mkdir(mode=0o755)
+            icon = resources / LAUNCHER_ICON
+            icon.write_bytes(_launcher_icon())
+            os.chmod(icon, 0o644)
             info.write_bytes(_launcher_plist())
             executable.write_bytes(_launcher_script())
             os.chmod(info, 0o644)
             os.chmod(executable, 0o755)
             if not _launcher_current(staged):
                 raise ControllerError("GPTPRO_LAUNCHER_INSTALL_FAILED", "The staged launcher failed its integrity check.")
-            for durable_path in (info, executable, executable_dir, staged / "Contents", staged, temporary_root):
+            for durable_path in (info, executable, icon, resources, executable_dir, staged / "Contents", staged, temporary_root):
                 _fsync(durable_path)
 
             replaced = destination.exists() or destination.is_symlink()

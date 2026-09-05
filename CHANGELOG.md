@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+- Launcher의 파일명·plist 표시명·오류 대화상자 제목을 `gptpro Launcher`로 통일하고, 원본 ChatGPT 테마에 주황색 실행 배지를 더한 PNG·macOS `.icns`와 재생성 스크립트를 추가했습니다. 설치·상태 확인에 아이콘 무결성 검사를 포함하며 기존 Launcher의 atomic 갱신·Trash 복구를 유지합니다. 실행된 Runner의 Dock·Cmd-Tab·메뉴·기본 창은 원본 ChatGPT 표시를 유지한다는 제한을 상태 출력과 문서에 명시했습니다.
+
+- `gptpro/README.md`와 Plugin Skill 미러를 한국어 기능 안내로 재구성했습니다. Runner와 Launcher, 파일 선택과 불변 패키지, 두 승인 방식, 모델 검증, 단일 전송, signed 수집, 조건부 대화 분기 검증, GET 복구, 자동 import, receipt와 독립 평가의 이름·정의·한계를 구분하고, 설치·사용 흐름과 기존 자동 테스트·설치·실제 상담 증거를 정리했습니다. 배포에서 제외되던 standalone의 과거 ` 2` 문서·테스트 복사본 3개를 제거해 두 Skill 폴더 전체를 일치시켰습니다.
+
 - Reject mixed valid/malformed SSE data batches instead of silently dropping invalid JSON. The bridge reports a sanitized stream failure without an uncaught binding-handler exception. Documented the observed topic-based handoff identity contract and bounded recent-20 recovery limit; removed an unsupported claim about how often branch-proof GET is needed.
 - Verified a second signed-stream consultation with 261,496 outbound bytes and a 24,117-byte Korean review response. Automatic capture/import and a separate GET-only exact body/identity comparison passed. After the SSE/installer review fixes, new approved consultations also passed normal signed capture and controlled collector interruption followed by GET-only recovery; each package retained exactly one dispatch and reached independently accepted evaluation.
 - Updated the local Skill and Launcher, then verified an independent installed-Skill consultation in a fresh Codex task: one dispatch, signed response capture, automatic import, zero tool routes, and accepted evaluation. Source, Plugin mirror, and installed Skill matched tree SHA-256 `2d6937d7a72e7345a0f9d5d8d9046d6c9bfb02bb279d86abff1dc08fb71421ac`. Installation hard-kill recovery and signed WebSocket reconnect remain separate limitations.

@@ -21,7 +21,7 @@ On 2026-09-05, approved Schema-6 canary `20260904T163747Z-ask-ffe9bcc6` complete
 
 ## Isolated Runner
 
-`launcher-install` creates `~/Applications/gptpro Launcher.app` from deterministic standard-library assets. The launcher contains only an `Info.plist` and a small zsh executable. It starts a second process from the installed, signed `/Applications/ChatGPT.app` with `--user-data-dir=~/Library/Application Support/gptpro/runner/v1/profile`, `--remote-debugging-address=127.0.0.1`, and `--remote-debugging-port=9223`. The ordinary ChatGPT process and profile are not inspected, stopped, or relaunched.
+`launcher-install` creates `~/Applications/gptpro Launcher.app` with the display name `gptpro Launcher`. The launcher contains an `Info.plist`, a small zsh executable, and a hash-checked `.icns` resource. It starts a second process from the installed, signed `/Applications/ChatGPT.app` with `--user-data-dir=~/Library/Application Support/gptpro/runner/v1/profile`, `--remote-debugging-address=127.0.0.1`, and `--remote-debugging-port=9223`. The ordinary ChatGPT process is not stopped or relaunched, and its profile contents are not read. The Launcher icon does not change the running ChatGPT process's Dock, app switcher, menu, or window identity; see [app identity and resource regeneration](app-identity.md).
 
 The separate profile is owner-only and may require one attended login if the Desktop app does not reuse the account's system credential state. The runtime never copies credentials from the ordinary profile. `desktop-doctor` requires the exact profile and port arguments on the listening current-user ChatGPT process, then verifies the target, bridge, environment, and DeviceCheck. An unrelated listener on port 9223 is rejected.
 

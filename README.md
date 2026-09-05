@@ -48,6 +48,8 @@ Swift Intelligence 설치 후 Codex를 다시 시작하고 새 작업을 여십�
 
 ## 첫 사용
 
+기능 이름과 정의, 전송·수집·복구·평가의 차이는 [gptpro Skill 안내](gptpro/README.md)를 참고하세요.
+
 ```text
 $gptpro review 모드로 src와 tests의 현재 변경을 ChatGPT Pro와 함께 검토해주세요.
 ```
