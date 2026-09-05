@@ -1,0 +1,24 @@
+{
+  "name": "astra-orchestrator",
+  "version": "0.1.0",
+  "description": "GPT-6 Astra 리더·워커·Git Steward·독립 리뷰어의 역할별 추론과 병렬 작업을 조정하는 Codex 스킬",
+  "author": {
+    "name": "oozoofrog",
+    "url": "https://github.com/oozoofrog"
+  },
+  "homepage": "https://github.com/oozoofrog/codex-skills/tree/main/plugins/astra-orchestrator",
+  "repository": "https://github.com/oozoofrog/codex-skills",
+  "keywords": ["codex", "astra", "orchestration", "git-steward"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Astra Orchestrator",
+    "shortDescription": "Astra 리더·워커·Git Steward·독립 검토 역할 조정",
+    "longDescription": "역할별 추론 자동 선택, 리더·워커 분업, Git Steward를 통한 병렬 결과 통합을 요청하거나 스킬을 직접 호출할 때 사용합니다. 단순 모델 추천, 스킬 작성·수정 자체, 일반 단일 작업에는 자동 적용하지 않습니다. 모델과 추론 수준을 지정할 수 있는 Codex 서브에이전트 도구가 필요하며, 실행 중인 리더의 모델·설정이나 사용자 권한을 스킬이 변경하지 않습니다.",
+    "developerName": "oozoofrog",
+    "category": "Productivity",
+    "capabilities": ["Interactive"],
+    "defaultPrompt": [
+      "$astra-orchestrator:astra-orchestrator로 현재 목표를 리더·워커·Git Steward·독립 리뷰어로 나누어 완료해 주세요."
+    ]
+  }
+}
