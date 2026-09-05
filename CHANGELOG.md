@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+- Git 삭제 컨텍스트와 현재 파일 선택을 분리했습니다. `git rm --cached` 후 남은 파일은 `--allow-untracked`일 때만 `tracked: false`로 포함하고, 같은 경로의 HEAD 삭제 diff와 함께 검증·승인할 수 있습니다. 파일↔디렉터리 교체도 지원하며, 정확히 선택한 경로의 diff가 비선택 하위 파일로 확장되지 않도록 제한합니다. 파일 한도와 지속 승인의 경로 목록은 현재 파일·삭제 경로의 합집합을 사용합니다.
+
 - 삭제 diff를 강제 텍스트로 생성해 `.gitattributes`의 `-diff` 또는 NUL 바이트가 삭제 내용을 Git binary patch로 인코딩하여 비밀 탐지·UTF-8 검증을 우회하던 문제를 수정했습니다. staged/unstaged 비밀·잘못된 UTF-8 삭제 차단과 안전한 literal 경로 삭제의 원문 표시·지속 승인을 회귀 테스트로 확인했습니다. 기존에 생성된 Git binary patch 포함 패키지도 검증·승인에서 `DIFF_BINARY_ENCODED`로 차단하여 재준비를 요구하며, 정상 text-only Schema-6와 일반 문서·텍스트 diff의 같은 문구는 계속 허용합니다.
 
 - PR #42 후속 수정: 선택 파일명을 Git literal pathspec으로 전달하고, 저장소 descriptor부터 각 상위 디렉터리와 마지막 파일을 symlink를 따라가지 않고 엽니다. HEAD 대비 삭제 파일은 stage 여부와 관계없이 같은 선택·제외·비밀정보 정책을 적용하며, 삭제 patch와 `diff.deleted_paths`를 inline header·manifest·지속 승인에 결속합니다. Git binary patch가 없는 기존 Schema-6 패키지는 계속 검증할 수 있습니다.

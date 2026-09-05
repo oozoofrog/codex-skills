@@ -19,3 +19,4 @@
 - Check user-visible additions against `CHANGELOG.md`.
 - For package scope changes, cover literal Git filenames, ancestor symlinks, and staged/unstaged deletions through outbound verification and standing approval; checking `manifest.files` alone does not prove disclosure scope. Cover `.gitattributes -diff` and NUL-triggered binary diff encoding, including secret/UTF-8 checks and verification/approval regressions for previously generated packages.
 - If a rule was missing and caused rework, update the relevant context document instead of fixing code only.
+- Keep current tracked/untracked files separate from HEAD deletion context. Cover `git rm --cached` with retained files, file/directory replacements, exact-path diff scope without descendant expansion, and same-path manifest/standing-approval handling.

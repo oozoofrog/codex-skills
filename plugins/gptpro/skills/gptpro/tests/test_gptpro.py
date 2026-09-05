@@ -351,6 +351,110 @@ class PackageCase(unittest.TestCase):
             package.verify_package(handoff)
         self.assertEqual("PACKAGE_TAMPERED", tampered.exception.code)
 
+    def test_cached_removal_keeps_current_untracked_content_separate(self) -> None:
+        file_list = self.root / "selected.txt"
+        file_list.write_text("src/main.py\n")
+        git(self.repo, "rm", "--cached", "src/main.py")
+        (self.repo / "src/main.py").write_text("CURRENT_UNTRACKED_CONTENT\n")
+        for allow_untracked in (False, True):
+            for directed_list in (False, True):
+                with self.subTest(allow_untracked=allow_untracked, file_list=directed_list):
+                    prepared = self.prepare(
+                        includes=[] if directed_list else ["src/**"],
+                        file_list=file_list if directed_list else None,
+                        allow_untracked=allow_untracked,
+                    )
+                    handoff = Path(prepared["handoff_dir"])
+                    manifest = package.verify_package(handoff)["manifest"]
+                    self.assertEqual(["src/main.py"], manifest["diff"]["deleted_paths"])
+                    self.assertEqual(int(allow_untracked), prepared["files"])
+                    self.assertEqual(1, prepared["deleted_files"])
+                    if allow_untracked:
+                        self.assertEqual("src/main.py", manifest["files"][0]["path"])
+                        self.assertFalse(manifest["files"][0]["tracked"])
+                    else:
+                        self.assertEqual([], manifest["files"])
+                    outbound = (handoff / "outbound.md").read_text()
+                    self.assertIn("-print('hello')", outbound)
+                    self.assertEqual(allow_untracked, "CURRENT_UNTRACKED_CONTENT" in outbound)
+
+    def test_same_path_current_file_and_deletion_obey_approval_and_unique_limit(self) -> None:
+        file_list = self.root / "selected.txt"
+        file_list.write_text("src/main.py\n")
+        first = Path(self.prepare(includes=[], file_list=file_list)["handoff_dir"])
+        tracked_approval = approvals.create_standing(
+            first, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state,
+        )
+        git(self.repo, "rm", "--cached", "src/main.py")
+        with mock.patch.object(package, "MAX_FILES", 1):
+            handoff = Path(self.prepare(includes=[], file_list=file_list, allow_untracked=True)["handoff_dir"])
+            package.verify_package(handoff)
+        with self.assertRaises(ApprovalError) as raised:
+            approvals.apply_standing(handoff, approval_id=tracked_approval["approval_id"], root=self.state)
+        self.assertEqual("APPROVAL_REQUIRED", raised.exception.code)
+        new_state = self.root / "untracked-approval"
+        created = approvals.create_standing(
+            handoff, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=new_state,
+        )
+        self.assertEqual(["src/main.py"], created["scope"]["path_rules"]["exact_paths"])
+        self.assertFalse(created["scope"]["tracked_only"])
+        with mock.patch.object(approvals, "state_root", return_value=new_state):
+            approvals.apply_standing(handoff, approval_id=created["approval_id"])
+            approvals.verify_active_approval(handoff)
+
+    def test_file_to_directory_selects_only_requested_current_and_deleted_paths(self) -> None:
+        source = self.repo / "src/main.py"
+        source.unlink()
+        source.mkdir()
+        (source / "intro.txt").write_text("SELECTED_CHILD_CONTENT\n")
+        (source / "hidden.txt").write_text("EXCLUDED_CHILD_CONTENT\n")
+        file_list = self.root / "selected.txt"
+        file_list.write_text("src/main.py\n")
+        for staged in (False, True):
+            if staged:
+                git(self.repo, "add", "src")
+            for allow_untracked in (False, True):
+                for directed_list in (False, True):
+                    with self.subTest(staged=staged, allow_untracked=allow_untracked, file_list=directed_list):
+                        handoff = Path(self.prepare(
+                            includes=[] if directed_list else ["src/**"],
+                            file_list=file_list if directed_list else None,
+                            excludes=["src/main.py/hidden.txt"], allow_untracked=allow_untracked,
+                        )["handoff_dir"])
+                        manifest = package.verify_package(handoff)["manifest"]
+                        self.assertEqual(["src/main.py"], manifest["diff"]["deleted_paths"])
+                        child_selected = not directed_list and (staged or allow_untracked)
+                        self.assertEqual(
+                            ["src/main.py/intro.txt"] if child_selected else [],
+                            [entry["path"] for entry in manifest["files"]],
+                        )
+                        if child_selected:
+                            self.assertEqual(staged, manifest["files"][0]["tracked"])
+                        outbound = (handoff / "outbound.md").read_text()
+                        self.assertIn("-print('hello')", outbound)
+                        self.assertEqual(child_selected, "SELECTED_CHILD_CONTENT" in outbound)
+                        self.assertNotIn("EXCLUDED_CHILD_CONTENT", outbound)
+            child_only = Path(self.prepare(includes=["src/main.py/intro.txt"], allow_untracked=True)["handoff_dir"])
+            self.assertNotIn("print('hello')", (child_only / "outbound.md").read_text())
+            self.assertNotIn("deleted_paths", package.verify_package(child_only)["manifest"]["diff"])
+
+    def test_directory_to_file_does_not_expand_exact_path_scope(self) -> None:
+        (self.repo / "src/main.py").unlink()
+        (self.repo / "src").rmdir()
+        (self.repo / "src").write_text("CURRENT_PARENT_FILE\n")
+        git(self.repo, "add", "-A")
+        for paths in (["src"], ["src/main.py"], ["src", "src/main.py"]):
+            with self.subTest(paths=paths):
+                file_list = self.root / "selected.txt"
+                file_list.write_text("\n".join(paths) + "\n")
+                handoff = Path(self.prepare(includes=[], file_list=file_list)["handoff_dir"])
+                manifest = package.verify_package(handoff)["manifest"]
+                self.assertEqual(["src"] if "src" in paths else [], [item["path"] for item in manifest["files"]])
+                self.assertEqual(["src/main.py"] if "src/main.py" in paths else [], manifest["diff"].get("deleted_paths", []))
+                outbound = (handoff / "outbound.md").read_text()
+                self.assertEqual("src" in paths, "CURRENT_PARENT_FILE" in outbound)
+                self.assertEqual("src/main.py" in paths, "-print('hello')" in outbound)
+
     def test_deleted_secret_paths_and_diff_content_are_rejected(self) -> None:
         (self.repo / "src/main.py").write_text("api_key='abcdefghijklmnopqrstuv'\n")
         (self.repo / ".env").write_text("SAFE=placeholder\n")

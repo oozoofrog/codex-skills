@@ -81,10 +81,10 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _git(repo: Path, *arguments: str, binary: bool = False) -> bytes | str:
+def _git(repo: Path, *arguments: str, binary: bool = False, literal_pathspecs: bool = True) -> bytes | str:
     try:
         result = subprocess.run(
-            ["git", "--literal-pathspecs", "-C", str(repo), *arguments],
+            ["git", "--literal-pathspecs" if literal_pathspecs else "--no-literal-pathspecs", "-C", str(repo), *arguments],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
@@ -153,14 +153,18 @@ def select_paths(
     excludes: list[str],
     allow_untracked: bool,
     head: str = "HEAD",
-) -> list[tuple[str, bool]]:
+) -> tuple[list[tuple[str, bool]], list[str]]:
     if bool(includes) == bool(file_list):
         raise PackageError("SELECTION_REQUIRED", "Use one or more --include patterns or one --file-list.")
     tracked = set(_split_nul(_git(repo, "ls-files", "-z", binary=True)))
-    # HEAD paths remain selectable after a deletion is staged out of the index.
-    tracked.update(_split_nul(_git(repo, "ls-tree", "-r", "--name-only", "-z", head, binary=True)))
+    deleted = set(_split_nul(_git(
+        repo, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "--diff-filter=D", "-z", head, binary=True,
+    )))
+    # Index membership, readable current files, and HEAD deletion context differ:
+    # `git rm --cached` can leave an untracked file at the very same path.
+    tracked -= deleted
     untracked = set(_split_nul(_git(repo, "ls-files", "--others", "--exclude-standard", "-z", binary=True))) if allow_untracked else set()
-    available = tracked | untracked
+    available = tracked | untracked | deleted
     if file_list:
         try:
             requested = [line.strip() for line in file_list.read_text(encoding="utf-8").splitlines() if line.strip() and not line.lstrip().startswith("#")]
@@ -181,7 +185,50 @@ def select_paths(
         raise PackageError("SELECTION_EMPTY", "All selected paths were excluded.")
     if len(selected) > MAX_FILES:
         raise PackageError("FILE_LIMIT_EXCEEDED", "The selected file count exceeds the hard limit.")
-    return [(path, path in tracked) for path in sorted(selected)]
+    return (
+        [(path, path in tracked) for path in sorted(selected & (tracked | untracked))],
+        sorted(selected & deleted),
+    )
+
+
+def _selected_diff(repo: Path, head: str, paths: set[str]) -> bytes:
+    chunks: list[bytes] = []
+    remaining = set(paths)
+    while remaining:
+        # Even literal Git pathspecs recurse into directories. Exclude children
+        # and process explicitly selected descendants in a separate batch.
+        batch = sorted(path for path in remaining if not any(
+            parent.as_posix() in remaining for parent in PurePosixPath(path).parents
+        ))
+        pathspecs = [f":(top,literal){path}" for path in batch]
+        pathspecs.extend(f":(top,exclude,literal){path}/" for path in batch)
+        chunks.append(_git(
+            repo, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--text", head,
+            "--", *pathspecs, binary=True, literal_pathspecs=False,
+        ))
+        remaining.difference_update(batch)
+    return b"".join(chunks)
+
+
+def _check_deleted_path(root: Path, relative: str) -> None:
+    """Check traversal without reading a replacement file or directory."""
+    try:
+        with ExitStack() as descriptors:
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            directory = os.open(root, flags)
+            descriptors.callback(os.close, directory)
+            for part in PurePosixPath(_safe_relative(relative)).parts:
+                entry = os.stat(part, dir_fd=directory, follow_symlinks=False)
+                if stat.S_ISREG(entry.st_mode):
+                    return  # A file may now replace a historical directory.
+                if not stat.S_ISDIR(entry.st_mode):
+                    raise PackageError("FILE_UNSAFE", "A deleted path contains an unsafe replacement.")
+                directory = os.open(part, flags, dir_fd=directory)
+                descriptors.callback(os.close, directory)
+    except FileNotFoundError:
+        return
+    except (OSError, AttributeError, NotImplementedError) as exc:
+        raise PackageError("FILE_UNSAFE", "A deleted path cannot be inspected without following symlinks.") from exc
 
 
 def _read_regular(root: Path, relative: str, *, maximum: int, require_owner: bool = False) -> bytes:
@@ -249,21 +296,14 @@ def _read_regular(root: Path, relative: str, *, maximum: int, require_owner: boo
     return data
 
 
-def read_selected(repo: Path, paths: list[tuple[str, bool]], *, deleted_paths: list[str]) -> list[SelectedFile]:
+def read_selected(repo: Path, paths: list[tuple[str, bool]]) -> list[SelectedFile]:
     result: list[SelectedFile] = []
     total = 0
     for relative, tracked in paths:
         reason = unsafe_path_reason(relative)
         if reason:
             raise PackageError("SECRET_PATH_REJECTED", f"A selected path was rejected by {reason} policy.")
-        try:
-            data = _read_regular(repo, relative, maximum=MAX_FILE_BYTES)
-        except PackageError as exc:
-            if relative in deleted_paths and isinstance(exc.__cause__, FileNotFoundError):
-                continue
-            raise
-        if relative in deleted_paths:
-            raise PackageError("FILE_CHANGED", "A deleted path reappeared during snapshot creation.")
+        data = _read_regular(repo, relative, maximum=MAX_FILE_BYTES)
         total += len(data)
         if total > MAX_TOTAL_BYTES:
             raise PackageError("TOTAL_LIMIT_EXCEEDED", "The selected snapshot exceeds the hard byte limit.")
@@ -526,7 +566,7 @@ def prepare_package(
         raise PackageError("MODEL_EFFORT_INVALID", "The thinking effort must be one bounded single line.")
     repo = resolve_repo(repo_value)
     head = str(_git(repo, "rev-parse", "HEAD"))
-    paths = select_paths(
+    paths, deleted_paths = select_paths(
         repo,
         includes=includes,
         file_list=file_list,
@@ -534,11 +574,12 @@ def prepare_package(
         allow_untracked=allow_untracked,
         head=head,
     )
-    pathspec = [path for path, _tracked in paths]
-    deleted_paths = sorted(_split_nul(_git(
-        repo, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "--diff-filter=D", "-z", head, "--", *pathspec, binary=True,
-    )))
-    selected = read_selected(repo, paths, deleted_paths=deleted_paths)
+    for path in deleted_paths:
+        reason = unsafe_path_reason(path)
+        if reason:
+            raise PackageError("SECRET_PATH_REJECTED", f"A selected path was rejected by {reason} policy.")
+        _check_deleted_path(repo, path)
+    selected = read_selected(repo, paths)
     supplemental = sorted(
         read_supplements(supplements),
         key=lambda value: (value["label"], value["artifact_id"]),
@@ -547,7 +588,7 @@ def prepare_package(
     dirty_output = str(_git(repo, "status", "--porcelain=v1", "--untracked-files=normal"))
     dirty = bool(dirty_output)
     # Keep deleted content visible to strict UTF-8 validation and secret scanning.
-    diff = _git(repo, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--text", head, "--", *pathspec, binary=True)
+    diff = _selected_diff(repo, head, {path for path, _tracked in paths} | set(deleted_paths))
     assert isinstance(diff, bytes)
     if len(diff) > MAX_DIFF_BYTES:
         raise PackageError("DIFF_LIMIT_EXCEEDED", "The selected Git diff exceeds the hard byte limit.")
@@ -766,8 +807,8 @@ def _verify_inline_context(manifest: dict[str, Any], prompt: bytes, outbound: by
         not isinstance(deleted_paths, list)
         or not all(isinstance(path, str) for path in deleted_paths)
         or deleted_paths != sorted(set(deleted_paths))
-        or len(files) + len(deleted_paths) > MAX_FILES
-        or set(deleted_paths).intersection(entry["path"] for entry in files)
+        or len({entry["path"] for entry in files} | set(deleted_paths)) > MAX_FILES
+        or any(entry["tracked"] and entry["path"] in deleted_paths for entry in files)
     ):
         raise PackageError("PACKAGE_TAMPERED", "The deleted path manifest is invalid.")
     for path in deleted_paths:
