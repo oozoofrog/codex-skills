@@ -26,6 +26,7 @@ from runtime.gptpro_runtime.schema import (  # noqa: E402
     DELIVERY_CHANNEL,
     INLINE_FORMAT,
     MAX_OUTBOUND_BYTES,
+    RUNTIME_VERSION,
 )
 from runtime.gptpro_runtime.state import read_json, sha256_bytes, sha256_file, write_json  # noqa: E402
 
@@ -84,6 +85,7 @@ class PackageCase(unittest.TestCase):
         verified = package.verify_package(handoff)
         manifest = verified["manifest"]
         self.assertEqual(6, manifest["schema_version"])
+        self.assertEqual(RUNTIME_VERSION, manifest["runtime_version"])
         self.assertEqual(CONTEXT_TRANSPORT, manifest["context_transport"])
         self.assertEqual("desktop-electron", manifest["delivery"]["channel"])
         self.assertEqual(CHAT_HISTORY_MODE, manifest["delivery"]["chat_history_mode"])
@@ -534,7 +536,7 @@ class PackageCase(unittest.TestCase):
                     approvals.apply_standing(handoff, approval_id=approval["approval_id"])
                     approvals.verify_active_approval(handoff)
 
-    def test_legacy_binary_diff_is_rejected_by_verification_and_approval(self) -> None:
+    def test_encoded_binary_diff_is_rejected_by_verification_and_approval(self) -> None:
         first = Path(self.prepare(includes=["src/main.py"])["handoff_dir"])
         approval = approvals.create_standing(
             first, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state,
@@ -549,7 +551,7 @@ class PackageCase(unittest.TestCase):
         def legacy_git(repo, *arguments, **options):
             return real_git(repo, *("--binary" if arg == "--text" else arg for arg in arguments), **options)
 
-        # Reproduce the old generator with real Git binary-patch bytes and valid package hashes.
+        # The content check also rejects encoded diffs in a current-version package.
         with mock.patch.object(package, "_git", side_effect=legacy_git):
             handoff = Path(self.prepare(includes=["src/main.py"])["handoff_dir"])
         outbound = (handoff / "outbound.md").read_bytes()
@@ -665,6 +667,52 @@ class PackageCase(unittest.TestCase):
         with self.assertRaises(PackageError) as raised:
             approvals.approve_exact(handoff, confirm_transmission=True, confirm_disclosure=True)
         self.assertEqual("SCHEMA_VERSION_UNSUPPORTED", raised.exception.code)
+
+    def test_missing_or_different_runtime_version_rejected_before_package_use(self) -> None:
+        first = Path(self.prepare()["handoff_dir"])
+        approval = approvals.create_standing(
+            first, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state,
+        )
+        for version in (None, "0.6.0", "99.0.0"):
+            with self.subTest(version=version):
+                handoff = Path(self.prepare()["handoff_dir"])
+                manifest = read_json(handoff / "manifest.json")
+                if version is None:
+                    del manifest["runtime_version"]
+                else:
+                    manifest["runtime_version"] = version
+                write_json(handoff / "manifest.json", manifest)
+                before = {path.name: path.read_bytes() for path in handoff.iterdir() if path.is_file()}
+                operations = (
+                    lambda: package.verify_package(handoff),
+                    lambda: approvals.approve_exact(handoff, confirm_transmission=True, confirm_disclosure=True),
+                    lambda: approvals.create_standing(handoff, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state),
+                    lambda: approvals.apply_standing(handoff, approval_id=approval["approval_id"], root=self.state),
+                    lambda: approvals.verify_active_approval(handoff),
+                    lambda: controller.run_consultation(SKILL_ROOT, handoff),
+                    lambda: controller.collect_response(SKILL_ROOT, handoff),
+                )
+                for operation in operations:
+                    with self.assertRaises(PackageError) as raised:
+                        operation()
+                    self.assertEqual("PACKAGE_VERSION_UNSUPPORTED", raised.exception.code)
+                self.assertEqual(before, {path.name: path.read_bytes() for path in handoff.iterdir() if path.is_file()})
+
+    def test_runtime_update_invalidates_previously_approved_package(self) -> None:
+        handoff = Path(self.prepare()["handoff_dir"])
+        approvals.approve_exact(handoff, confirm_transmission=True, confirm_disclosure=True)
+        approvals.verify_active_approval(handoff)
+        with mock.patch.object(package, "RUNTIME_VERSION", "99.0.0"):
+            for operation in (
+                lambda: approvals.verify_active_approval(handoff),
+                lambda: controller.run_consultation(SKILL_ROOT, handoff),
+            ):
+                with self.assertRaises(PackageError) as raised:
+                    operation()
+                self.assertEqual("PACKAGE_VERSION_UNSUPPORTED", raised.exception.code)
+            fresh = Path(self.prepare()["handoff_dir"])
+            approvals.approve_exact(fresh, confirm_transmission=True, confirm_disclosure=True)
+            approvals.verify_active_approval(fresh)
 
     def test_exact_approval_rejects_bound_outbound_byte_tampering(self) -> None:
         handoff = Path(self.prepare()["handoff_dir"])

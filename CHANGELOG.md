@@ -4,11 +4,13 @@
 
 ## [Unreleased]
 
+- gptpro `0.6.1`부터 버전 간 패키지 호환·마이그레이션을 지원하지 않습니다. manifest의 `runtime_version`이 현재 runtime과 정확히 일치해야 하며, 누락·불일치는 검증·승인·상담·응답 복구 전에 `PACKAGE_VERSION_UNSUPPORTED`로 거부합니다. 이전에 승인한 패키지도 업데이트 후 재사용할 수 없습니다. 기존 파일은 변환·삭제하지 않고, 새 상담은 새 패키지로 준비합니다.
+
 - Git 삭제 컨텍스트와 현재 파일 선택을 분리했습니다. `git rm --cached` 후 남은 파일은 `--allow-untracked`일 때만 `tracked: false`로 포함하고, 같은 경로의 HEAD 삭제 diff와 함께 검증·승인할 수 있습니다. 파일↔디렉터리 교체도 지원하며, 정확히 선택한 경로의 diff가 비선택 하위 파일로 확장되지 않도록 제한합니다. 파일 한도와 지속 승인의 경로 목록은 현재 파일·삭제 경로의 합집합을 사용합니다.
 
-- 삭제 diff를 강제 텍스트로 생성해 `.gitattributes`의 `-diff` 또는 NUL 바이트가 삭제 내용을 Git binary patch로 인코딩하여 비밀 탐지·UTF-8 검증을 우회하던 문제를 수정했습니다. staged/unstaged 비밀·잘못된 UTF-8 삭제 차단과 안전한 literal 경로 삭제의 원문 표시·지속 승인을 회귀 테스트로 확인했습니다. 기존에 생성된 Git binary patch 포함 패키지도 검증·승인에서 `DIFF_BINARY_ENCODED`로 차단하여 재준비를 요구하며, 정상 text-only Schema-6와 일반 문서·텍스트 diff의 같은 문구는 계속 허용합니다.
+- 삭제 diff를 강제 텍스트로 생성해 `.gitattributes`의 `-diff` 또는 NUL 바이트가 삭제 내용을 Git binary patch로 인코딩하여 비밀 탐지·UTF-8 검증을 우회하던 문제를 수정했습니다. staged/unstaged 비밀·잘못된 UTF-8 삭제 차단과 안전한 literal 경로 삭제의 원문 표시·지속 승인을 회귀 테스트로 확인했습니다. 현재 버전 패키지에서도 Git binary patch는 검증·승인에서 `DIFF_BINARY_ENCODED`로 차단합니다. 일반 문서·텍스트 diff의 같은 문구는 계속 허용하며, 구버전 패키지는 별도 버전 검사에서 거부합니다.
 
-- PR #42 후속 수정: 선택 파일명을 Git literal pathspec으로 전달하고, 저장소 descriptor부터 각 상위 디렉터리와 마지막 파일을 symlink를 따라가지 않고 엽니다. HEAD 대비 삭제 파일은 stage 여부와 관계없이 같은 선택·제외·비밀정보 정책을 적용하며, 삭제 patch와 `diff.deleted_paths`를 inline header·manifest·지속 승인에 결속합니다. Git binary patch가 없는 기존 Schema-6 패키지는 계속 검증할 수 있습니다.
+- PR #42 후속 수정: 선택 파일명을 Git literal pathspec으로 전달하고, 저장소 descriptor부터 각 상위 디렉터리와 마지막 파일을 symlink를 따라가지 않고 엽니다. HEAD 대비 삭제 파일은 stage 여부와 관계없이 같은 선택·제외·비밀정보 정책을 적용하며, 삭제 patch와 `diff.deleted_paths`를 inline header·manifest·지속 승인에 결속합니다. 검증은 현재 runtime 버전에서 준비한 패키지에만 적용합니다.
 - GET-only `collect-response`가 목록의 `update_time`이 같아도 불일치 detail을 다시 조회하도록 수정했습니다. 정확한 메시지 ID·본문 대조와 최근 20개 제한을 유지합니다. 네 결함의 회귀 테스트를 추가하고 배포·실행 경로에서 제외된 ` 2.` 복사본 86개를 제거했습니다.
 
 - Launcher의 파일명·plist 표시명·오류 대화상자 제목을 `gptpro Launcher`로 통일하고, 원본 ChatGPT 테마에 주황색 실행 배지를 더한 PNG·macOS `.icns`와 재생성 스크립트를 추가했습니다. 설치·상태 확인에 아이콘 무결성 검사를 포함하며 기존 Launcher의 atomic 갱신·Trash 복구를 유지합니다. 실행된 Runner의 Dock·Cmd-Tab·메뉴·기본 창은 원본 ChatGPT 표시를 유지한다는 제한을 상태 출력과 문서에 명시했습니다.
@@ -48,13 +50,13 @@
 - Owner-only runtime state moves to `~/Library/Application Support/gptpro/desktop/v5/`. Each consultation binds disclosure and delivery separately as `context_transport=inline-immutable-snapshot` and `delivery_channel=desktop-electron`.
 - Model selection uses an exact ID from the live logged-in catalog and fails on missing or ambiguous intent. The default is `gpt-5-6-pro`; no static entitlement fallback or silent model downgrade exists.
 - Repository context is sent directly as one verified `outbound.md` user message in normal Chat. Context over 256 KiB is reduced by selecting fewer files, never by automatic summary, split, truncation, or omission. Follow-up questions use a new package.
-- Installation is a single-package atomic `gptpro` update. It retires an installed legacy companion only after terminal authorization, non-live controller, and exact-child stop evidence are verified; historical packages remain offline-auditable.
+- Installation is a single-package atomic `gptpro` update. It retires an installed legacy companion only after terminal authorization, non-live controller, and exact-child stop evidence are verified; historical package files remain untouched and are unsupported by the current runtime.
 
 ### Removed
 
 - Browser, Chrome, Computer Use, manual Send/Copy, custom ChatGPT App, Developer Mode, Secure MCP Tunnel, and `gptpro-mcp` from the active consultation and distribution path.
 - Ungoverned direct Node submission, arbitrary Node `--output`, local-function signatures, repository tool-loop/audit, tool-result stdin continuation, conversation continuation, server-tool fallback, and the v0.4 local-tool capability gate. Internal `ask` now requires the parent approval handshake. Any explicit non-`all` assistant route fails immediately; a tool-author node fails when exact current-branch proof places it on the accepted branch, always without resend.
-- New Schema 3/4/5 consultations, active legacy-schema verification, and standing approval v3 reuse. Historical files remain untouched but require the matching historical release for verification; they cannot authorize Schema 6 delivery.
+- New Schema 3/4/5 consultations, active legacy-schema verification, and standing approval v3 reuse. Historical files remain untouched. The current runtime does not verify or migrate them, and they cannot authorize delivery.
 - Repository writes, shell/build/test, Git mutation, arbitrary filesystem/network tools, credential extraction, remote CDP, and automatic resend after ambiguous dispatch.
 
 ## [0.2.x development history]

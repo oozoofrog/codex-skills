@@ -1,6 +1,6 @@
 {
   "name": "gptpro",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "ChatGPT Pro collaboration through an isolated loopback-only Desktop Electron Runner and one approved inline repository snapshot.",
   "author": {
     "name": "oozoofrog",

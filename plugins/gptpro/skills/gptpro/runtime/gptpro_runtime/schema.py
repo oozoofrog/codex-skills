@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+RUNTIME_VERSION = "0.6.1"
 CHAT_HISTORY_MODE = "normal"
 CONTEXT_TRANSPORT = "inline-immutable-snapshot"
 DELIVERY_CHANNEL = "desktop-electron"
@@ -16,4 +17,5 @@ __all__ = [
     "DELIVERY_CHANNEL",
     "INLINE_FORMAT",
     "MAX_OUTBOUND_BYTES",
+    "RUNTIME_VERSION",
 ]

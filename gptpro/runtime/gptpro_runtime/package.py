@@ -21,6 +21,7 @@ from .schema import (
     DELIVERY_CHANNEL,
     INLINE_FORMAT,
     MAX_OUTBOUND_BYTES,
+    RUNTIME_VERSION,
 )
 from .security import secret_detectors, unsafe_path_reason
 from .state import (
@@ -646,6 +647,7 @@ def prepare_package(
     }
     manifest = {
         "schema_version": 6,
+        "runtime_version": RUNTIME_VERSION,
         "package_id": package_id,
         "created_at": utc_now(),
         "mode": mode,
@@ -884,6 +886,7 @@ def _private_file(path: Path, *, maximum: int) -> None:
 def _verify_schema6(manifest: dict[str, Any], handoff: Path) -> dict[str, Any]:
     expected_top_level = {
         "schema_version",
+        "runtime_version",
         "package_id",
         "created_at",
         "mode",
@@ -1109,6 +1112,12 @@ def verify_package(handoff_value: Path) -> dict[str, Any]:
         raise PackageError(
             "SCHEMA_VERSION_UNSUPPORTED",
             "This runtime only verifies current Schema-6 inline packages. Historical package files remain untouched.",
-            recovery="Use the matching historical release for a separate offline audit; do not reuse old approval for a new consultation.",
+            recovery="Old packages are unsupported. Prepare a fresh package for a new consultation; do not resend an uncertain submission.",
+        )
+    if manifest.get("runtime_version") != RUNTIME_VERSION:
+        raise PackageError(
+            "PACKAGE_VERSION_UNSUPPORTED",
+            "This runtime only accepts packages prepared by the same gptpro version.",
+            recovery="Old packages are not migrated or resumed. Prepare a fresh package for a new consultation; do not resend an uncertain submission.",
         )
     return _verify_schema6(manifest, handoff)
