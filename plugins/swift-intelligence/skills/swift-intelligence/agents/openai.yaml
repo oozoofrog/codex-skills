@@ -1,0 +1,4 @@
+interface:
+  display_name: "Swift Intelligence"
+  short_description: "SourceKit 기반 Swift 의미론 탐색 및 진단"
+  default_prompt: "Use $swift-intelligence to inspect this Swift symbol semantically before editing it."

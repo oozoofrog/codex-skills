@@ -1,6 +1,6 @@
 # codex-skills
 
-이 저장소는 Codex가 로그인된 macOS ChatGPT 앱의 ChatGPT Pro를 인라인 코드 분석 파트너로 호출하는 `$gptpro`를 제공합니다. `$gptpro`는 사용자가 명시적으로 요청한 plan, ask, review, debug, architecture 작업에만 실행되며 일반 Codex 작업이나 OpenAI API 호출에서는 자동 호출되지 않습니다.
+이 저장소는 Codex가 로그인된 macOS ChatGPT 앱의 ChatGPT Pro를 인라인 코드 분석 파트너로 호출하는 `$gptpro`와 Swift 의미론 탐색용 `swift-intelligence` Plugin을 제공합니다. `$gptpro`는 사용자가 명시적으로 요청한 plan, ask, review, debug, architecture 작업에만 실행되며 일반 Codex 작업이나 OpenAI API 호출에서는 자동 호출되지 않습니다.
 
 ## v0.6 흐름
 
@@ -19,7 +19,9 @@ Codex $gptpro
   -> Codex independent verification
 ```
 
-Browser, Chrome, Computer Use, 수동 Send/Copy, custom ChatGPT App, Developer Mode, MCP, Secure MCP Tunnel, `gptpro-mcp`, local function, server-tool fallback은 사용하지 않습니다. ChatGPT Pro는 승인된 `outbound.md` 원문만 보며 live worktree, shell, 파일 쓰기, build/test, Git 변경, 임의 filesystem/network 권한은 없습니다.
+`gptpro`는 Browser, Chrome, Computer Use, 수동 Send/Copy, custom ChatGPT App, Developer Mode, MCP, Secure MCP Tunnel, `gptpro-mcp`, local function, server-tool fallback을 사용하지 않습니다. ChatGPT Pro는 승인된 `outbound.md` 원문만 보며 live worktree, shell, 파일 쓰기, build/test, Git 변경, 임의 filesystem/network 권한은 없습니다.
+
+`swift-intelligence`는 Xcode의 SourceKit-LSP로 Swift 정의, 참조, 구현, 타입, 심볼 및 진단을 읽기 전용으로 조회합니다. MCP 서버가 필요한 Plugin이므로 `plugins/swift-intelligence/`에만 제공합니다. Python 3 외의 Python 패키지나 외부 MCP 바이너리를 추가로 설치하지 않습니다.
 
 ## 설치
 
@@ -35,6 +37,15 @@ python3 scripts/manage_skills.py install gptpro --update
 
 자세한 설치는 [standalone 설치](docs/selective-installation.md)와 [Plugin 설치](docs/plugin-installation.md)를 참고하세요.
 
+Swift Intelligence는 marketplace 등록 후 Plugin으로 설치합니다.
+
+```bash
+codex plugin marketplace add oozoofrog/codex-skills --ref main
+codex plugin add swift-intelligence@codex-skills
+```
+
+Swift Intelligence 설치 후 Codex를 다시 시작하고 새 작업을 여십시오. 자세한 요구 사항과 사용법은 [Swift Intelligence 설치 및 사용](plugins/swift-intelligence/docs/installation-and-usage.md)을 참고하세요.
+
 ## 첫 사용
 
 ```text
@@ -49,6 +60,7 @@ Private Electron/ChatGPT endpoint는 공개 OpenAI API가 아니므로 앱 업�
 
 ```bash
 python3 -m unittest discover -s gptpro/tests -v
+python3 -m unittest discover -s plugins/swift-intelligence/tests -v
 python3 -m unittest discover -s scripts/tests -v
 node --test gptpro/tests/*.test.js
 python3 gptpro/scripts/validate_structure.py \

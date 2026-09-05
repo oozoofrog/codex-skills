@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "swift-intelligence": {
+      "command": "python3",
+      "args": ["./scripts/swift_intelligence_mcp.py"],
+      "cwd": ".",
+      "enabled": true,
+      "startup_timeout_sec": 30,
+      "tool_timeout_sec": 120,
+      "default_tools_approval_mode": "writes"
+    }
+  }
+}

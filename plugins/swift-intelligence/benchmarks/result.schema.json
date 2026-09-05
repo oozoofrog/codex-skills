@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "answer": {"type": "string"},
+    "evidence": {"type": "array", "items": {"type": "string"}},
+    "tools_used": {"type": "array", "items": {"type": "string"}},
+    "limitations": {"type": "string"}
+  },
+  "required": ["answer", "evidence", "tools_used", "limitations"],
+  "additionalProperties": false
+}

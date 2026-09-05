@@ -1,6 +1,6 @@
 # Changelog
 
-이 저장소의 의미 있는 `gptpro` 변경을 기록합니다.
+이 저장소의 의미 있는 패키지 변경을 기록합니다.
 
 ## [Unreleased]
 
@@ -25,6 +25,7 @@
 
 ### Added
 
+- `swift-intelligence` Plugin `0.1.0+codex.20260904035318`: Xcode의 SourceKit-LSP를 사용해 Swift 정의, 참조, 구현, hover, 심볼 및 진단을 읽기 전용 MCP 도구로 제공
 - `gptpro` 0.5.0 clean-room Electron runtime for the logged-in macOS ChatGPT app. The Node 22+ CLI provides fail-closed `probe`, dynamic `models`, and one-message `ask` over loopback CDP to exactly `app://-/index.html`.
 - Schema 6 `inline-immutable-snapshot` packages with secret/path scanning, Git identity, owner-only `prompt.md`, `system-prompt.md`, exact `outbound.md`, exact approval, standing approval v4, deterministic response wrapping, and independent Codex evaluation receipts.
 - Package-specific canonical block framing verified directly from `outbound.md`. The fixed 262,144-byte limit, boundary collision check, raw newline preservation, exact model `gpt-5-6-pro`, normal-Chat mode, and outbound/system hashes are manifest- and approval-bound.

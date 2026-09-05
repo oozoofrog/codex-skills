@@ -9,6 +9,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 STANDALONE_SKILL = REPO_ROOT / "gptpro"
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "gptpro"
 PLUGIN_SKILL = PLUGIN_ROOT / "skills" / "gptpro"
+SWIFT_PLUGIN_ROOT = REPO_ROOT / "plugins" / "swift-intelligence"
+SWIFT_PLUGIN_SKILL = SWIFT_PLUGIN_ROOT / "skills" / "swift-intelligence"
 IGNORED_NAMES = {".DS_Store", "__pycache__"}
 IGNORED_SUFFIXES = {".pyc", ".pyo"}
 
@@ -25,16 +27,31 @@ def tree_files(root: Path) -> dict[str, tuple[int, bytes]]:
 
 
 class PluginDistributionTests(unittest.TestCase):
-    def test_marketplace_exposes_one_gptpro_plugin(self) -> None:
+    def test_marketplace_points_to_available_plugins(self) -> None:
         marketplace = json.loads(
             (REPO_ROOT / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8")
         )
         self.assertEqual("codex-skills", marketplace["name"])
-        self.assertEqual(["gptpro"], [plugin["name"] for plugin in marketplace["plugins"]])
+        self.assertEqual("Codex Skills", marketplace["interface"]["displayName"])
+        self.assertEqual(
+            ["gptpro", "swift-intelligence"],
+            [plugin["name"] for plugin in marketplace["plugins"]],
+        )
         entry = marketplace["plugins"][0]
         self.assertEqual({"source": "local", "path": "./plugins/gptpro"}, entry["source"])
         self.assertEqual("AVAILABLE", entry["policy"]["installation"])
         self.assertEqual("ON_INSTALL", entry["policy"]["authentication"])
+
+        swift_entry = next(
+            plugin for plugin in marketplace["plugins"] if plugin["name"] == "swift-intelligence"
+        )
+        self.assertEqual(
+            {"source": "local", "path": "./plugins/swift-intelligence"},
+            swift_entry["source"],
+        )
+        self.assertEqual("AVAILABLE", swift_entry["policy"]["installation"])
+        self.assertEqual("ON_INSTALL", swift_entry["policy"]["authentication"])
+        self.assertEqual("Productivity", swift_entry["category"])
 
     def test_plugin_manifest_describes_the_electron_runtime(self) -> None:
         manifest = json.loads(
@@ -85,6 +102,25 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertNotIn("local-immutable-tool-snapshot", skill)
         self.assertNotIn("$gptpro-mcp", skill)
         self.assertNotIn("$gptpro-mcp", ui)
+
+
+    def test_swift_intelligence_plugin_loads_skill_and_mcp_server(self) -> None:
+        manifest = json.loads(
+            (SWIFT_PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual("swift-intelligence", manifest["name"])
+        self.assertEqual("0.1.0+codex.20260904035318", manifest["version"])
+        self.assertEqual("./skills/", manifest["skills"])
+        self.assertEqual("./.mcp.json", manifest["mcpServers"])
+        self.assertTrue((SWIFT_PLUGIN_SKILL / "SKILL.md").is_file())
+
+        mcp_config = json.loads((SWIFT_PLUGIN_ROOT / ".mcp.json").read_text(encoding="utf-8"))
+        server = mcp_config["mcpServers"]["swift-intelligence"]
+        self.assertEqual("python3", server["command"])
+        self.assertEqual(["./scripts/swift_intelligence_mcp.py"], server["args"])
+        self.assertEqual(".", server["cwd"])
+        self.assertTrue(server["enabled"])
+        self.assertTrue((SWIFT_PLUGIN_ROOT / "scripts" / "swift_intelligence_mcp.py").is_file())
 
 
 if __name__ == "__main__":
