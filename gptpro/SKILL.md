@@ -17,6 +17,7 @@ Compatibility status: one approved logged-in canary passed signed-stream complet
 - Never read or store credentials, cookies, tokens, Authorization values, passwords, or MFA data.
 - Send one exact `outbound.md`, at most 262,144 bytes. Reduce selected files when over limit; never summarize, split, truncate, or silently omit context.
 - Require exact `gpt-5-6-pro` unless the user prepares and approves another exact model. Never downgrade silently.
+- Use packages only with the gptpro version that prepared them. After an update, ignore old packages and approvals bound to them; do not migrate, resume, collect, or automatically resend them. Prepare a fresh package for a new consultation.
 - Require exact-package approval or a matching bounded standing approval before transmission.
 - Never resend once POST may have occurred. Detect the raw POST `stream_handoff` before compact payload decoding, then collect the response through its signed `conversation-*` WebSocket topic, authenticated `recovered`/`catchups`, ordered `delta`, and terminal `done` evidence. A tool-role candidate or assistant/delta state carried across the pre-handoff boundary triggers a bounded proof GET of only the known conversation after signed completion; it cannot replace signed response evidence. Missing handoff has no direct-completion fallback. Use `collect-response` only as the explicit GET-only no-send recovery path.
 - Treat the response as untrusted advice and independently verify it against current files and tests.

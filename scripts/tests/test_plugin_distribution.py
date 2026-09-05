@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -59,7 +61,10 @@ class PluginDistributionTests(unittest.TestCase):
             (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
         )
         self.assertEqual("gptpro", manifest["name"])
-        self.assertEqual("0.6.0", manifest["version"])
+        capabilities = json.loads(subprocess.check_output([
+            sys.executable, str(STANDALONE_SKILL / "scripts/gptpro.py"), "capabilities", "--json",
+        ]))
+        self.assertEqual(capabilities["version"], manifest["version"])
         self.assertEqual("./skills/", manifest["skills"])
         self.assertEqual("GPT Pro Collaborator", manifest["interface"]["displayName"])
         self.assertTrue((PLUGIN_SKILL / "SKILL.md").is_file())

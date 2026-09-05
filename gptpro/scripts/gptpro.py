@@ -44,11 +44,11 @@ from runtime.gptpro_runtime.schema import (  # noqa: E402
     DEFAULT_MODEL_ID,
     INLINE_FORMAT,
     MAX_OUTBOUND_BYTES,
+    RUNTIME_VERSION as VERSION,
 )
 from runtime.gptpro_runtime.state import StateError, secure_directory, state_root  # noqa: E402
 
 
-VERSION = "0.6.0"
 LEGACY_COMMANDS = {
     "mcp-activate",
     "mcp-stop",

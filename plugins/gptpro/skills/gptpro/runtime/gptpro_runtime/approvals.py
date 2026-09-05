@@ -158,7 +158,7 @@ def create_standing(
     selection = manifest["selection"]
     path_rules = {
         "include_patterns": list(selection.get("include_patterns", [])),
-        "exact_paths": [item["path"] for item in manifest["files"]] if selection.get("file_list_sha256") else [],
+        "exact_paths": sorted({item["path"] for item in manifest["files"]} | set(manifest["diff"].get("deleted_paths", []))) if selection.get("file_list_sha256") else [],
         "exclude_patterns": list(selection.get("exclude_patterns", [])),
     }
     approval = {
@@ -241,7 +241,7 @@ def standing_matches(approval: dict[str, Any], manifest: dict[str, Any]) -> tupl
     if not all(isinstance(value, list) and all(isinstance(item, str) for item in value) for value in (patterns, exact_paths, excludes)):
         return False, "path-rules"
 
-    manifest_paths = [item["path"] for item in manifest["files"]]
+    manifest_paths = {item["path"] for item in manifest["files"]} | set(manifest["diff"].get("deleted_paths", []))
     paths_allowed = all(
         (path in exact_paths or _matches(path, patterns)) and not _matches(path, excludes)
         for path in manifest_paths

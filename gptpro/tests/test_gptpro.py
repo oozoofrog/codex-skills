@@ -26,6 +26,7 @@ from runtime.gptpro_runtime.schema import (  # noqa: E402
     DELIVERY_CHANNEL,
     INLINE_FORMAT,
     MAX_OUTBOUND_BYTES,
+    RUNTIME_VERSION,
 )
 from runtime.gptpro_runtime.state import read_json, sha256_bytes, sha256_file, write_json  # noqa: E402
 
@@ -84,6 +85,7 @@ class PackageCase(unittest.TestCase):
         verified = package.verify_package(handoff)
         manifest = verified["manifest"]
         self.assertEqual(6, manifest["schema_version"])
+        self.assertEqual(RUNTIME_VERSION, manifest["runtime_version"])
         self.assertEqual(CONTEXT_TRANSPORT, manifest["context_transport"])
         self.assertEqual("desktop-electron", manifest["delivery"]["channel"])
         self.assertEqual(CHAT_HISTORY_MODE, manifest["delivery"]["chat_history_mode"])
@@ -219,6 +221,380 @@ class PackageCase(unittest.TestCase):
             self.prepare(supplements=["note=relative.txt"])
         self.assertEqual("SUPPLEMENT_INVALID", supplement.exception.code)
 
+    def test_file_list_diff_uses_literal_paths_under_standing_approval(self) -> None:
+        chosen = self.repo / "src/[id].txt"
+        other = self.repo / "src/i.txt"
+        chosen.write_text("selected original\n")
+        other.write_text("outside original\n")
+        git(self.repo, "--literal-pathspecs", "add", "src/[id].txt", "src/i.txt")
+        git(self.repo, "commit", "-qm", "literal paths")
+        file_list = self.root / "selected.txt"
+        file_list.write_text("src/[id].txt\n")
+        first = Path(self.prepare(includes=[], file_list=file_list)["handoff_dir"])
+        approval = approvals.create_standing(
+            first, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state,
+        )
+        chosen.write_text("selected edit\n")
+        other.write_text("OUT_OF_SCOPE_DIFF_SENTINEL\n")
+        handoff = Path(self.prepare(includes=[], file_list=file_list)["handoff_dir"])
+        manifest = package.verify_package(handoff)["manifest"]
+        outbound = (handoff / "outbound.md").read_text()
+        self.assertEqual(["src/[id].txt"], [item["path"] for item in manifest["files"]])
+        self.assertIn("+selected edit", outbound)
+        self.assertNotIn("OUT_OF_SCOPE_DIFF_SENTINEL", outbound)
+        self.assertNotIn("src/i.txt", outbound)
+        with mock.patch.object(approvals, "state_root", return_value=self.state):
+            approvals.apply_standing(handoff, approval_id=approval["approval_id"])
+            approvals.verify_active_approval(handoff)
+
+    def test_parent_symlink_rejected_before_packaging_with_standing_approval(self) -> None:
+        first = Path(self.prepare(includes=["src/**"])["handoff_dir"])
+        approvals.create_standing(
+            first, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state,
+        )
+        external = self.root / "external"
+        external.mkdir()
+        (external / "main.py").write_text("OUTSIDE_REPOSITORY_SENTINEL\n")
+        (self.repo / "src").rename(self.repo / "original-src")
+        (self.repo / "src").symlink_to(external, target_is_directory=True)
+        before = sorted(self.state.rglob("manifest.json"))
+        with self.assertRaises(PackageError) as raised:
+            self.prepare(includes=["src/**"])
+        self.assertEqual("FILE_UNSAFE", raised.exception.code)
+        self.assertEqual(before, sorted(self.state.rglob("manifest.json")))
+
+    def test_secure_read_rejects_nested_and_final_symlinks_and_hardlinks(self) -> None:
+        external = self.root / "external.txt"
+        external.write_text("outside\n")
+        nested = self.repo / "src/nested"
+        nested.mkdir()
+        (nested / "linked.txt").symlink_to(external)
+        (self.repo / "src/linked-dir").symlink_to(nested, target_is_directory=True)
+        os.link(external, nested / "hardlink.txt")
+        for relative in ("src/nested/linked.txt", "src/linked-dir/linked.txt", "src/nested/hardlink.txt"):
+            with self.subTest(relative=relative), self.assertRaises(PackageError) as raised:
+                package._read_regular(self.repo, relative, maximum=1024)
+            self.assertEqual("FILE_UNSAFE", raised.exception.code)
+
+    def test_secure_read_detects_content_change_during_read(self) -> None:
+        source = self.repo / "src/main.py"
+        real_read = os.read
+
+        def changing_read(descriptor, size):
+            result = real_read(descriptor, size)
+            source.write_text("changed while being read\n")
+            return result
+
+        with mock.patch.object(package.os, "read", side_effect=changing_read), self.assertRaises(PackageError) as raised:
+            package._read_regular(self.repo, "src/main.py", maximum=1024)
+        self.assertEqual("FILE_CHANGED", raised.exception.code)
+
+    def test_selected_deletions_obey_includes_file_list_and_excludes(self) -> None:
+        removed = self.repo / "src/[id].txt"
+        excluded = self.repo / "src/excluded.txt"
+        removed.write_text("REMOVED_FILE_SENTINEL\n")
+        excluded.write_text("EXCLUDED_DELETION_SENTINEL\n")
+        git(self.repo, "--literal-pathspecs", "add", "src/[id].txt", "src/excluded.txt")
+        git(self.repo, "commit", "-qm", "deletion fixtures")
+        file_list = self.root / "selected.txt"
+        file_list.write_text("src/[id].txt\n")
+        for staged in (False, True):
+            git(self.repo, "reset", "--hard", "HEAD")
+            removed.unlink()
+            excluded.unlink()
+            if staged:
+                git(self.repo, "add", "-u")
+            for directed_list in (False, True):
+                with self.subTest(staged=staged, file_list=directed_list):
+                    prepared = self.prepare(
+                        includes=[] if directed_list else ["src/**"],
+                        file_list=file_list if directed_list else None,
+                        excludes=["src/excluded.txt"],
+                    )
+                    handoff = Path(prepared["handoff_dir"])
+                    manifest = package.verify_package(handoff)["manifest"]
+                    self.assertEqual(["src/[id].txt"], manifest["diff"]["deleted_paths"])
+                    self.assertEqual(1, prepared["deleted_files"])
+                    self.assertGreater(manifest["diff"]["size"], 0)
+                    if directed_list:
+                        self.assertEqual([], manifest["files"])
+                    outbound = (handoff / "outbound.md").read_text()
+                    self.assertIn("-REMOVED_FILE_SENTINEL", outbound)
+                    self.assertNotIn("EXCLUDED_DELETION_SENTINEL", outbound)
+
+    def test_deleted_paths_are_bound_to_standing_approval_and_inline_header(self) -> None:
+        file_list = self.root / "selected.txt"
+        file_list.write_text("src/main.py\n")
+        first = Path(self.prepare(includes=[], file_list=file_list)["handoff_dir"])
+        created = approvals.create_standing(
+            first, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state,
+        )
+        (self.repo / "src/main.py").unlink()
+        git(self.repo, "add", "-u")
+        handoff = Path(self.prepare(includes=[], file_list=file_list)["handoff_dir"])
+        with mock.patch.object(approvals, "state_root", return_value=self.state):
+            approvals.apply_standing(handoff, approval_id=created["approval_id"])
+            approvals.verify_active_approval(handoff)
+        # An approval created from a deletion-only file list also retains its exact path.
+        deletion_approval = approvals.create_standing(
+            handoff, confirm_transmission=True, confirm_disclosure=True, expires_hours=1,
+            root=self.root / "other-state",
+        )
+        self.assertEqual(["src/main.py"], deletion_approval["scope"]["path_rules"]["exact_paths"])
+        (self.repo / "README.md").unlink()
+        outside = Path(self.prepare(includes=["README.md"])["handoff_dir"])
+        with self.assertRaises(ApprovalError) as raised:
+            approvals.apply_standing(outside, approval_id=created["approval_id"], root=self.state)
+        self.assertEqual("APPROVAL_REQUIRED", raised.exception.code)
+        manifest = read_json(handoff / "manifest.json")
+        manifest["diff"]["deleted_paths"] = ["README.md"]
+        write_json(handoff / "manifest.json", manifest)
+        with self.assertRaises(PackageError) as tampered:
+            package.verify_package(handoff)
+        self.assertEqual("PACKAGE_TAMPERED", tampered.exception.code)
+
+    def test_cached_removal_keeps_current_untracked_content_separate(self) -> None:
+        file_list = self.root / "selected.txt"
+        file_list.write_text("src/main.py\n")
+        git(self.repo, "rm", "--cached", "src/main.py")
+        (self.repo / "src/main.py").write_text("CURRENT_UNTRACKED_CONTENT\n")
+        for allow_untracked in (False, True):
+            for directed_list in (False, True):
+                with self.subTest(allow_untracked=allow_untracked, file_list=directed_list):
+                    prepared = self.prepare(
+                        includes=[] if directed_list else ["src/**"],
+                        file_list=file_list if directed_list else None,
+                        allow_untracked=allow_untracked,
+                    )
+                    handoff = Path(prepared["handoff_dir"])
+                    manifest = package.verify_package(handoff)["manifest"]
+                    self.assertEqual(["src/main.py"], manifest["diff"]["deleted_paths"])
+                    self.assertEqual(int(allow_untracked), prepared["files"])
+                    self.assertEqual(1, prepared["deleted_files"])
+                    if allow_untracked:
+                        self.assertEqual("src/main.py", manifest["files"][0]["path"])
+                        self.assertFalse(manifest["files"][0]["tracked"])
+                    else:
+                        self.assertEqual([], manifest["files"])
+                    outbound = (handoff / "outbound.md").read_text()
+                    self.assertIn("-print('hello')", outbound)
+                    self.assertEqual(allow_untracked, "CURRENT_UNTRACKED_CONTENT" in outbound)
+
+    def test_same_path_current_file_and_deletion_obey_approval_and_unique_limit(self) -> None:
+        file_list = self.root / "selected.txt"
+        file_list.write_text("src/main.py\n")
+        first = Path(self.prepare(includes=[], file_list=file_list)["handoff_dir"])
+        tracked_approval = approvals.create_standing(
+            first, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state,
+        )
+        git(self.repo, "rm", "--cached", "src/main.py")
+        with mock.patch.object(package, "MAX_FILES", 1):
+            handoff = Path(self.prepare(includes=[], file_list=file_list, allow_untracked=True)["handoff_dir"])
+            package.verify_package(handoff)
+        with self.assertRaises(ApprovalError) as raised:
+            approvals.apply_standing(handoff, approval_id=tracked_approval["approval_id"], root=self.state)
+        self.assertEqual("APPROVAL_REQUIRED", raised.exception.code)
+        new_state = self.root / "untracked-approval"
+        created = approvals.create_standing(
+            handoff, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=new_state,
+        )
+        self.assertEqual(["src/main.py"], created["scope"]["path_rules"]["exact_paths"])
+        self.assertFalse(created["scope"]["tracked_only"])
+        with mock.patch.object(approvals, "state_root", return_value=new_state):
+            approvals.apply_standing(handoff, approval_id=created["approval_id"])
+            approvals.verify_active_approval(handoff)
+
+    def test_file_to_directory_selects_only_requested_current_and_deleted_paths(self) -> None:
+        source = self.repo / "src/main.py"
+        source.unlink()
+        source.mkdir()
+        (source / "intro.txt").write_text("SELECTED_CHILD_CONTENT\n")
+        (source / "hidden.txt").write_text("EXCLUDED_CHILD_CONTENT\n")
+        file_list = self.root / "selected.txt"
+        file_list.write_text("src/main.py\n")
+        for staged in (False, True):
+            if staged:
+                git(self.repo, "add", "src")
+            for allow_untracked in (False, True):
+                for directed_list in (False, True):
+                    with self.subTest(staged=staged, allow_untracked=allow_untracked, file_list=directed_list):
+                        handoff = Path(self.prepare(
+                            includes=[] if directed_list else ["src/**"],
+                            file_list=file_list if directed_list else None,
+                            excludes=["src/main.py/hidden.txt"], allow_untracked=allow_untracked,
+                        )["handoff_dir"])
+                        manifest = package.verify_package(handoff)["manifest"]
+                        self.assertEqual(["src/main.py"], manifest["diff"]["deleted_paths"])
+                        child_selected = not directed_list and (staged or allow_untracked)
+                        self.assertEqual(
+                            ["src/main.py/intro.txt"] if child_selected else [],
+                            [entry["path"] for entry in manifest["files"]],
+                        )
+                        if child_selected:
+                            self.assertEqual(staged, manifest["files"][0]["tracked"])
+                        outbound = (handoff / "outbound.md").read_text()
+                        self.assertIn("-print('hello')", outbound)
+                        self.assertEqual(child_selected, "SELECTED_CHILD_CONTENT" in outbound)
+                        self.assertNotIn("EXCLUDED_CHILD_CONTENT", outbound)
+            child_only = Path(self.prepare(includes=["src/main.py/intro.txt"], allow_untracked=True)["handoff_dir"])
+            self.assertNotIn("print('hello')", (child_only / "outbound.md").read_text())
+            self.assertNotIn("deleted_paths", package.verify_package(child_only)["manifest"]["diff"])
+
+    def test_directory_to_file_does_not_expand_exact_path_scope(self) -> None:
+        (self.repo / "src/main.py").unlink()
+        (self.repo / "src").rmdir()
+        (self.repo / "src").write_text("CURRENT_PARENT_FILE\n")
+        git(self.repo, "add", "-A")
+        for paths in (["src"], ["src/main.py"], ["src", "src/main.py"]):
+            with self.subTest(paths=paths):
+                file_list = self.root / "selected.txt"
+                file_list.write_text("\n".join(paths) + "\n")
+                handoff = Path(self.prepare(includes=[], file_list=file_list)["handoff_dir"])
+                manifest = package.verify_package(handoff)["manifest"]
+                self.assertEqual(["src"] if "src" in paths else [], [item["path"] for item in manifest["files"]])
+                self.assertEqual(["src/main.py"] if "src/main.py" in paths else [], manifest["diff"].get("deleted_paths", []))
+                outbound = (handoff / "outbound.md").read_text()
+                self.assertEqual("src" in paths, "CURRENT_PARENT_FILE" in outbound)
+                self.assertEqual("src/main.py" in paths, "-print('hello')" in outbound)
+
+    def test_deleted_secret_paths_and_diff_content_are_rejected(self) -> None:
+        (self.repo / "src/main.py").write_text("api_key='abcdefghijklmnopqrstuv'\n")
+        (self.repo / ".env").write_text("SAFE=placeholder\n")
+        git(self.repo, "add", "src/main.py", ".env")
+        git(self.repo, "commit", "-qm", "secret deletion fixtures")
+        (self.repo / "src/main.py").unlink()
+        (self.repo / ".env").unlink()
+        git(self.repo, "add", "-u")
+        for path, code in ((".env", "SECRET_PATH_REJECTED"), ("src/main.py", "SECRET_DETECTED")):
+            with self.subTest(path=path), self.assertRaises(PackageError) as raised:
+                self.prepare(includes=[path])
+            self.assertEqual(code, raised.exception.code)
+
+    def test_binary_deleted_content_cannot_bypass_scanning_with_standing_approval(self) -> None:
+        chosen = self.repo / "src/config.txt"
+        chosen.write_text("safe original\n")
+        git(self.repo, "add", "src/config.txt")
+        git(self.repo, "commit", "-qm", "safe deletion approval fixture")
+        first = Path(self.prepare(includes=["src/config.txt"])["handoff_dir"])
+        approvals.create_standing(
+            first, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state,
+        )
+        cases = (
+            (True, b"api_key='abcdefghijklmnopqrstuv'\n", "SECRET_DETECTED"),
+            (False, b"\0api_key='abcdefghijklmnopqrstuv'\n", "SECRET_DETECTED"),
+            (True, b"invalid utf-8: \xff\n", "DIFF_NOT_UTF8"),
+            (False, b"\0invalid utf-8: \xff\n", "DIFF_NOT_UTF8"),
+        )
+        for binary_attribute, content, code in cases:
+            (self.repo / ".gitattributes").write_text("src/config.txt -diff\n" if binary_attribute else "")
+            chosen.write_bytes(content)
+            git(self.repo, "add", ".gitattributes", "src/config.txt")
+            git(self.repo, "commit", "-qm", "binary deletion fixture")
+            for staged in (False, True):
+                git(self.repo, "reset", "--hard", "HEAD")
+                chosen.unlink()
+                if staged:
+                    git(self.repo, "add", "-u")
+                before = sorted(self.state.rglob("manifest.json"))
+                with self.subTest(binary_attribute=binary_attribute, code=code, staged=staged):
+                    with self.assertRaises(PackageError) as raised:
+                        self.prepare(includes=["src/config.txt"])
+                    self.assertEqual(code, raised.exception.code)
+                    self.assertEqual(before, sorted(self.state.rglob("manifest.json")))
+
+    def test_binary_attribute_safe_deletion_is_literal_reviewable_and_approvable(self) -> None:
+        chosen = self.repo / "src/[id].txt"
+        other = self.repo / "src/i.txt"
+        chosen.write_bytes("선택한 첫 줄\r\n마지막 줄".encode("utf-8"))
+        other.write_text("OUTSIDE_DELETION_SENTINEL\n")
+        (self.repo / ".gitattributes").write_text("src/*.txt -diff\n")
+        git(self.repo, "--literal-pathspecs", "add", ".gitattributes", "src/[id].txt", "src/i.txt")
+        git(self.repo, "commit", "-qm", "reviewable binary attribute fixture")
+        file_list = self.root / "selected.txt"
+        file_list.write_text("src/[id].txt\n")
+        first = Path(self.prepare(includes=[], file_list=file_list)["handoff_dir"])
+        approval = approvals.create_standing(
+            first, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state,
+        )
+        for staged in (False, True):
+            git(self.repo, "reset", "--hard", "HEAD")
+            chosen.unlink()
+            other.unlink()
+            if staged:
+                git(self.repo, "add", "-u")
+            with self.subTest(staged=staged):
+                handoff = Path(self.prepare(includes=[], file_list=file_list)["handoff_dir"])
+                manifest = package.verify_package(handoff)["manifest"]
+                self.assertEqual([], manifest["files"])
+                self.assertEqual(["src/[id].txt"], manifest["diff"]["deleted_paths"])
+                outbound = (handoff / "outbound.md").read_bytes()
+                self.assertIn("-선택한 첫 줄\r\n-마지막 줄\n".encode("utf-8"), outbound)
+                self.assertIn(b"deleted file mode", outbound)
+                self.assertNotIn(b"OUTSIDE_DELETION_SENTINEL", outbound)
+                self.assertNotIn(b"src/i.txt", outbound)
+                with mock.patch.object(approvals, "state_root", return_value=self.state):
+                    approvals.apply_standing(handoff, approval_id=approval["approval_id"])
+                    approvals.verify_active_approval(handoff)
+
+    def test_encoded_binary_diff_is_rejected_by_verification_and_approval(self) -> None:
+        first = Path(self.prepare(includes=["src/main.py"])["handoff_dir"])
+        approval = approvals.create_standing(
+            first, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state,
+        )
+        (self.repo / ".gitattributes").write_text("src/main.py -diff\n")
+        (self.repo / "src/main.py").write_text("api_key='abcdefghijklmnopqrstuv'\n")
+        git(self.repo, "add", ".gitattributes", "src/main.py")
+        git(self.repo, "commit", "-qm", "legacy binary patch fixture")
+        (self.repo / "src/main.py").unlink()
+        real_git = package._git
+
+        def legacy_git(repo, *arguments, **options):
+            return real_git(repo, *("--binary" if arg == "--text" else arg for arg in arguments), **options)
+
+        # The content check also rejects encoded diffs in a current-version package.
+        with mock.patch.object(package, "_git", side_effect=legacy_git):
+            handoff = Path(self.prepare(includes=["src/main.py"])["handoff_dir"])
+        outbound = (handoff / "outbound.md").read_bytes()
+        self.assertIn(b"\nGIT binary patch\n", outbound)
+        self.assertNotIn(b"abcdefghijklmnopqrstuv", outbound)
+        for operation in (
+            lambda: package.verify_package(handoff),
+            lambda: approvals.approve_exact(handoff, confirm_transmission=True, confirm_disclosure=True),
+            lambda: approvals.apply_standing(handoff, approval_id=approval["approval_id"], root=self.state),
+            lambda: approvals.verify_active_approval(handoff),
+        ):
+            with self.assertRaises(PackageError) as raised:
+                operation()
+            self.assertEqual("DIFF_BINARY_ENCODED", raised.exception.code)
+        self.assertEqual("prepared", read_json(handoff / "state.json")["phase"])
+
+    def test_binary_marker_text_in_files_and_text_hunks_remains_valid(self) -> None:
+        (self.repo / "README.md").write_text("GIT binary patch\n")
+        deleted = self.repo / "src/deleted.txt"
+        deleted.write_text("GIT binary patch\n")
+        git(self.repo, "add", "README.md", "src/deleted.txt")
+        git(self.repo, "commit", "-qm", "ordinary marker text")
+        (self.repo / "README.md").write_text("GIT binary patch\nmore documentation\n")
+        (self.repo / "src/main.py").write_text("print('hello')\nGIT binary patch\n")
+        deleted.unlink()
+        handoff = Path(self.prepare()["handoff_dir"])
+        package.verify_package(handoff)
+        outbound = (handoff / "outbound.md").read_bytes()
+        for prefix in (b"", b" ", b"-", b"+"):
+            self.assertIn(b"\n" + prefix + b"GIT binary patch\n", outbound)
+        approvals.approve_exact(handoff, confirm_transmission=True, confirm_disclosure=True)
+        approvals.verify_active_approval(handoff)
+
+    def test_selected_rename_does_not_disclose_excluded_destination(self) -> None:
+        git(self.repo, "mv", "src/main.py", "outside.py")
+        prepared = self.prepare(includes=["src/**"])
+        handoff = Path(prepared["handoff_dir"])
+        manifest = package.verify_package(handoff)["manifest"]
+        self.assertEqual(["src/main.py"], manifest["diff"]["deleted_paths"])
+        outbound = (handoff / "outbound.md").read_text()
+        self.assertIn("deleted file mode", outbound)
+        self.assertNotIn("outside.py", outbound)
+
     def test_package_symlink_and_permissions_fail_closed(self) -> None:
         fresh = Path(self.prepare()["handoff_dir"])
         link = self.root / "handoff-link"
@@ -291,6 +667,52 @@ class PackageCase(unittest.TestCase):
         with self.assertRaises(PackageError) as raised:
             approvals.approve_exact(handoff, confirm_transmission=True, confirm_disclosure=True)
         self.assertEqual("SCHEMA_VERSION_UNSUPPORTED", raised.exception.code)
+
+    def test_missing_or_different_runtime_version_rejected_before_package_use(self) -> None:
+        first = Path(self.prepare()["handoff_dir"])
+        approval = approvals.create_standing(
+            first, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state,
+        )
+        for version in (None, "0.6.0", "99.0.0"):
+            with self.subTest(version=version):
+                handoff = Path(self.prepare()["handoff_dir"])
+                manifest = read_json(handoff / "manifest.json")
+                if version is None:
+                    del manifest["runtime_version"]
+                else:
+                    manifest["runtime_version"] = version
+                write_json(handoff / "manifest.json", manifest)
+                before = {path.name: path.read_bytes() for path in handoff.iterdir() if path.is_file()}
+                operations = (
+                    lambda: package.verify_package(handoff),
+                    lambda: approvals.approve_exact(handoff, confirm_transmission=True, confirm_disclosure=True),
+                    lambda: approvals.create_standing(handoff, confirm_transmission=True, confirm_disclosure=True, expires_hours=1, root=self.state),
+                    lambda: approvals.apply_standing(handoff, approval_id=approval["approval_id"], root=self.state),
+                    lambda: approvals.verify_active_approval(handoff),
+                    lambda: controller.run_consultation(SKILL_ROOT, handoff),
+                    lambda: controller.collect_response(SKILL_ROOT, handoff),
+                )
+                for operation in operations:
+                    with self.assertRaises(PackageError) as raised:
+                        operation()
+                    self.assertEqual("PACKAGE_VERSION_UNSUPPORTED", raised.exception.code)
+                self.assertEqual(before, {path.name: path.read_bytes() for path in handoff.iterdir() if path.is_file()})
+
+    def test_runtime_update_invalidates_previously_approved_package(self) -> None:
+        handoff = Path(self.prepare()["handoff_dir"])
+        approvals.approve_exact(handoff, confirm_transmission=True, confirm_disclosure=True)
+        approvals.verify_active_approval(handoff)
+        with mock.patch.object(package, "RUNTIME_VERSION", "99.0.0"):
+            for operation in (
+                lambda: approvals.verify_active_approval(handoff),
+                lambda: controller.run_consultation(SKILL_ROOT, handoff),
+            ):
+                with self.assertRaises(PackageError) as raised:
+                    operation()
+                self.assertEqual("PACKAGE_VERSION_UNSUPPORTED", raised.exception.code)
+            fresh = Path(self.prepare()["handoff_dir"])
+            approvals.approve_exact(fresh, confirm_transmission=True, confirm_disclosure=True)
+            approvals.verify_active_approval(fresh)
 
     def test_exact_approval_rejects_bound_outbound_byte_tampering(self) -> None:
         handoff = Path(self.prepare()["handoff_dir"])

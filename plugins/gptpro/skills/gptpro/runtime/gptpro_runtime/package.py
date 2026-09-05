@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import subprocess
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -20,6 +21,7 @@ from .schema import (
     DELIVERY_CHANNEL,
     INLINE_FORMAT,
     MAX_OUTBOUND_BYTES,
+    RUNTIME_VERSION,
 )
 from .security import secret_detectors, unsafe_path_reason
 from .state import (
@@ -80,10 +82,10 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _git(repo: Path, *arguments: str, binary: bool = False) -> bytes | str:
+def _git(repo: Path, *arguments: str, binary: bool = False, literal_pathspecs: bool = True) -> bytes | str:
     try:
         result = subprocess.run(
-            ["git", "-C", str(repo), *arguments],
+            ["git", "--literal-pathspecs" if literal_pathspecs else "--no-literal-pathspecs", "-C", str(repo), *arguments],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
@@ -151,12 +153,19 @@ def select_paths(
     file_list: Path | None,
     excludes: list[str],
     allow_untracked: bool,
-) -> list[tuple[str, bool]]:
+    head: str = "HEAD",
+) -> tuple[list[tuple[str, bool]], list[str]]:
     if bool(includes) == bool(file_list):
         raise PackageError("SELECTION_REQUIRED", "Use one or more --include patterns or one --file-list.")
     tracked = set(_split_nul(_git(repo, "ls-files", "-z", binary=True)))
+    deleted = set(_split_nul(_git(
+        repo, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "--diff-filter=D", "-z", head, binary=True,
+    )))
+    # Index membership, readable current files, and HEAD deletion context differ:
+    # `git rm --cached` can leave an untracked file at the very same path.
+    tracked -= deleted
     untracked = set(_split_nul(_git(repo, "ls-files", "--others", "--exclude-standard", "-z", binary=True))) if allow_untracked else set()
-    available = tracked | untracked
+    available = tracked | untracked | deleted
     if file_list:
         try:
             requested = [line.strip() for line in file_list.read_text(encoding="utf-8").splitlines() if line.strip() and not line.lstrip().startswith("#")]
@@ -177,52 +186,107 @@ def select_paths(
         raise PackageError("SELECTION_EMPTY", "All selected paths were excluded.")
     if len(selected) > MAX_FILES:
         raise PackageError("FILE_LIMIT_EXCEEDED", "The selected file count exceeds the hard limit.")
-    return [(path, path in tracked) for path in sorted(selected)]
+    return (
+        [(path, path in tracked) for path in sorted(selected & (tracked | untracked))],
+        sorted(selected & deleted),
+    )
+
+
+def _selected_diff(repo: Path, head: str, paths: set[str]) -> bytes:
+    chunks: list[bytes] = []
+    remaining = set(paths)
+    while remaining:
+        # Even literal Git pathspecs recurse into directories. Exclude children
+        # and process explicitly selected descendants in a separate batch.
+        batch = sorted(path for path in remaining if not any(
+            parent.as_posix() in remaining for parent in PurePosixPath(path).parents
+        ))
+        pathspecs = [f":(top,literal){path}" for path in batch]
+        pathspecs.extend(f":(top,exclude,literal){path}/" for path in batch)
+        chunks.append(_git(
+            repo, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--text", head,
+            "--", *pathspecs, binary=True, literal_pathspecs=False,
+        ))
+        remaining.difference_update(batch)
+    return b"".join(chunks)
+
+
+def _check_deleted_path(root: Path, relative: str) -> None:
+    """Check traversal without reading a replacement file or directory."""
+    try:
+        with ExitStack() as descriptors:
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            directory = os.open(root, flags)
+            descriptors.callback(os.close, directory)
+            for part in PurePosixPath(_safe_relative(relative)).parts:
+                entry = os.stat(part, dir_fd=directory, follow_symlinks=False)
+                if stat.S_ISREG(entry.st_mode):
+                    return  # A file may now replace a historical directory.
+                if not stat.S_ISDIR(entry.st_mode):
+                    raise PackageError("FILE_UNSAFE", "A deleted path contains an unsafe replacement.")
+                directory = os.open(part, flags, dir_fd=directory)
+                descriptors.callback(os.close, directory)
+    except FileNotFoundError:
+        return
+    except (OSError, AttributeError, NotImplementedError) as exc:
+        raise PackageError("FILE_UNSAFE", "A deleted path cannot be inspected without following symlinks.") from exc
 
 
 def _read_regular(root: Path, relative: str, *, maximum: int, require_owner: bool = False) -> bytes:
-    path = root / relative
-    try:
-        before = path.lstat()
-    except OSError as exc:
-        raise PackageError("FILE_UNAVAILABLE", "A selected file is unavailable.") from exc
+    parts = PurePosixPath(_safe_relative(relative)).parts
     if (
-        not stat.S_ISREG(before.st_mode)
-        or stat.S_ISLNK(before.st_mode)
-        or before.st_nlink != 1
-        or before.st_size > maximum
-        or (require_owner and before.st_uid != os.getuid())
+        not hasattr(os, "O_NOFOLLOW")
+        or not hasattr(os, "O_DIRECTORY")
+        or os.open not in os.supports_dir_fd
+        or os.stat not in os.supports_dir_fd
     ):
-        raise PackageError("FILE_UNSAFE", "A selected file is not a bounded regular file.")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
+        raise PackageError("FILE_UNSAFE", "Secure descriptor-relative file access is unavailable.")
     try:
-        opened = os.fstat(descriptor)
-        if (
-            (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
-            != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
-        ):
-            raise PackageError("FILE_CHANGED", "A selected file changed during snapshot creation.")
-        chunks: list[bytes] = []
-        remaining = maximum + 1
-        while remaining > 0:
-            chunk = os.read(descriptor, min(1024 * 1024, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        data = b"".join(chunks)
-        if len(data) > maximum:
-            raise PackageError("FILE_LIMIT_EXCEEDED", "A selected file exceeds the hard byte limit.")
-        after = os.fstat(descriptor)
-        if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
-            opened.st_size,
-            opened.st_mtime_ns,
-            opened.st_ctime_ns,
-        ):
-            raise PackageError("FILE_CHANGED", "A selected file changed during snapshot creation.")
-    finally:
-        os.close(descriptor)
+        with ExitStack() as descriptors:
+            directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            directory = os.open(root, directory_flags)
+            descriptors.callback(os.close, directory)
+            for part in parts[:-1]:
+                directory = os.open(part, directory_flags, dir_fd=directory)
+                descriptors.callback(os.close, directory)
+            before = os.stat(parts[-1], dir_fd=directory, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or before.st_size > maximum
+                or (require_owner and before.st_uid != os.getuid())
+            ):
+                raise PackageError("FILE_UNSAFE", "A selected file is not a bounded regular file.")
+            descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            descriptors.callback(os.close, descriptor)
+            opened = os.fstat(descriptor)
+            if (
+                (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+                != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            ):
+                raise PackageError("FILE_CHANGED", "A selected file changed during snapshot creation.")
+            chunks: list[bytes] = []
+            remaining = maximum + 1
+            while remaining > 0:
+                chunk = os.read(descriptor, min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+            if len(data) > maximum:
+                raise PackageError("FILE_LIMIT_EXCEEDED", "A selected file exceeds the hard byte limit.")
+            after = os.fstat(descriptor)
+            if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
+                opened.st_size,
+                opened.st_mtime_ns,
+                opened.st_ctime_ns,
+            ):
+                raise PackageError("FILE_CHANGED", "A selected file changed during snapshot creation.")
+    except FileNotFoundError as exc:
+        raise PackageError("FILE_UNAVAILABLE", "A selected file is unavailable.") from exc
+    except OSError as exc:
+        raise PackageError("FILE_UNSAFE", "A selected path cannot be opened without following symlinks.") from exc
     try:
         text = data.decode("utf-8", "strict")
     except UnicodeError as exc:
@@ -367,6 +431,7 @@ def build_outbound(
     files: list[SelectedFile],
     diff: bytes,
     supplements: list[dict[str, Any]],
+    deleted_paths: list[str] | None = None,
 ) -> bytes:
     """Build the exact single user-message bytes for a Schema-6 package."""
 
@@ -412,6 +477,7 @@ def build_outbound(
                 "path": "_gptpro/diff.patch",
                 "sha256": sha256_bytes(diff),
                 "size": len(diff),
+                **({"deleted_paths": deleted_paths} if deleted_paths else {}),
             },
             diff,
         )
@@ -500,26 +566,30 @@ def prepare_package(
     ):
         raise PackageError("MODEL_EFFORT_INVALID", "The thinking effort must be one bounded single line.")
     repo = resolve_repo(repo_value)
-    selected = read_selected(
+    head = str(_git(repo, "rev-parse", "HEAD"))
+    paths, deleted_paths = select_paths(
         repo,
-        select_paths(
-            repo,
-            includes=includes,
-            file_list=file_list,
-            excludes=excludes,
-            allow_untracked=allow_untracked,
-        ),
+        includes=includes,
+        file_list=file_list,
+        excludes=excludes,
+        allow_untracked=allow_untracked,
+        head=head,
     )
+    for path in deleted_paths:
+        reason = unsafe_path_reason(path)
+        if reason:
+            raise PackageError("SECRET_PATH_REJECTED", f"A selected path was rejected by {reason} policy.")
+        _check_deleted_path(repo, path)
+    selected = read_selected(repo, paths)
     supplemental = sorted(
         read_supplements(supplements),
         key=lambda value: (value["label"], value["artifact_id"]),
     )
-    head = str(_git(repo, "rev-parse", "HEAD"))
-    tree = str(_git(repo, "rev-parse", "HEAD^{tree}"))
+    tree = str(_git(repo, "rev-parse", f"{head}^{{tree}}"))
     dirty_output = str(_git(repo, "status", "--porcelain=v1", "--untracked-files=normal"))
     dirty = bool(dirty_output)
-    pathspec = [item.path for item in selected]
-    diff = _git(repo, "diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD", "--", *pathspec, binary=True)
+    # Keep deleted content visible to strict UTF-8 validation and secret scanning.
+    diff = _selected_diff(repo, head, {path for path, _tracked in paths} | set(deleted_paths))
     assert isinstance(diff, bytes)
     if len(diff) > MAX_DIFF_BYTES:
         raise PackageError("DIFF_LIMIT_EXCEEDED", "The selected Git diff exceeds the hard byte limit.")
@@ -552,6 +622,7 @@ def prepare_package(
         files=selected,
         diff=diff,
         supplements=supplemental,
+        deleted_paths=deleted_paths,
     )
     handoff = _package_directory(repo, package_id, root)
     prompt_path = handoff / "prompt.md"
@@ -572,9 +643,11 @@ def prepare_package(
         "path": "_gptpro/diff.patch",
         "size": len(diff),
         "sha256": sha256_bytes(diff),
+        **({"deleted_paths": deleted_paths} if deleted_paths else {}),
     }
     manifest = {
         "schema_version": 6,
+        "runtime_version": RUNTIME_VERSION,
         "package_id": package_id,
         "created_at": utc_now(),
         "mode": mode,
@@ -655,6 +728,7 @@ def prepare_package(
         "outbound_sha256": manifest["hashes"]["outbound_sha256"],
         "outbound_bytes": len(outbound_bytes),
         "files": len(selected),
+        "deleted_files": len(deleted_paths),
         "bytes": sum(len(item.data) for item in selected),
         "tracked_only": not allow_untracked,
         "security_findings": 0,
@@ -724,12 +798,24 @@ def _verify_inline_context(manifest: dict[str, Any], prompt: bytes, outbound: by
         raise PackageError("PACKAGE_TAMPERED", "The file manifest exceeds the hard count limit.")
     if not isinstance(supplements, list) or len(supplements) > MAX_SUPPLEMENTS:
         raise PackageError("PACKAGE_TAMPERED", "The supplement manifest exceeds the hard count limit.")
-    if not isinstance(diff, dict) or set(diff) != {"path", "size", "sha256"}:
+    if not isinstance(diff, dict) or set(diff) not in ({"path", "size", "sha256"}, {"path", "size", "sha256", "deleted_paths"}):
         raise PackageError("PACKAGE_TAMPERED", "The package diff contract is invalid.")
     for entry in files:
         _validate_inline_entry(entry)
     for entry in supplements:
         _validate_inline_entry(entry, supplement=True)
+    deleted_paths = diff.get("deleted_paths", [])
+    if (
+        not isinstance(deleted_paths, list)
+        or not all(isinstance(path, str) for path in deleted_paths)
+        or deleted_paths != sorted(set(deleted_paths))
+        or len({entry["path"] for entry in files} | set(deleted_paths)) > MAX_FILES
+        or any(entry["tracked"] and entry["path"] in deleted_paths for entry in files)
+    ):
+        raise PackageError("PACKAGE_TAMPERED", "The deleted path manifest is invalid.")
+    for path in deleted_paths:
+        if _safe_relative(path) != path or unsafe_path_reason(path):
+            raise PackageError("PACKAGE_TAMPERED", "A deleted repository path is unsafe.")
     if files != sorted(files, key=lambda entry: entry["path"]):
         raise PackageError("PACKAGE_TAMPERED", "The file manifest is not ordered.")
     if supplements != sorted(supplements, key=lambda entry: (entry["label"], entry["artifact_id"])):
@@ -770,6 +856,12 @@ def _verify_inline_context(manifest: dict[str, Any], prompt: bytes, outbound: by
             text = body.decode("utf-8", "strict")
         except UnicodeError as exc:
             raise PackageError("PACKAGE_TAMPERED", "An inline context body is not strict UTF-8.") from exc
+        if header["kind"] == "git_diff" and b"GIT binary patch" in body.split(b"\n"):
+            raise PackageError(
+                "DIFF_BINARY_ENCODED",
+                "An encoded Git binary patch cannot be secret-scanned.",
+                recovery="Prepare a new package using text-only diffs.",
+            )
         findings = secret_detectors(text)
         if findings:
             raise PackageError("SECRET_DETECTED", f"An inline context block matched secret detector {findings[0]}.")
@@ -794,6 +886,7 @@ def _private_file(path: Path, *, maximum: int) -> None:
 def _verify_schema6(manifest: dict[str, Any], handoff: Path) -> dict[str, Any]:
     expected_top_level = {
         "schema_version",
+        "runtime_version",
         "package_id",
         "created_at",
         "mode",
@@ -1019,6 +1112,12 @@ def verify_package(handoff_value: Path) -> dict[str, Any]:
         raise PackageError(
             "SCHEMA_VERSION_UNSUPPORTED",
             "This runtime only verifies current Schema-6 inline packages. Historical package files remain untouched.",
-            recovery="Use the matching historical release for a separate offline audit; do not reuse old approval for a new consultation.",
+            recovery="Old packages are unsupported. Prepare a fresh package for a new consultation; do not resend an uncertain submission.",
+        )
+    if manifest.get("runtime_version") != RUNTIME_VERSION:
+        raise PackageError(
+            "PACKAGE_VERSION_UNSUPPORTED",
+            "This runtime only accepts packages prepared by the same gptpro version.",
+            recovery="Old packages are not migrated or resumed. Prepare a fresh package for a new consultation; do not resend an uncertain submission.",
         )
     return _verify_schema6(manifest, handoff)

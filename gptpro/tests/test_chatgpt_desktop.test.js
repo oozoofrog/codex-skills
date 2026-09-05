@@ -1653,6 +1653,38 @@ test("known conversation branch verification polls persistence without listing",
   assert.equal(details, 2);
 });
 
+test("readback retries stale detail even when the summary timestamp is unchanged using GET only", async () => {
+  const messageId = "123e4567-e89b-42d3-a456-426614174004";
+  const updateTime = new Date().toISOString();
+  let lists = 0;
+  let details = 0;
+  const bridge = {
+    request: async (method, url) => {
+      assert.equal(method, "GET");
+      if (url.startsWith("/conversations?")) {
+        lists += 1;
+        assert.ok(lists <= 2, "stale detail must be retried before a third list request");
+        return { status: 200, body: { items: [{ id: "conversation", update_time: updateTime }] } };
+      }
+      assert.equal(url, "/conversation/conversation");
+      details += 1;
+      return {
+        status: 200,
+        body: details === 1
+          ? { id: "conversation", current_node: "root", mapping: { root: { parent: null, message: null } } }
+          : conversationDetail(messageId, "원문", "지연 후 완료"),
+      };
+    },
+  };
+  const result = await waitForConversationResponse(bridge, {
+    headers: {}, messageId, prompt: "원문", notBeforeMs: Date.now(), pollIntervalMs: 1,
+  });
+  assert.equal(result.text, "지연 후 완료");
+  assert.equal(result.assistant_message_id, "assistant-message");
+  assert.equal(lists, 2);
+  assert.equal(details, 2);
+});
+
 test("bridge request cancellation and stream timeout are surfaced and cleaned up", async () => {
   class FakeCdp extends EventEmitter {
     constructor() { super(); this.target = { url: "app://-/index.html" }; }
