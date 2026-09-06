@@ -23,7 +23,7 @@ Codex $gptpro
 
 `swift-intelligence`는 Xcode의 SourceKit-LSP로 Swift 정의, 참조, 구현, 타입, 심볼 및 진단을 읽기 전용으로 조회합니다. MCP 서버가 필요한 Plugin이므로 `plugins/swift-intelligence/`에만 제공합니다. Python 3 외의 Python 패키지나 외부 MCP 바이너리를 추가로 설치하지 않습니다.
 
-`astra-orchestrator`는 GPT-6 Astra 리더·워커·Git Steward·독립 리뷰어를 조정하는 스킬입니다. 역할별 추론 자동 선택, 리더·워커 분업, Git 전담 워커를 통한 병렬 결과 통합을 요청하거나 직접 호출할 때 사용하며, 단순 모델 추천·스킬 작성·일반 단일 작업에는 자동 적용하지 않습니다. 모델과 추론 수준을 지정할 수 있는 Codex 서브에이전트 도구가 필요합니다. [Astra Orchestrator 설치와 사용](plugins/astra-orchestrator/README.md)을 참고하세요.
+`astra-orchestrator`는 Astra 리더·워커·Git 전용 워커로 작업 조정을 요청할 때 사용하는 스킬입니다. 작은 작업은 현재 리더가 직접 완료하고 병렬화가 유리할 때만 위임합니다. 스킬 자체의 설명·편집이나 일반 단일 작업에는 자동 적용하지 않습니다. 내부 병렬 과제는 서브에이전트, 사용자가 새 작업 생성을 명시한 장기 과제는 별도 Codex 작업을 선택할 수 있습니다. [Astra Orchestrator 설치와 사용](plugins/astra-orchestrator/README.md)을 참고하세요.
 
 ## 설치
 

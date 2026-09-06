@@ -1,70 +1,18 @@
-# Handoff와 반환 계약
+# 전달할 정보와 반환 증거
 
-## Worker handoff packet
+아래 정보 중 과제에 필요한 내용을 간결하게 전달한다. 고정 heading, 항목 수, N/A 채우기는 요구하지 않는다.
 
-8개 heading을 유지하고 실제 값으로 채운다. 해당 없으면 이유가 있는 N/A로 쓴다. 템플릿만 보내지 않는다.
+- 목표와 관측 가능한 완료 조건, 역할·모델·effort 및 선택 이유.
+- 확인한 작업 절대 경로, 수정 범위·소유권, 필요한 입력과 선행 결과. Git 과제에는 branch/HEAD와 dirty 입력 식별자도 포함한다.
+- 적용되는 사용자 지시·AGENTS.md·도메인 지침, 보존할 변경, 기존 권한과 공유 자원 제약.
+- 판단에 필요한 재현·원문 오류·현재 증거. 긴 대화 전체 대신 관련 파일과 로그 경로를 제공한다.
 
-```markdown
-## Task
-작업 ID, 역할, 목표 한 문장. 모델 gpt-6-astra, effort, 분류 이유.
-## Why
-사용자 요구사항과 이 과제가 해결하는 문제.
-## Scope
-작업 디렉터리와 소유 worktree·branch/HEAD, 변경 가능한 파일/심볼,
-범위 밖 항목, 단일 writer 소유권과 Git Steward 인계 시점.
-## Inputs
-권위 문서, AGENTS.md, 실제 관련 파일, 수용된 선행 결과.
-기준 commit과 dirty diff/untracked 입력 또는 snapshot 식별자.
-## Constraints
-구현 제약, 호환성, 공유 빌드/테스트 자원, 사용자 변경 보존.
-Do-not-touch: 수정 금지 파일/영역과 금지된 외부 행동.
-일반 Worker는 구현·테스트 담당. Git 변경/통합은 Steward에게 인계.
-범위 밖 필요는 리더에게 반환. 중첩 위임 금지.
-## Acceptance criteria
-AC1, AC2처럼 관측 가능한 완료 조건과 적합한 정상/오류 검증.
-필수 검증과 선택 검증을 구별.
-## Relevant evidence
-현재 동작, 재현 단계, 원문 오류, 테스트/로그 경로, 실행 환경.
-Escalation이면 각 수정 시도, 실제 재검증 결과, 미해결 가설.
-## Expected output
-아래 worker 반환 형식. 완료 조건별 증거와 미실행 항목 포함.
-```
+워커가 방법을 선택하도록 맡기고, 정확성·안전·호환성에 필요한 절차만 구체화한다. 일반 워커는 구현·테스트를 담당하고 Git 변경·통합은 별도 Steward에게 인계한다.
 
-## Worker 반환
+## 반환
 
-```markdown
-Status: COMPLETE | PARTIAL | BLOCKED
-Task ID / session ID:
-Configuration: desired / submitted / observed (관측 불가이면 unverified)
-Changes: 변경 파일·심볼과 동작 영향
-Evidence:
-| Criterion | Result | Evidence path or command | Environment/input identity |
-| --- | --- | --- | --- |
-Tests: 실제 실행 명령, 결과, 필요한 로그 경로
-Not run: 미실행 필수/선택 검증과 이유
-Remaining: 남은 오류, 위험, 범위 밖 필요한 변경
-```
+자기 범위의 완료/부분 완료/차단 상태, 실제 변경 파일·심볼, 완료 조건을 뒷받침하는 검사와 결과, 미실행 항목·이유, 남은 문제를 보고한다. 명령 제시와 실제 실행, 직접 확인과 전달받은 증거를 구별한다. 설정은 요청값과 확인값을 구별하며 관측 불가는 unverified로 둔다. 긴 원문 로그는 관련 경로로 전달한다.
 
-COMPLETE는 자기 scope에 대한 주장이다. 전체 완료는 리더가 통합·검토 후 판정한다. 명령 제시와 실제 실행을 구별한다. Git Steward에는 같은 8개 heading을 쓰되 [Git 전용 입력과 12항목 Result](git-steward.md)를 적용한다.
+Git Steward는 [Git 결과](git-steward.md)의 상태·권한·보존 증거를 추가한다. 독립 reviewer는 [검토 기준](roles.md)에 따라 검토한 snapshot, PASS / CHANGES_REQUIRED / BLOCKED, 실제 위치·근거·영향·필요한 수정과 미확인 항목을 반환한다. 필수 증거 부족은 BLOCKED이며, 수정도 필요하면 CHANGES_REQUIRED에 검증 blocker를 함께 적는다.
 
-## 독립 reviewer
-
-동일한 8개 heading을 사용하되 역할은 independent final reviewer, 모델/effort는 `gpt-6-astra` / `max`다. Scope는 고정된 통합 snapshot 검증으로 제한한다. Git Steward/구현 워커와 다른 새 세션을 쓴다. Constraints에는 제품 파일·Git history/index 변경 금지, 중첩 위임 금지, 검증용 임시 출력 위치와 권한을 명시한다. 요구사항, 통합 SHA·diff 등 원본 evidence는 주되 구현자·Steward의 성공 결론은 주입하지 않는다.
-
-Expected output:
-
-```markdown
-Verdict: PASS | CHANGES_REQUIRED | BLOCKED
-Reviewed snapshot: commit + dirty/untracked 변경 식별자
-Configuration: desired / submitted / observed (또는 unverified)
-Requirements: acceptance criteria별 충족 여부와 직접 확인한 근거
-Findings: 심각도, 실제 파일/심볼, 문제, 재현/근거, 영향, 필요한 수정
-Checks: requirements / regression / concurrency / lifetime / error handling /
-        test coverage / integration / completion claims
-        각 항목의 검증 또는 이유가 있는 N/A
-Validation: 직접 실행 검사와 전달받은 증거를 구별
-Not verified: 미실행·환경 제한·남은 불확실성
-Completion assessment: 현재 evidence로 주장 가능한 범위
-```
-
-필수 evidence가 없어 판단 불가이면 BLOCKED, 실제 수정이 필요하면 CHANGES_REQUIRED다. 둘 다 있으면 CHANGES_REQUIRED에 검증 blocker도 명시한다. PASS는 미실행 필수 검증을 생략하거나 확인 범위를 넘는 출시/실기기 보장을 의미하지 않는다.
+워커의 완료는 자신의 범위에 대한 보고다. 전체 완료 책임은 리더에게 있다.

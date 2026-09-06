@@ -1,6 +1,6 @@
 # Astra Orchestrator
 
-모든 참여 세션을 GPT-6 Astra로 유지하고 지속 리더가 일회성 Worker, Git Steward, 독립 Reviewer를 조정하는 Codex 스킬이다. 정책은 [SKILL.md](SKILL.md), 도구 호출은 [session-tools.md](references/session-tools.md), 전달/반환은 [packets.md](references/packets.md), Git 안전 규칙과 결과 형식은 [git-steward.md](references/git-steward.md)에 있다.
+모든 참여 세션을 GPT-6 Astra로 유지하고 지속 리더가 필요한 Worker, Git Steward, 독립 Reviewer를 조정하는 Codex 스킬이다. 정책은 [SKILL.md](SKILL.md), 도구 호출은 [session-tools.md](references/session-tools.md), 전달/반환은 [packets.md](references/packets.md), Git 안전 규칙과 결과 형식은 [git-steward.md](references/git-steward.md)에 있다.
 
 | 역할 | 설정 |
 | --- | --- |
@@ -41,7 +41,7 @@ codex -m gpt-6-astra -c 'model_reasoning_effort="xhigh"' \
   '$astra-orchestrator를 사용해 이 저장소의 요청된 목표를 리더·워커로 분업하고 완료까지 조정해 주세요.'
 ```
 
-위 문장의 목표를 실제 업무로 구체화한다. 전역 config.toml 수정은 필요 없다. 현재 서브에이전트 도구가 정확한 모델/effort를 지정할 수 있어야 자동 선택이 실행에 반영된다.
+위 문장의 목표를 실제 업무로 구체화한다. 전역 config.toml 수정은 필요 없다. 현재 서브에이전트 도구가 정확한 모델/effort를 지정할 수 있어야 선택이 실행에 반영된다. 위 CLI 예시는 Standard 속도를 설정하는 명령이 아니다. 속도 제어·확인 가능 여부는 [세션 도구 안내](references/session-tools.md)를 따르며, Standard 지시를 충족할 수 없는 경로는 사용하지 않는다.
 
 ### 일반 기능 구현
 
@@ -50,10 +50,10 @@ $astra-orchestrator
 설정 화면의 입력 검증을 구현해 주세요.
 기존 저장 형식과 공개 API를 유지하고 오류 입력·정상 저장을 검증하세요.
 리더는 계획과 통합, 워커는 구현·테스트를 담당하세요.
-최종 기능 완료는 독립 reviewer가 확인하세요.
+중요한 기능 완료는 독립 reviewer가 확인하세요.
 ```
 
-일반 구현은 high, 기계적인 기존 검사 실행은 독립 과제로 나눌 이익이 있을 때 medium, 최종 기능 검토는 max다.
+위 예시처럼 역할 분리·독립 검토를 명시하면 해당 요청을 따른다. 일반 호출에서는 병렬화 이익이 있을 때만 위임하며 작은 작업은 리더가 직접 완료한다. 역할별 effort와 검토 필요성은 [판단 기준](references/roles.md)을 따른다.
 
 ### Git 통합
 
@@ -67,7 +67,7 @@ push는 하지 마세요. 통합 후 별도 Reviewer로 기능 완료를 검증�
 
 실제 integration branch와 source 작업은 입력·현재 상태에서 확인한다. Git 조사 medium, 일반 통합 high, 복잡한 충돌·history 문제 xhigh, 최종 독립 검토 max로 배정한다. Git Steward는 repository 상태를 만들고 Reviewer는 그 결과의 요구사항 충족을 확인한다. 두 역할을 같은 세션으로 합치지 않는다.
 
-Git 규칙은 사용자 변경 보존, unrelated 변경 staging/commit 금지, 매 mutation 직전 상태 확인, stash 기본 미사용, 단일 worktree owner, 모호한 conflict의 Leader 인계를 포함한다. 파괴적 작업·branch 삭제·공유 이력 변경은 해당 작업에 대한 Leader의 명시적 승인이 필요하고 그 승인은 사용자 권한 범위 안에서만 유효하다. `push --force`는 금지하며 원격 이력 변경이 허용된 경우에만 확인된 remote SHA를 지정한 force-with-lease를 사용한다. [세부 규칙과 12항목 결과](references/git-steward.md)를 따른다.
+Git 규칙은 사용자 변경 보존, unrelated 변경 staging/commit 금지, 연산에 필요한 최신 전제 상태 확인, stash 기본 미사용, 단일 worktree owner, 모호한 conflict의 Leader 인계를 포함한다. 파괴적 작업·branch 삭제·공유 이력 변경은 대상과 효과에 대한 명시적 사용자 권한이 필요하며 기존 권한은 재사용한다. `push --force`는 금지하며 원격 이력 변경이 허용된 경우에만 확인된 remote SHA를 지정한 force-with-lease를 사용한다. [세부 규칙과 Git 결과](references/git-steward.md)를 따른다.
 
 ### 난제와 escalation
 
@@ -77,7 +77,7 @@ $astra-orchestrator
 최소 재현과 lifetime 분석, 정상/취소/중복 호출 검증 증거를 남기세요.
 ```
 
-Race는 처음부터 xhigh specialist다. Normal worker도 동일 완료 조건에 2회의 근거 있는 수정·재검증이 실패하면 새 specialist로 전환한다. 입력·기기·인증 부재는 추론을 올리는 이유가 아니다.
+Race는 처음부터 xhigh specialist다. 진전 없는 반복은 재현·가설·관측 결과를 다시 평가하고 전문 분석이 필요할 때 specialist에 넘긴다. 입력·기기·인증 부재는 추론을 올리는 이유가 아니다.
 
 ### 작은 기계적 작업
 

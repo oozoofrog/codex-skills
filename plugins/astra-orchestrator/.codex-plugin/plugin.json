@@ -1,7 +1,7 @@
 {
   "name": "astra-orchestrator",
-  "version": "0.1.0",
-  "description": "GPT-6 Astra 리더·워커·Git Steward·독립 리뷰어의 역할별 추론과 병렬 작업을 조정하는 Codex 스킬",
+  "version": "0.1.1",
+  "description": "Astra 리더·워커·Git 전용 워커로 작업 조정을 요청할 때 사용하는 Codex 스킬",
   "author": {
     "name": "oozoofrog",
     "url": "https://github.com/oozoofrog"
@@ -12,13 +12,13 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Astra Orchestrator",
-    "shortDescription": "Astra 리더·워커·Git Steward·독립 검토 역할 조정",
-    "longDescription": "역할별 추론 자동 선택, 리더·워커 분업, Git Steward를 통한 병렬 결과 통합을 요청하거나 스킬을 직접 호출할 때 사용합니다. 단순 모델 추천, 스킬 작성·수정 자체, 일반 단일 작업에는 자동 적용하지 않습니다. 모델과 추론 수준을 지정할 수 있는 Codex 서브에이전트 도구가 필요하며, 실행 중인 리더의 모델·설정이나 사용자 권한을 스킬이 변경하지 않습니다.",
+    "shortDescription": "Astra 작업 조정: 필요한 병렬 위임과 Git 역할 분리",
+    "longDescription": "Astra 리더·워커·Git 전용 워커로 작업 조정을 요청할 때 사용합니다. 작은 작업은 현재 리더가 직접 완료하고 병렬화 이익이 있을 때만 위임합니다. 스킬 자체의 설명·편집이나 일반 단일 작업에는 자동 적용하지 않습니다. 별도 Codex 작업은 사용자가 새 작업 생성을 명시한 경우에 선택하며, 모델·추론·속도 지원은 현재 도구에서 확인합니다. 스킬은 실행 중인 리더 설정이나 사용자 권한을 변경하지 않습니다.",
     "developerName": "oozoofrog",
     "category": "Productivity",
     "capabilities": ["Interactive"],
     "defaultPrompt": [
-      "$astra-orchestrator:astra-orchestrator로 현재 목표를 리더·워커·Git Steward·독립 리뷰어로 나누어 완료해 주세요."
+      "$astra-orchestrator:astra-orchestrator로 현재 목표를 완료해 주세요. 병렬화가 유리할 때만 위임하고, 위임할 Git 변경은 별도 Git Steward에게 맡기세요."
     ]
   }
 }

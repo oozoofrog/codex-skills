@@ -1,4 +1,4 @@
 interface:
   display_name: "Astra Orchestrator"
-  short_description: "Astra 리더·워커·Git Steward·독립 검토 역할 조정"
-  default_prompt: "$astra-orchestrator로 리더·워커·Git Steward·독립 리뷰어를 나누고 역할별 Astra 추론을 선택해 현재 목표를 완료해 주세요."
+  short_description: "Astra 작업 조정: 필요한 병렬 위임과 Git 역할 분리"
+  default_prompt: "$astra-orchestrator로 현재 목표를 완료해 주세요. 병렬화가 유리할 때만 위임하고, 위임할 Git 변경은 별도 Git Steward에게 맡기세요."

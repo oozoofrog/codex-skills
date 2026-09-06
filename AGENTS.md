@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Collaboration Rules
-- Use the `skill-creator` workflow when creating or materially updating `gptpro`.
+- Use the `skill-creator` workflow when creating or materially updating skills.
 - Keep `gptpro/SKILL.md` frontmatter limited to `name` and `description`.
 - Keep trigger language aligned across the standalone Skill, Plugin mirror, UI metadata, and `README.md`.
 - Prefer `references/` for long guidance and keep top-level instructions lean.
@@ -13,6 +13,7 @@
 - State any remaining manual follow-up or risk.
 
 ## Review Rules
+- Apply checks to the changed skill/package and affected distribution surfaces. Run relevant checks once; repeat only after related changes, failures, or new evidence. The gptpro examples and outbound-package regressions below apply only when those behaviors change.
 - When adding a Plugin, update the expected marketplace inventory in `scripts/tests/test_plugin_distribution.py` and run the repository distribution tests.
 - Check trigger wording consistency between both `SKILL.md` copies, both UI metadata files, and `README.md`.
 - Check every copyable `gptpro.py prepare` example uses directed `--include` or `--file-list` selection unless whole-repository disclosure is explicit and explained.
