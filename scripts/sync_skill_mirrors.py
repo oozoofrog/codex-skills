@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-PACKAGES = ("gptpro",)
+PACKAGES = ("gptpro", "gptwork")
 IGNORED_NAMES = {".DS_Store", "__pycache__"}
 IGNORED_SUFFIXES = {".pyc", ".pyo"}
 

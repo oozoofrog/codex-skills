@@ -36,7 +36,7 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertEqual("codex-skills", marketplace["name"])
         self.assertEqual("Codex Skills", marketplace["interface"]["displayName"])
         self.assertEqual(
-            ["gptpro", "swift-intelligence", "astra-orchestrator"],
+            ["gptpro", "swift-intelligence", "astra-orchestrator", "gptwork"],
             [plugin["name"] for plugin in marketplace["plugins"]],
         )
         for entry in marketplace["plugins"]:
@@ -109,6 +109,26 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertNotIn("$gptpro-mcp", skill)
         self.assertNotIn("$gptpro-mcp", ui)
 
+
+    def test_gptwork_distribution(self) -> None:
+        source = REPO_ROOT / "gptwork"
+        plugin = REPO_ROOT / "plugins" / "gptwork"
+        mirror = plugin / "skills" / "gptwork"
+        self.assertTrue((source / "SKILL.md").is_file())
+        self.assertEqual(tree_files(source), tree_files(mirror))
+        manifest = json.loads((plugin / ".codex-plugin" / "plugin.json").read_text())
+        self.assertEqual("gptwork", manifest["name"])
+        self.assertEqual("./skills/", manifest["skills"])
+        self.assertNotIn("mcpServers", manifest)
+        self.assertNotIn("apps", manifest)
+        for prompt in manifest["interface"]["defaultPrompt"]:
+            self.assertIn("$gptwork", prompt)
+            self.assertLessEqual(len(prompt), 128)
+        for path in source.rglob("*.md"):
+            import re
+            for target in re.findall(r"\[[^\]]*\]\(([^)]+)\)", path.read_text()):
+                if "://" not in target:
+                    self.assertTrue((path.parent / target.split("#")[0]).exists(), (path, target))
 
     def test_swift_intelligence_plugin_loads_skill_and_mcp_server(self) -> None:
         manifest = json.loads(

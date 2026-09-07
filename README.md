@@ -1,6 +1,6 @@
 # codex-skills
 
-이 저장소는 Codex가 로그인된 macOS ChatGPT 앱의 ChatGPT Pro를 인라인 코드 분석 파트너로 호출하는 `$gptpro`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 Astra 분업용 `astra-orchestrator` Plugin을 제공합니다. `$gptpro`는 사용자가 명시적으로 요청한 plan, ask, review, debug, architecture 작업에만 실행되며 일반 Codex 작업이나 OpenAI API 호출에서는 자동 호출되지 않습니다.
+이 저장소는 Astra 기반 ChatGPT Work 실행·응답 회수·호출 세션 처리를 위한 `$gptwork`, Codex가 로그인된 macOS ChatGPT 앱의 ChatGPT Pro를 인라인 코드 분석 파트너로 호출하는 `$gptpro`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 Astra 분업용 `astra-orchestrator` Plugin을 제공합니다. `$gptpro`는 사용자가 명시적으로 요청한 plan, ask, review, debug, architecture 작업에만 실행되며 일반 Codex 작업이나 OpenAI API 호출에서는 자동 호출되지 않습니다.
 
 ## v0.6 흐름
 
@@ -85,3 +85,17 @@ git diff --check
 ```
 
 변경 기록은 [CHANGELOG.md](CHANGELOG.md), source/licensing 판단은 [source inventory](docs/gptpro-source-inventory.md)에 있습니다.
+
+## ChatGPT Work 작업 생성
+
+`$gptwork`은 요청을 정리하고 **GPT-6 Astra와 난이도별 사고 수준을 설정·검증한 뒤 같은 입력창에서 한 번 제출**합니다. 별도의 모델 설정 요청은 필요하지 않습니다. 명시한 설정은 우선하고, 모델 변경 후 사고 수준이 초기화될 수 있으므로 두 값을 모두 확인합니다.
+
+```text
+$gptwork gptwork 스킬을 Work에서 검토해주세요.
+```
+
+현재 네이티브 Work 생성 도구는 모델 설정을 지원하지 않아 브라우저 Work UI를 기본으로 사용합니다. 설정을 검증할 수 없으면 프롬프트를 보존하고 전송 전에 중단합니다. 기본값으로 먼저 생성한 뒤 추천만 보고하지 않습니다. “현재 설정 그대로”라는 명시적 선택만 예외입니다. 이미 시작된 응답은 사후 설정 변경으로 소급 변경됐다고 보고하지 않습니다. [gptwork 사용 안내](gptwork/README.md)를 참고하세요.
+
+파일 전달 요청은 지원되는 브라우저 업로드로 실제 첨부하고 전송 전후 첨부 상태를 확인합니다. [파일 첨부 기준](gptwork/references/file-attachments.md)에 따라 파일 내용의 프롬프트 붙여넣기와 실제 첨부를 구분합니다.
+
+기본 모델은 Astra이며 질문 난이도에 따라 사고 수준을 선택합니다. 제출 뒤에는 호출한 세션에서 응답 완료를 기다리고 전체 답변을 읽어 원래 요청의 검토·답변·허용된 수정까지 이어갑니다. 명시적 생성 전용 요청이 아니라면 링크만 보고 끝내지 않습니다. [응답 처리 기준](gptwork/references/response-return.md)을 참고하세요.
