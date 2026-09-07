@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT Please"
+  short_description: "목적에 맞는 Chat·Work 모델과 사고 수준으로 파일을 보내고 완료 응답을 처리합니다"
+  default_prompt: "Use $gptplease to choose a suitable Chat or Work model and reasoning for my request, verify file delivery, and process the completed response here."

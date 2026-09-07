@@ -56,7 +56,7 @@ build_auto_commit_message() {
   done < <(changed_roots)
 
   if [[ "${#paths[@]}" -eq 0 ]]; then
-    printf 'Auto-sync gptpro'
+    printf 'Auto-sync codex-skills'
     return
   fi
 
@@ -66,9 +66,9 @@ build_auto_commit_message() {
   summary="$(IFS=', '; printf '%s' "${preview[*]}")"
 
   if [[ "${#paths[@]}" -gt "${limit}" ]]; then
-    printf 'Auto-sync gptpro: %s (+%d more)' "${summary}" "$(( ${#paths[@]} - limit ))"
+    printf 'Auto-sync codex-skills: %s (+%d more)' "${summary}" "$(( ${#paths[@]} - limit ))"
   else
-    printf 'Auto-sync gptpro: %s' "${summary}"
+    printf 'Auto-sync codex-skills: %s' "${summary}"
   fi
 }
 
@@ -180,7 +180,7 @@ if ! git diff --cached --quiet; then
     if [[ "${AUTO_MODE}" -eq 1 ]]; then
       COMMIT_MESSAGE="$(build_auto_commit_message)"
     else
-      COMMIT_MESSAGE="Sync gptpro: $(date '+%Y-%m-%d %H:%M:%S %z')"
+      COMMIT_MESSAGE="Sync codex-skills: $(date '+%Y-%m-%d %H:%M:%S %z')"
     fi
   fi
   log "Creating commit: ${COMMIT_MESSAGE}"

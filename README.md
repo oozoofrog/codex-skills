@@ -1,25 +1,25 @@
 # codex-skills
 
-이 저장소는 Astra 기반 ChatGPT Work 실행·응답 회수·호출 세션 처리를 위한 `$gptwork`, Codex가 로그인된 macOS ChatGPT 앱의 ChatGPT Pro를 인라인 코드 분석 파트너로 호출하는 `$gptpro`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 Astra 분업용 `astra-orchestrator` Plugin을 제공합니다. `$gptpro`는 사용자가 명시적으로 요청한 plan, ask, review, debug, architecture 작업에만 실행되며 일반 Codex 작업이나 OpenAI API 호출에서는 자동 호출되지 않습니다.
+ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위한 `$gptplease`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 작업 조정을 위한 `astra-orchestrator`를 제공합니다.
 
-## v0.6 흐름
+## GPT Please
+
+`gptwork`를 **gptplease**로 이름 변경하고 Chat·Chat Pro 상담과 목적·복잡도에 따른 모델·사고 수준 선택을 통합했습니다. 기존 `gptpro` Skill·Plugin·전용 Runner/전송 런타임 및 전용 설치 도구는 제거했습니다. 과거 상담 패키지·로그인 프로필을 삭제하거나 새 스킬로 이관하지 않습니다.
 
 ```text
-Codex $gptpro
-  -> directed file selection + secret/path scan
-  -> immutable Schema 6 package
-  -> exact outbound.md, maximum 256 KiB
-  -> exact or bounded standing approval v4
-  -> isolated gptpro Runner profile + loopback-only CDP
-  -> exact ChatGPT renderer while the ordinary app remains untouched
-  -> exact gpt-5-6-pro, normal Chat
-  -> one user-message POST with no tool definitions or capabilities
-  -> signed WebSocket handoff, completion, and import
-  -> conditional exact current-branch proof when compact branch provenance is ambiguous
-  -> Codex independent verification
+$gptplease Chat Pro로 선택한 파일을 검토하고 완료 응답을 여기서 처리해주세요.
+$gptplease Work에서 Astra로 이 기획안을 검토하고 답변을 가져와 주세요.
 ```
 
-`gptpro`는 Browser, Chrome, Computer Use, 수동 Send/Copy, custom ChatGPT App, Developer Mode, MCP, Secure MCP Tunnel, `gptpro-mcp`, local function, server-tool fallback을 사용하지 않습니다. ChatGPT Pro는 승인된 `outbound.md` 원문만 보며 live worktree, shell, 파일 쓰기, build/test, Git 변경, 임의 filesystem/network 권한은 없습니다.
+- Chat·Work의 실제 선택기에서 목적·복잡도·시간 및 비용 제한에 맞는 모델과 사고 수준을 고릅니다. 명확한 추출은 Luna Light, 일반 작업은 Terra Medium, 깊은 분석은 Sol High, 어려운 다단계 작업은 Astra High/Extra High를 시작점으로 삼습니다.
+- 모델·사고 수준을 명시하면 그대로 지키고 나머지만 자동 선택합니다. `Chat Pro`는 Pro를, `Chat Astra Pro`는 모델까지 요구합니다. 명시한 조합이 없으면 전송을 보류합니다.
+- 모드를 생략한 새 요청은 Work를 사용합니다. 자동 선택은 같은 모드의 가용 후보 안에서 조정하며 Ultra·Fast/priority를 자동 활성화하지 않습니다.
+- 승인된 파일은 실제 업로드하며, 같은 입력창에서 모드·설정·첨부를 확인한 뒤 한 번 전송합니다.
+- 호출 세션이 최종 응답 완료를 기다리고 전체 내용을 읽어 검토·답변·허용된 수정을 이어갑니다.
+
+지원되는 브라우저 제어와 ChatGPT 로그인이 필요합니다. 기존 패키지의 자동 비밀정보 검사·불변 승인·영구 전송 기록·서명 스트림/전용 복구를 제공한다고 주장하지 않습니다. 코드 상담과 응답 회수 용도를 통합한 것이며, 공개 범위와 독립 검증은 호출 세션이 책임집니다. [사용 안내](gptplease/README.md), [모델 선택](gptplease/references/model-selection.md), [입력창 설정](gptplease/references/composer-settings.md), [파일 첨부](gptplease/references/file-attachments.md)를 참고하세요.
+
+## 다른 Plugin
 
 `swift-intelligence`는 Xcode의 SourceKit-LSP로 Swift 정의, 참조, 구현, 타입, 심볼 및 진단을 읽기 전용으로 조회합니다. MCP 서버가 필요한 Plugin이므로 `plugins/swift-intelligence/`에만 제공합니다. Python 3 외의 Python 패키지나 외부 MCP 바이너리를 추가로 설치하지 않습니다.
 
@@ -27,75 +27,23 @@ Codex $gptpro
 
 ## 설치
 
-`gptpro`는 Node.js 22 이상, Python 3.11 이상, `/Applications/ChatGPT.app`이 필요합니다. npm 설치는 없습니다.
-
-```bash
-python3 scripts/manage_skills.py list
-python3 scripts/manage_skills.py install gptpro --dry-run
-python3 scripts/manage_skills.py install gptpro --update
-```
-
-기존 `gptpro-mcp` 설치본이 있으면 installer는 `--legacy-handoff-dir`로 지정한 정확한 package와 terminal authorization, non-live controller, exact-child stop 증거가 모두 확인될 때만 레거시 companion과 descriptor를 Trash로 옮깁니다. 과거 package/receipt는 지우지 않습니다.
-
-자세한 설치는 [standalone 설치](docs/selective-installation.md)와 [Plugin 설치](docs/plugin-installation.md)를 참고하세요.
-
-Swift Intelligence는 marketplace 등록 후 Plugin으로 설치합니다.
+필요한 Plugin만 선택해 설치합니다. 아래 명령은 해당 변경이 원격 marketplace에 반영된 뒤 사용할 수 있습니다.
 
 ```bash
 codex plugin marketplace add oozoofrog/codex-skills --ref main
-codex plugin add swift-intelligence@codex-skills
+codex plugin add gptplease@codex-skills
 ```
 
-Swift Intelligence 설치 후 Codex를 다시 시작하고 새 작업을 여십시오. 자세한 요구 사항과 사용법은 [Swift Intelligence 설치 및 사용](plugins/swift-intelligence/docs/installation-and-usage.md)을 참고하세요.
-
-Astra Orchestrator도 같은 marketplace에서 필요한 Plugin만 선택해 설치합니다. 아래 명령은 이 버전이 marketplace에 반영된 뒤 사용할 수 있습니다.
-
-```bash
-codex plugin add astra-orchestrator@codex-skills
-```
-
-설치 후 새 작업에서 `$astra-orchestrator:astra-orchestrator`로 호출합니다. 기존 로컬 `astra-orchestrator`와 중복 설치하지 않도록 배포 경로를 선택하세요. Plugin 설치는 실행 중인 리더의 모델·추론 설정을 변경하지 않습니다.
-
-## 첫 사용
-
-기능 이름과 정의, 전송·수집·복구·평가의 차이는 [gptpro Skill 안내](gptpro/README.md)를 참고하세요.
-
-```text
-$gptpro review 모드로 src와 tests의 현재 변경을 ChatGPT Pro와 함께 검토해주세요.
-```
-
-첫 상담에서는 Codex가 CLI 실행 전에 필수 환경을 확인하고, 필요한 설정의 이유와 선택지를 안내한 뒤 사용자가 선택한 작업을 실행합니다. 기존 설치 도구만 활용하며, 도구가 없으면 공식 수동 설치를 안내합니다. Launcher는 선택 사항이고 로그인은 사용자가 전용 창에서 완료합니다. 준비된 환경에서는 설치 질문 없이 `desktop-doctor`와 `models`로 확인한 뒤 원래 상담을 이어갑니다. 설정만 요청하면 시험 메시지 없이 마치며 설정 권한은 코드 전송 승인을 대신하지 않습니다. 상세 절차는 [첫 사용과 환경 설정](gptpro/references/setup.md)을 참고하세요.
-
-전용 Runner는 `desktop-launch` 또는 설치된 `gptpro Launcher.app`으로 실행합니다. Runner는 별도 owner-only 프로필과 포트 9223을 사용하므로 평소의 ChatGPT 앱을 종료하거나 디버그 옵션으로 다시 열 필요가 없습니다. 이후 exact `outbound.md`는 한 번만 POST되고, 응답은 POST가 반환한 signed WebSocket topic의 `recovered`/`catchups`/`delta`/`done`과 최종 assistant 증거로 자동 저장됩니다. tool-role 후보 또는 pre-handoff assistant/delta 연속 상태로 branch provenance가 불명확하면 signed 완료 후 알려진 conversation의 current branch를 최대 30초 GET으로 교차검증하며 응답 자체는 signed stream에서만 가져옵니다. Handoff 없는 직접 completion fallback은 없습니다. 2026-09-05 Desktop `26.901.31953`에서 새 승인 canary의 단일 POST, signed 완료, 조건부 branch proof, 자동 import와 독립 evaluation을 통과했습니다. 별도 `collect-response`는 사용하지 않았으며, 이 결과는 한 번의 중단 없는 첫 응답에 대한 증거입니다. 수집이 끊기면 `collect-response`가 같은 메시지 ID와 원문을 가진 기존 대화만 GET으로 읽으며 prompt를 재전송하지 않습니다.
-
-Private Electron/ChatGPT endpoint는 공개 OpenAI API가 아니므로 앱 업데이트로 깨질 수 있습니다. Runtime은 exact renderer, bridge, DeviceCheck, dynamic model catalog가 다르면 fail closed하고 다른 transport나 model로 fallback하지 않습니다.
+설치 후 새 대화에서 `$gptplease`를 호출합니다. 이전 `gptwork`/`gptpro` 설치본의 중복 노출을 정리하되 과거 패키지와 계정 프로필은 보존합니다. 다른 Plugin의 요구 사항과 standalone 설치는 [Plugin 설치 안내](docs/plugin-installation.md)를 참고하세요.
 
 ## 검증
 
 ```bash
-python3 -m unittest discover -s gptpro/tests -v
-python3 -m unittest discover -s plugins/swift-intelligence/tests -v
 python3 -m unittest discover -s scripts/tests -v
-node --test gptpro/tests/*.test.js
-python3 gptpro/scripts/validate_structure.py \
-  --skill-dir gptpro --mirror plugins/gptpro/skills/gptpro --json
-python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py gptpro
-python3 scripts/manage_skills.py install gptpro --dry-run
+python3 scripts/sync_skill_mirrors.py --package gptplease
+python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py gptplease
+python3 ~/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py plugins/gptplease
 git diff --check
 ```
 
-변경 기록은 [CHANGELOG.md](CHANGELOG.md), source/licensing 판단은 [source inventory](docs/gptpro-source-inventory.md)에 있습니다.
-
-## ChatGPT Work 작업 생성
-
-`$gptwork`은 요청을 정리하고 **GPT-6 Astra와 난이도별 사고 수준을 설정·검증한 뒤 같은 입력창에서 한 번 제출**합니다. 별도의 모델 설정 요청은 필요하지 않습니다. 명시한 설정은 우선하고, 모델 변경 후 사고 수준이 초기화될 수 있으므로 두 값을 모두 확인합니다.
-
-```text
-$gptwork gptwork 스킬을 Work에서 검토해주세요.
-```
-
-현재 네이티브 Work 생성 도구는 모델 설정을 지원하지 않아 브라우저 Work UI를 기본으로 사용합니다. 설정을 검증할 수 없으면 프롬프트를 보존하고 전송 전에 중단합니다. 기본값으로 먼저 생성한 뒤 추천만 보고하지 않습니다. “현재 설정 그대로”라는 명시적 선택만 예외입니다. 이미 시작된 응답은 사후 설정 변경으로 소급 변경됐다고 보고하지 않습니다. [gptwork 사용 안내](gptwork/README.md)를 참고하세요.
-
-파일 전달 요청은 지원되는 브라우저 업로드로 실제 첨부하고 전송 전후 첨부 상태를 확인합니다. [파일 첨부 기준](gptwork/references/file-attachments.md)에 따라 파일 내용의 프롬프트 붙여넣기와 실제 첨부를 구분합니다.
-
-기본 모델은 Astra이며 질문 난이도에 따라 사고 수준을 선택합니다. 제출 뒤에는 호출한 세션에서 응답 완료를 기다리고 전체 답변을 읽어 원래 요청의 검토·답변·허용된 수정까지 이어갑니다. 명시적 생성 전용 요청이 아니라면 링크만 보고 끝내지 않습니다. [응답 처리 기준](gptwork/references/response-return.md)을 참고하세요.
+Swift Intelligence를 수정할 때는 해당 Plugin의 검증 지침을 별도로 따릅니다. 변경 기록은 [CHANGELOG.md](CHANGELOG.md)에 있습니다.

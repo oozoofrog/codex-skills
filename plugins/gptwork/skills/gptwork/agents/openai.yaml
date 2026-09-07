@@ -1,4 +1,0 @@
-interface:
-  display_name: "GPT Work"
-  short_description: "Astra·난이도별 사고 수준으로 Work 응답을 받아 호출 세션에서 처리합니다"
-  default_prompt: "Use $gptwork with Astra and difficulty-based reasoning, wait for the complete Work response, and process it in this session."

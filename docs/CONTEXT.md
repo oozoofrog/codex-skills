@@ -1,17 +1,13 @@
 # CONTEXT.md
 
 ## Scope
-
 - `docs/` stores operator-facing repository documentation.
-- Follow the repository-wide rules in [../AGENTS.md](../AGENTS.md).
+- Follow [../AGENTS.md](../AGENTS.md).
 
 ## Key files
-
-- [selective-installation.md](./selective-installation.md): single-package list, dry-run, atomic install, and legacy MCP retirement.
-- [gptpro-source-inventory.md](./gptpro-source-inventory.md): Electron reference provenance, license decision, and clean-room boundary.
+- [plugin-installation.md](./plugin-installation.md): selected Plugin installation, dependencies, and fresh-session loading.
 
 ## Local rules
-
-- Keep commands runnable from the repository root.
-- Keep installation behavior aligned with `scripts/manage_skills.py` and the root README.
-- The normal gptpro path must use its isolated Runner profile and port. It must not require the ordinary ChatGPT app to be quit, relaunched with debugging flags, or have its profile copied.
+- Keep commands runnable from the repository root and aligned with the root README and actual marketplace inventory.
+- Distinguish supported browser configuration and file uploads from native thread tools' send capabilities.
+- Preserve unrelated Plugin documentation and retired user consultation/profile data during distribution changes.

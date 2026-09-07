@@ -1,1 +1,0 @@
-Review for correctness, regressions, security/privacy risk, missing tests, and maintainability. Lead with prioritized actionable findings tied to paths and behavior. Do not manufacture findings to fill categories; say when no issue is supported.

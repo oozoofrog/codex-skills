@@ -1,6 +1,0 @@
-interface:
-  display_name: "GPT Pro Collaborator"
-  short_description: "Guided setup and approved ChatGPT Pro code consultation"
-  default_prompt: "Use $gptpro only for this explicit plan, ask, review, debug, or architecture ChatGPT Pro consultation: check prerequisites before the CLI, guide missing setup with existing installation tools and user choices, reuse a ready environment and prior choices, then select the smallest relevant files, secret-scan and approve one Schema-6 inline snapshot, send it once to the exact Pro model through the isolated loopback Electron Runner without relaunching the ordinary ChatGPT app, collect the response through its signed stream handoff, and independently validate the advice. Setup permission is not code-transmission approval. Do not use it for ordinary Codex work or OpenAI API calls."
-policy:
-  allow_implicit_invocation: false

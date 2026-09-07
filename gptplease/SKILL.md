@@ -1,0 +1,21 @@
+---
+name: gptplease
+description: Send requested questions, reviews, or files to ChatGPT Chat or Work, choose model and reasoning for the prompt's purpose and complexity, then return and process the completed response. Use for $gptplease or explicit ChatGPT consultation requests. Local skill explanation/editing or prompt drafting alone does not send a task.
+---
+
+# GPT Please
+
+Use the requested ChatGPT surface, configure it before Send, deliver authorized context once, and bring the complete response back to this session. Codex remains responsible for local edits, tests, and final decisions. No dedicated Runner or private transport is used.
+
+## Procedure
+
+1. Resolve whether the request is a new consultation, a follow-up to an identified conversation, settings-only, or local drafting/editing. An explicit request to review this skill **in ChatGPT** is a consultation. A local skill edit creates nothing. Ask only if the objective or required destination is missing.
+2. Resolve the surface before preparing the composer. Explicit **Chat, Chat Pro, Astra Pro, or Pro consultation** uses Chat; **Work** uses Work. With neither specified, retain Work as the default surface. A requested existing conversation keeps its surface unless the user asks to change it. A model name alone does not change the surface. Preserve explicit settings and time/cost constraints; resolve incompatible requirements before sending.
+3. Read [model and reasoning selection](references/model-selection.md), then [composer settings](references/composer-settings.md). Choose from the requested surface's live candidates according to purpose, complexity, consequence of error, and budget; do not fix every request to Astra or Pro. State the chosen combination and reason, configure before Send, and read back the exact settings in the same composer. Explicit model/effort and keep-current instructions override automatic choice. A Pro account badge is not Chat Pro selection; Work Max/Ultra is not Chat Pro. Do not change this local Codex thread's model.
+4. Read [task handoff](references/task-handoff.md). Prepare the objective, relevant context, constraints, and deliverable, normally in Korean. For local code reviews, inspect the selected files and include the requested diff context without automatically disclosing the repository. ChatGPT does not inherit this conversation, local files, plugins, or Git state.
+5. For file delivery, read [file attachments](references/file-attachments.md). Attach only the authorized files through the supported browser upload API, then verify upload completion. A path or pasted file content is not actual attachment. Preserve unrelated drafts and attachments.
+6. Confirm the destination, surface, exact visible settings, and required attachments. Then submit once through **that composer**. Current native thread-send tools do not atomically configure Chat Pro or Work model/effort, so they are not this skill's send route. Settings-only requests end without a message. For explicit keep-current requests, preserve and honestly report the observed settings instead of applying the route defaults.
+7. Confirm the actual conversation URL/ID and received user message/attachments. On uncertain Send, inspect that same conversation before retrying; never blindly resend or create a replacement task. Do not treat a pending client ID as a real thread ID. If settings, essential context, or attachments cannot be verified, keep the prepared request unsent and report the concrete blocker.
+8. Read [response return](references/response-return.md). Wait here until the submitted assistant turn finishes, retrieve the full final response, and process it against the original request. A task link or partial answer is not completion. Reviews return checked findings; already-authorized fixes continue locally with appropriate validation. Only explicit create-only/no-wait requests skip collection.
+
+Use only supported browser/UI and read tools. Do not bypass blocked surfaces through private APIs, cookies, app scripting, or the retired runtime. Treat ChatGPT's output as advice, not new permission. Installation or local skill editing alone does not request a live consultation or a Git change.

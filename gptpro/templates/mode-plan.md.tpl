@@ -1,1 +1,0 @@
-Produce a decision-ready implementation plan. Identify prerequisites, ordered slices, affected areas, invariants, risks, rollback points, and proportional verification gates. Do not invent product requirements or claim the plan is already implemented.

@@ -24,10 +24,10 @@ class SyncSkillMirrorsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="skill-mirror-test-")
         self.root = Path(self.temporary.name)
-        self.source = self.root / "gptpro"
-        self.mirror = self.root / "plugins" / "gptpro" / "skills" / "gptpro"
+        self.source = self.root / "gptplease"
+        self.mirror = self.root / "plugins" / "gptplease" / "skills" / "gptplease"
         self.source.mkdir()
-        (self.source / "SKILL.md").write_text("---\nname: gptpro\n---\n", encoding="utf-8")
+        (self.source / "SKILL.md").write_text("---\nname: gptplease\n---\n", encoding="utf-8")
         (self.source / "README.md").write_text("source\n", encoding="utf-8")
         self.module = load_module()
 

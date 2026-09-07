@@ -1,0 +1,20 @@
+# Actual file delivery to Chat or Work
+
+Read when the request includes sending or attaching local files. Reuse the user's authorization for the named files; do not expand to neighboring files or the whole repository. A filesystem path is not an attachment. If actual attachment is requested, pasting file contents into the prompt is not an equivalent success.
+
+## Upload and verify
+
+1. Confirm the intended files exist and match the authorized scope. Prepare the request separately from the attachment. Do not overwrite a user's existing draft or remove unrelated attachments.
+2. Inspect the supported browser API documentation for file uploads in the current session. Open the intended Chat/Work composer and complete model/effort selection. Use the visible attachment menu and documented file chooser/upload API. Do not use private upload endpoints or copy data to an unrelated service.
+3. Where the live API supports it, register the file chooser event **before** clicking the observed upload action, then pass the exact authorized paths to the chooser. The verified API shape was `tab.playwright.waitForEvent("filechooser", { timeoutMs: 10000 })`, followed by the observed UI click, awaiting the chooser, and `chooser.setFiles([absolutePath])`. Discover current documentation and live controls rather than copying element IDs or assuming this API exists everywhere.
+4. Wait for upload completion. Check attachment names/count, absence of upload errors or progress, and the selected model/effort in the **same composer** before Send. A selected local file or a still-uploading card is not proof of completion. If an essential file fails or the supported upload route is unavailable, preserve the draft and report the concrete blocker; do not send without it or silently replace it with pasted text.
+5. Submit once. Confirm the resulting user message contains the intended attachments as well as the request. If submission is uncertain, inspect that conversation before any retry; do not create a second task or blindly repeat upload/Send.
+6. Follow [response return](response-return.md). Ask ChatGPT to identify inaccessible attachments instead of guessing. A correct-looking answer alone is insufficient evidence that a file was attached: combine the submission's attachment evidence with the response. Report partial access when some files cannot be read.
+
+## File-transfer validation
+
+For an explicitly requested test, use a small non-sensitive fixture with a fresh identifier and independently checkable values. Keep the identifier, content, and expected answer out of the ChatGPT prompt; provide only the file name and requested operations. Compare the final answer with the original file in the invoking session. If a supported thread read returns a downloaded attachment path, compare its bytes or hash with the original; distinguish this file-integrity check from merely matching the answer.
+
+When a clean-session test is requested, create an independent session with only the request and fixture path. Do not fork history, pass earlier conclusions, or read other conversations or past task memory. Record whether the installed skill is exposed automatically and which installed path is read. Built-in instructions, installed skills, and account environment remain present; do not call this a completely context-free runtime. Ordinary use does not require creating another local session.
+
+Observed on 2026-09-07: an independent local session automatically exposed the predecessor installed `gptwork:gptwork`, read its installed skill, selected Astra Light with Fast off, and uploaded one 413-byte UTF-8 JSON using the supported file chooser. Both pre-send and submitted-message attachment cards were observed. The completed response reproduced the file-only random identifier and Korean note, and correctly totaled three line items. A separate read confirmed one attachment, no fixture values in the prompt, and byte-identical original/retrieved files. This establishes one JSON end-to-end case; large/multiple files, other formats, interruption recovery, and server-internal model metadata were not tested by that case.

@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 import unittest
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-STANDALONE_SKILL = REPO_ROOT / "gptpro"
-PLUGIN_ROOT = REPO_ROOT / "plugins" / "gptpro"
-PLUGIN_SKILL = PLUGIN_ROOT / "skills" / "gptpro"
+STANDALONE_SKILL = REPO_ROOT / "gptplease"
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "gptplease"
+PLUGIN_SKILL = PLUGIN_ROOT / "skills" / "gptplease"
 SWIFT_PLUGIN_ROOT = REPO_ROOT / "plugins" / "swift-intelligence"
 SWIFT_PLUGIN_SKILL = SWIFT_PLUGIN_ROOT / "skills" / "swift-intelligence"
 IGNORED_NAMES = {".DS_Store", "__pycache__"}
@@ -36,7 +34,7 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertEqual("codex-skills", marketplace["name"])
         self.assertEqual("Codex Skills", marketplace["interface"]["displayName"])
         self.assertEqual(
-            ["gptpro", "swift-intelligence", "astra-orchestrator", "gptwork"],
+            ["swift-intelligence", "astra-orchestrator", "gptplease"],
             [plugin["name"] for plugin in marketplace["plugins"]],
         )
         for entry in marketplace["plugins"]:
@@ -56,79 +54,32 @@ class PluginDistributionTests(unittest.TestCase):
                 skill_root = plugin_root / manifest["skills"] / entry["name"]
                 self.assertTrue((skill_root / "SKILL.md").is_file())
 
-    def test_plugin_manifest_describes_the_electron_runtime(self) -> None:
-        manifest = json.loads(
-            (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
-        )
-        self.assertEqual("gptpro", manifest["name"])
-        capabilities = json.loads(subprocess.check_output([
-            sys.executable, str(STANDALONE_SKILL / "scripts/gptpro.py"), "capabilities", "--json",
-        ]))
-        self.assertEqual(capabilities["version"], manifest["version"])
-        self.assertEqual("./skills/", manifest["skills"])
-        self.assertEqual("GPT Pro Collaborator", manifest["interface"]["displayName"])
-        self.assertTrue((PLUGIN_SKILL / "SKILL.md").is_file())
-        prompts = manifest["interface"]["defaultPrompt"]
-        self.assertIsInstance(prompts, list)
-        self.assertGreaterEqual(len(prompts), 1)
-        self.assertLessEqual(len(prompts), 3)
-        for prompt in prompts:
-            self.assertIsInstance(prompt, str)
-            self.assertLessEqual(len(prompt), 128)
-            self.assertIn("$gptpro", prompt)
-        description = manifest["interface"]["longDescription"]
-        for token in ("loopback", "isolated", "Schema-6", "inline", "independently validate"):
-            self.assertIn(token, description)
-        for removed in ("manual Send/Copy", "custom ChatGPT Apps", "Secure MCP Tunnel"):
-            self.assertIn(removed, description)
-
-    def test_plugin_skill_is_a_byte_and_mode_exact_mirror(self) -> None:
+    def test_gptplease_distribution(self) -> None:
+        self.assertTrue((STANDALONE_SKILL / "SKILL.md").is_file())
         self.assertEqual(tree_files(STANDALONE_SKILL), tree_files(PLUGIN_SKILL))
-
-    def test_skill_ui_readme_and_manifest_align(self) -> None:
-        skill = (STANDALONE_SKILL / "SKILL.md").read_text(encoding="utf-8")
-        ui = (STANDALONE_SKILL / "agents" / "openai.yaml").read_text(encoding="utf-8")
-        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-        manifest = json.loads(
-            (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
-        )
-        plugin_text = json.dumps(manifest, ensure_ascii=False)
-        for label, text in (
-            ("standalone Skill", skill),
-            ("standalone UI metadata", ui),
-            ("repository README", readme),
-            ("Plugin manifest", plugin_text),
-        ):
-            with self.subTest(surface=label):
-                self.assertIn("$gptpro", text)
-                self.assertIn("electron", text.lower())
-        self.assertIn("allow_implicit_invocation: false", ui)
-        self.assertIn("desktop-electron", skill)
-        self.assertIn("inline-immutable-snapshot", skill)
-        self.assertNotIn("local-immutable-tool-snapshot", skill)
-        self.assertNotIn("$gptpro-mcp", skill)
-        self.assertNotIn("$gptpro-mcp", ui)
-
-
-    def test_gptwork_distribution(self) -> None:
-        source = REPO_ROOT / "gptwork"
-        plugin = REPO_ROOT / "plugins" / "gptwork"
-        mirror = plugin / "skills" / "gptwork"
-        self.assertTrue((source / "SKILL.md").is_file())
-        self.assertEqual(tree_files(source), tree_files(mirror))
-        manifest = json.loads((plugin / ".codex-plugin" / "plugin.json").read_text())
-        self.assertEqual("gptwork", manifest["name"])
+        manifest = json.loads((PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text())
+        self.assertEqual("gptplease", manifest["name"])
         self.assertEqual("./skills/", manifest["skills"])
         self.assertNotIn("mcpServers", manifest)
         self.assertNotIn("apps", manifest)
-        for prompt in manifest["interface"]["defaultPrompt"]:
-            self.assertIn("$gptwork", prompt)
+        self.assertFalse((PLUGIN_ROOT / ".mcp.json").exists())
+        self.assertFalse((PLUGIN_ROOT / ".app.json").exists())
+        prompts = manifest["interface"]["defaultPrompt"]
+        self.assertIsInstance(prompts, list)
+        self.assertTrue(1 <= len(prompts) <= 3)
+        for prompt in prompts:
+            self.assertIn("$gptplease", prompt)
             self.assertLessEqual(len(prompt), 128)
-        for path in source.rglob("*.md"):
+        for path in STANDALONE_SKILL.rglob("*.md"):
             import re
             for target in re.findall(r"\[[^\]]*\]\(([^)]+)\)", path.read_text()):
                 if "://" not in target:
                     self.assertTrue((path.parent / target.split("#")[0]).exists(), (path, target))
+
+    def test_retired_packages_are_not_distributed(self) -> None:
+        for name in ("gptpro", "gptwork"):
+            self.assertFalse((REPO_ROOT / name / "SKILL.md").exists())
+            self.assertFalse((REPO_ROOT / "plugins" / name / ".codex-plugin" / "plugin.json").exists())
 
     def test_swift_intelligence_plugin_loads_skill_and_mcp_server(self) -> None:
         manifest = json.loads(
