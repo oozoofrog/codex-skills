@@ -34,7 +34,7 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertEqual("codex-skills", marketplace["name"])
         self.assertEqual("Codex Skills", marketplace["interface"]["displayName"])
         self.assertEqual(
-            ["swift-intelligence", "astra-orchestrator", "gptplease"],
+            ["swift-intelligence", "astra-orchestrator", "figma-computer-use", "gptplease"],
             [plugin["name"] for plugin in marketplace["plugins"]],
         )
         for entry in marketplace["plugins"]:
@@ -80,6 +80,32 @@ class PluginDistributionTests(unittest.TestCase):
         for name in ("gptpro", "gptwork"):
             self.assertFalse((REPO_ROOT / name / "SKILL.md").exists())
             self.assertFalse((REPO_ROOT / "plugins" / name / ".codex-plugin" / "plugin.json").exists())
+
+    def test_figma_computer_use_distribution(self) -> None:
+        source = REPO_ROOT / "figma-computer-use"
+        plugin = REPO_ROOT / "plugins" / source.name
+        self.assertTrue((source / "SKILL.md").is_file())
+        self.assertEqual(tree_files(source), tree_files(plugin / "skills" / source.name))
+        manifest = json.loads((plugin / ".codex-plugin" / "plugin.json").read_text())
+        baseline = json.loads((source / "references" / "compatibility.json").read_text())
+        self.assertEqual(source.name, manifest["name"])
+        self.assertEqual(baseline["skill_version"], manifest["version"])
+        self.assertEqual("./skills/", manifest["skills"])
+        self.assertNotIn("mcpServers", manifest)
+        self.assertNotIn("apps", manifest)
+        self.assertFalse((plugin / ".mcp.json").exists())
+        self.assertFalse((plugin / ".app.json").exists())
+        prompts = manifest["interface"]["defaultPrompt"]
+        self.assertIsInstance(prompts, list)
+        self.assertTrue(1 <= len(prompts) <= 3)
+        for prompt in prompts:
+            self.assertIn("$figma-computer-use", prompt)
+            self.assertLessEqual(len(prompt), 128)
+        for path in source.rglob("*.md"):
+            import re
+            for target in re.findall(r"\[[^\]]*\]\(([^)]+)\)", path.read_text()):
+                if "://" not in target:
+                    self.assertTrue((path.parent / target.split("#")[0]).exists(), (path, target))
 
     def test_swift_intelligence_plugin_loads_skill_and_mcp_server(self) -> None:
         manifest = json.loads(

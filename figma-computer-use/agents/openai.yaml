@@ -1,0 +1,4 @@
+interface:
+  display_name: "Figma Computer Use"
+  short_description: "computer-use로 Figma 조작·검증·매뉴얼 갱신"
+  default_prompt: "Use $figma-computer-use to operate Figma through computer-use or refresh its manuals and compatibility baseline."

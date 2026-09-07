@@ -1,0 +1,32 @@
+{
+  "name": "figma-computer-use",
+  "version": "0.1.1",
+  "description": "Operate Figma through computer-use, with internal manuals and version-aware maintenance.",
+  "author": {
+    "name": "oozoofrog",
+    "url": "https://github.com/oozoofrog"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Figma Computer Use",
+    "shortDescription": "computer-use로 Figma 조작·검증·매뉴얼 갱신",
+    "longDescription": "Use computer-use for requested Figma inspection, design editing, prototyping, and export instead of Figma MCP. Includes distilled official and local-source guidance, observed UI verification, and a version baseline with a manual refresh workflow. Requires the host computer-use runtime; does not bundle a connector or MCP server.",
+    "developerName": "oozoofrog",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use $figma-computer-use to edit the requested Figma design through computer-use and verify the result.",
+      "Use $figma-computer-use to refresh its Figma manuals and compatibility baseline, then version the skill."
+    ]
+  },
+  "repository": "https://github.com/oozoofrog/codex-skills",
+  "keywords": [
+    "figma",
+    "computer-use",
+    "design"
+  ]
+}

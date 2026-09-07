@@ -1,12 +1,13 @@
 # Plugin installation
 
-Repository marketplace에는 `gptplease`, `swift-intelligence`, `astra-orchestrator`가 있습니다. 필요한 Plugin만 선택합니다. 아래 명령은 해당 변경이 원격에 반영된 뒤 사용합니다.
+Repository marketplace에는 `gptplease`, `swift-intelligence`, `astra-orchestrator`, `figma-computer-use`가 있습니다. 필요한 Plugin만 선택합니다. 아래 명령은 해당 변경이 원격에 반영된 뒤 사용합니다.
 
 ```bash
 codex plugin marketplace add oozoofrog/codex-skills --ref main
 codex plugin add gptplease@codex-skills
 codex plugin add swift-intelligence@codex-skills
 codex plugin add astra-orchestrator@codex-skills
+codex plugin add figma-computer-use@codex-skills
 ```
 
 이미 등록한 원격 marketplace는 `codex plugin marketplace upgrade codex-skills`로 snapshot을 갱신한 뒤 설치합니다. 로컬 checkout marketplace를 사용하는 경우에는 그 source를 확인한 뒤 같은 이름으로 재설치합니다.
@@ -25,6 +26,8 @@ codex plugin remove gptpro@codex-skills
 별도 standalone 스킬은 설치 폴더에서 제거해 중복 노출을 피합니다. 과거 `.gptpro` 상담 패키지와 Runner 로그인 프로필은 삭제·이관하지 않습니다. 전용 Launcher는 더 이상 필요하지 않습니다.
 
 Standalone이 필요하면 `gptplease/`를 skill-installer로 선택 설치합니다. 제거한 `manage_skills.py`는 사용하지 않습니다.
+
+`figma-computer-use`는 Figma MCP 대신 호스트의 `mcp__cua_repl.js` computer-use를 사용합니다. 이 Plugin 자체에는 MCP 서버나 Figma connector가 없으므로 computer-use가 제공되는 환경과 Figma 접근 권한이 필요합니다. 설치 후 새 작업에서 `$figma-computer-use:figma-computer-use`로 호출합니다. [내부 매뉴얼](../figma-computer-use/references/figma-manual.md)과 [호환성·버전 관리](../figma-computer-use/references/maintenance.md)를 포함합니다. 원본 수정은 설치나 현재 작업의 새 스킬 노출을 의미하지 않습니다.
 
 Astra Orchestrator는 모델·추론 수준을 지정할 수 있는 Codex 서브에이전트 환경이 필요합니다. 리더 설정은 `gpt-6-astra` / `xhigh`이며 스킬 자체가 실행 중인 설정을 바꾸지는 않습니다. 별도 MCP 서버나 설치 hook은 없습니다. 새 작업에서 `$astra-orchestrator:astra-orchestrator`로 호출합니다. 기존 사용자 로컬 `astra-orchestrator`와 함께 설치하면 중복 표시될 수 있습니다. 자세한 내용은 [Astra Orchestrator 설치와 사용](../plugins/astra-orchestrator/README.md)을 참고하세요.
 

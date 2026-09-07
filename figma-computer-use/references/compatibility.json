@@ -1,0 +1,32 @@
+{
+  "skill_version": "0.1.1",
+  "reviewed_on": "2026-09-07",
+  "desktop": {
+    "bundle_id": "com.figma.Desktop",
+    "short_version": "126.8.18",
+    "build_version": "126.8.18",
+    "evidence": "Local Info.plist and authorized native draft editing, prototype playback, PNG export/import through computer-use"
+  },
+  "computer_use": {
+    "tool": "mcp__cua_repl.js",
+    "documentation_observed_on": "2026-09-07"
+  },
+  "product_release": {
+    "url": "https://www.figma.com/release-notes/",
+    "latest_observed_date": "2026-09-03",
+    "latest_observed_title": "Control opacity at scale"
+  },
+  "editor_feature_validation": "Representative native operation categories exercised; see runtime-validation.md. Browser editing, cloud persistence, and documented advanced variants remain unverified.",
+  "runtime_validation": {
+    "tested_on": "2026-09-07",
+    "surface": "macOS native desktop, Korean UI",
+    "report": "runtime-validation.md",
+    "native_editing": "passed_representative_scenarios",
+    "prototype_navigation_and_back": "passed",
+    "png_export_and_import": "passed",
+    "cloud_persistence": "unresolved",
+    "named_version_save": "unresolved",
+    "browser_editing": "blocked_login_or_attachment",
+    "installed_fresh_session_discovery": "not_run"
+  }
+}
