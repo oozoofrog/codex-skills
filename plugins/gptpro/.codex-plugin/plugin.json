@@ -17,15 +17,15 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "GPT Pro Collaborator",
-    "shortDescription": "Electron ChatGPT Pro with an approved inline code snapshot",
-    "longDescription": "For an explicitly requested plan, ask, review, debug, or architecture consultation, prepare one secret-scanned immutable Schema-6 inline repository snapshot, require exact or bounded standing approval, connect only to the isolated current-user gptpro Runner profile on loopback, resolve exact gpt-5-6-pro, send one normal-Chat user message, collect and import the response through its signed WebSocket handoff, and independently validate all advice. A conditional exact-current-branch GET may verify a signed result; GET response readback is explicit recovery only. Do not use gptpro for ordinary Codex work or OpenAI API calls. The ordinary ChatGPT app does not need to be relaunched. Browser, Computer Use, manual Send/Copy, custom ChatGPT Apps, Developer Mode, MCP, Secure MCP Tunnel, local functions, server tools, writes, shell commands, conversation continuation, and automatic resend are not supported.",
+    "shortDescription": "Guided setup and approved ChatGPT Pro code consultation",
+    "longDescription": "For an explicitly requested plan, ask, review, debug, or architecture consultation, first check prerequisites before the CLI and guide missing setup using existing installation tools and user choices; reuse a ready environment and prior choices. Setup permission does not authorize code transmission. Then prepare one secret-scanned immutable Schema-6 inline repository snapshot, require exact or bounded standing approval, connect only to the isolated current-user gptpro Runner profile on loopback, resolve exact gpt-5-6-pro, send one normal-Chat user message, collect and import the response through its signed WebSocket handoff, and independently validate all advice. A conditional exact-current-branch GET may verify a signed result; GET response readback is explicit recovery only. Do not use gptpro for ordinary Codex work or OpenAI API calls. The ordinary ChatGPT app does not need to be relaunched. Browser, Computer Use, manual Send/Copy, custom ChatGPT Apps, Developer Mode, MCP, Secure MCP Tunnel, conversation continuation, and automatic resend are not supported. Local functions, server tools, writes, and shell commands are not exposed to Pro; chosen environment setup is performed by local Codex.",
     "developerName": "oozoofrog",
     "category": "Productivity",
     "capabilities": [
       "Interactive"
     ],
     "defaultPrompt": [
-      "Use $gptpro to prepare and run an approved Electron ChatGPT Pro review with one immutable inline repository snapshot.",
+      "Use $gptpro to guide environment setup and run an approved ChatGPT Pro review of one inline code snapshot.",
       "Use $gptpro to send one approved inline repository snapshot without automatic resend or channel fallback.",
       "Use $gptpro to independently validate the captured ChatGPT Pro advice before applying it."
     ]

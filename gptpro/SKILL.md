@@ -25,9 +25,9 @@ Compatibility status: one approved logged-in canary passed signed-stream complet
 ## Procedure
 
 1. Read [workflow](references/workflow.md) and [security](references/security.md).
-2. Select the smallest relevant tracked set with directed `--include` patterns or an exact `--file-list`. Add an external UTF-8 supplement only when necessary.
-3. Run `desktop-doctor`. For repeat use, offer `launcher-install` once. `~/Applications/gptpro Launcher.app` starts a second ChatGPT process with an owner-only gptpro profile and port 9223; the ordinary ChatGPT app may remain open. `desktop-launch` is the command-line equivalent.
-4. Run `models` and require the exact approved model.
+2. Check macOS, `/Applications/ChatGPT.app`, Python 3.11+, and Node.js 22+ before invoking the CLI. On first use or setup trouble, read [guided setup](references/setup.md): explain each stage, execute the user's chosen setup with existing installation tools, and reuse prior choices. Read-only checks need no separate approval. A ready environment skips installation questions.
+3. Run `desktop-doctor` and `models`; require the exact approved model. If setup is incomplete, follow guided setup to offer the optional Launcher, run `desktop-launch`, and let the user log in inside the Runner. Report consultation readiness only after connection and model checks pass. A setup-only request ends here without a test message; setup permission is not disclosure or transmission approval.
+4. For a requested consultation, select the smallest relevant tracked set with directed `--include` patterns or an exact `--file-list`. Add an external UTF-8 supplement only when necessary. Independent checks and file-scope discovery may continue while setup awaits user input.
 5. Run `prepare`. Verify the displayed paths, hashes, byte count, model, channel, and normal-Chat mode.
 6. Apply exact approval or a matching standing approval.
 7. Run `consult --handoff-dir ...`. The runtime re-verifies approval, records the no-resend boundary, sends once, follows the returned signed WebSocket handoff, conditionally proves ambiguous compact branch provenance against that exact current branch, and stores the completed raw and wrapped response automatically.

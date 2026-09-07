@@ -133,6 +133,14 @@ Signed `done` 이후 이미 알고 있는 conversation 하나만 최대 30초 �
 
 ## 설치와 첫 사용
 
+설치된 스킬에서 `$gptpro` 상담을 요청하면 Codex가 실행 환경을 먼저 확인합니다. 각 단계의 필요성과 결과를 안내하고, 설치 등 선택이 필요한 지점에서 사용자 결정을 받아 실행합니다. 이미 준비된 환경은 설치 질문 없이 연결과 지정 모델 확인으로 진행합니다.
+
+부족한 프로그램은 사용자 선택 후 기존 설치 도구로 준비하며, 적절한 도구가 없으면 공식 수동 설치를 안내합니다. 설치 도구 자체를 새로 설치하지 않습니다. Launcher 설치는 선택 사항이고, 별도 Runner의 로그인은 사용자가 직접 합니다. 설정 완료 후 원래 상담을 이어가며, 설정만 요청했다면 시험 메시지 없이 마칩니다. 설정 권한과 코드 전송 승인은 구분하고 유효한 기존 승인은 재사용합니다. 중단 후에는 실제 상태에서 미완료 단계만 이어갑니다. 상세 기준은 [첫 사용과 환경 설정](references/setup.md)에 있습니다.
+
+### 직접 실행할 때의 참고 명령
+
+다음은 Codex가 대신 실행할 수 있는 설치·진단·상담 명령입니다. Python이 없는 환경은 CLI 실행 전에 시스템 명령으로 확인하고 준비합니다. `python3`와 `node`는 요구 버전을 가리켜야 합니다.
+
 요구 사항은 macOS, `/Applications/ChatGPT.app`, Runner에서 로그인할 수 있는 ChatGPT Pro 계정, Node.js 22 이상, Python 3.11 이상입니다. npm 설치는 없습니다.
 
 다음 두 설치 명령은 `codex-skills` 저장소 루트에서 실행합니다. `<skill-dir>`는 실제 설치된 Skill 디렉터리로 바꿉니다. 기존 레거시 설치에 대한 전환 증거를 installer가 요구하면 해당 진단을 해결한 뒤 업데이트합니다.
@@ -140,6 +148,11 @@ Signed `done` 이후 이미 알고 있는 conversation 하나만 최대 30초 �
 ```bash
 python3 scripts/manage_skills.py install gptpro --update --dry-run
 python3 scripts/manage_skills.py install gptpro --update
+```
+
+Launcher 설치를 선택한 경우에만 실행합니다. 이미 정상 설치되어 있으면 반복하지 않습니다.
+
+```bash
 python3 <skill-dir>/scripts/gptpro.py launcher-install --json
 ```
 

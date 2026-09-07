@@ -1,5 +1,11 @@
 # Workflow
 
+## Environment readiness
+
+Check macOS, the ChatGPT app, Python 3.11+, and Node.js 22+ before invoking the CLI. Read [guided setup](setup.md) only on first use or setup trouble. Codex explains each stage, performs the user's chosen setup using existing installation tools, and reuses choices and completed prerequisites. A ready environment proceeds directly to `desktop-doctor` and `models`; a missing Launcher alone does not require installation. A setup-only request ends after these checks without a trial message.
+
+Setup is local Codex work and grants no tools to Pro. Setup authorization does not approve code disclosure or transmission; the consultation below still requires a valid exact approval or matching bounded standing approval. Independent file-scope discovery may continue while setup awaits user input. The setup reference defines installation, login, failure, and resume decisions.
+
 ## Consultation
 
 ```text

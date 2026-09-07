@@ -2,6 +2,16 @@
 
 ## 처음 한 번
 
+설치된 스킬이 있는 Codex에서 `$gptpro`로 상담을 요청하면 Codex가 필요한 환경을 먼저 확인합니다. 각 단계의 필요성을 설명하고, 설치나 실행 방식에 대한 선택이 필요할 때만 묻습니다. 선택한 작업은 Codex가 실행하고 결과를 확인합니다. 이미 준비된 환경과 같은 작업에서 정한 선택은 재사용합니다.
+
+부족한 프로그램은 기존 패키지 관리자 또는 런타임 관리 도구를 이용하는 구체적인 설치안을 확인한 뒤 설치할 수 있습니다. 적절한 도구가 없으면 공식 수동 설치를 안내하며, 설치 도구 자체를 새로 설치하지 않습니다. Launcher는 선택 사항이고, 로그인은 전용 ChatGPT 창에서 사용자가 직접 완료합니다. 연결과 지정 모델 확인이 모두 성공하면 원래 상담의 파일 선택과 전송 승인으로 이어갑니다. 설정만 요청했다면 시험 메시지 없이 준비 완료에서 마칩니다.
+
+환경 설정에 대한 선택은 코드 공개·전송 승인을 대신하지 않습니다. 기존의 유효한 패키지 승인이나 범위 제한 지속 승인은 재사용합니다. 중간에 멈췄다면 현재 상태에서 미완료 단계만 이어갑니다. 상세 동작 기준은 [첫 사용과 환경 설정](setup.md)에 있습니다.
+
+### 직접 명령으로 준비하려는 경우
+
+아래는 Codex가 대신 실행할 수 있는 명령의 참고 예시입니다. Python이 없으면 먼저 시스템 명령으로 실행 환경을 확인하고 설치해야 합니다. `python3`와 `node`는 요구 버전을 가리켜야 하며, `<skill-dir>`는 현재 로드된 스킬의 실제 경로로 바꿉니다. 저장소의 설치 명령은 저장소 루트에서 실행합니다.
+
 Node.js 22 이상, Python 3.11 이상, `/Applications/ChatGPT.app`, 로그인된 ChatGPT Pro 계정이 필요합니다. npm, custom App, Developer Mode, MCP, Tunnel, Browser 자동화는 필요하지 않습니다.
 
 2026-09-05 Desktop `26.901.31953`에서 새 승인 canary가 signed-stream 완료, 자동 import와 독립 evaluation을 통과했습니다. 별도 `collect-response` 복구는 사용하지 않았고 normal `consult` 내부의 조건부 current-branch proof GET은 수행됐습니다. 이 결과는 한 번의 중단 없는 첫 응답을 검증하며, socket 재연결/offset resume이나 다중 turn을 검증하지 않습니다. Stream에 tool-role 후보가 있거나 assistant/delta 상태가 handoff 전후에 걸치면 조건부 proof GET은 최대 30초 실행될 수 있습니다.
@@ -12,7 +22,7 @@ python3 scripts/manage_skills.py install gptpro --update
 python3 ~/.codex/skills/gptpro/scripts/gptpro.py init --json
 ```
 
-반복해서 터미널 명령을 입력하지 않으려면 사용자용 실행기를 한 번 설치합니다.
+반복 실행을 위한 Launcher 설치를 선택한 경우 다음 명령을 실행합니다. 이미 정상 설치되어 있으면 반복하지 않습니다.
 
 ```bash
 python3 <skill-dir>/scripts/gptpro.py launcher-install --json
@@ -40,7 +50,7 @@ python3 <skill-dir>/scripts/gptpro.py launcher-uninstall --json
 
 상담을 모두 마친 뒤에는 필요할 때 전용 Runner 창만 닫으세요. 기본 ChatGPT 앱은 계속 정상 실행됩니다. gptpro는 작업 중인 대화를 보호하기 위해 어느 프로세스도 자동 종료하지 않습니다.
 
-설치하지 않으려면 `desktop-launch`를 사용할 수 있습니다. 이 명령도 같은 전용 프로필과 9223 포트로 두 번째 프로세스를 실행합니다. `desktop-doctor`가 프로세스 인자, renderer와 bridge를 별도로 검증하므로 단순히 포트가 열렸다는 사실만으로 상담을 시작하지 않습니다.
+Launcher를 설치하지 않으려면 `desktop-launch`를 사용할 수 있습니다. 이 명령도 같은 전용 프로필과 9223 포트로 두 번째 프로세스를 실행합니다. `desktop-doctor`가 프로세스 인자, renderer와 bridge를 별도로 검증하므로 단순히 포트가 열렸다는 사실만으로 상담을 시작하지 않습니다.
 
 ## 사용
 
