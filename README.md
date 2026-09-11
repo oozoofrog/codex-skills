@@ -17,7 +17,7 @@ $gptplease Work에서 Astra로 이 기획안을 검토하고 답변을 가져와
 - 승인된 파일은 실제 업로드하며, 같은 입력창에서 모드·설정·첨부를 확인한 뒤 한 번 전송합니다.
 - 호출 세션이 최종 응답 완료를 기다리고 전체 내용을 읽어 검토·답변·허용된 수정을 이어갑니다.
 
-지원되는 브라우저 제어와 ChatGPT 로그인이 필요합니다. 기존 패키지의 자동 비밀정보 검사·불변 승인·영구 전송 기록·서명 스트림/전용 복구를 제공한다고 주장하지 않습니다. 코드 상담과 응답 회수 용도를 통합한 것이며, 공개 범위와 독립 검증은 호출 세션이 책임집니다. [사용 안내](gptplease/README.md), [모델 선택](gptplease/references/model-selection.md), [입력창 설정](gptplease/references/composer-settings.md), [파일 첨부](gptplease/references/file-attachments.md)를 참고하세요.
+지원되는 브라우저 제어와 ChatGPT 로그인이 필요합니다. 번들 상담 모듈은 같은 브라우저 도구 세션에서 실행되며, Codex 모델·provider 설정을 바꾸거나 별도 서버를 열지 않습니다. [전송 계약](gptplease/references/transport-contract.md)과 [실제 검증 범위](gptplease/references/runtime-validation.md)를 참고하세요. 기존 패키지의 자동 비밀정보 검사·불변 승인·영구 전송 기록·서명 스트림/전용 복구를 제공한다고 주장하지 않습니다. 코드 상담과 응답 회수 용도를 통합한 것이며, 공개 범위와 독립 검증은 호출 세션이 책임집니다. [사용 안내](gptplease/README.md), [모델 선택](gptplease/references/model-selection.md), [입력창 설정](gptplease/references/composer-settings.md), [파일 첨부](gptplease/references/file-attachments.md)를 참고하세요.
 
 ## Session Continuity
 
@@ -70,6 +70,7 @@ codex plugin add session-continuity@codex-skills
 ```bash
 python3 -m unittest discover -s scripts/tests -v
 python3 scripts/sync_skill_mirrors.py --package gptplease
+node --test gptplease/tests/*.test.mjs
 python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py gptplease
 python3 ~/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py plugins/gptplease
 git diff --check

@@ -2,6 +2,8 @@
 
 A normal `$gptplease` request completes only after the submitted Chat/Work turn has finished, its final response has been retrieved, and the invoking Codex session has handled it according to the original request. A task URL, submission receipt, first streamed paragraph, or recommendation is not completion. Honor explicit create-only/no-wait requests as exceptions and report that result was not collected.
 
+The bundled runtime returns structured evidence using the [transport contract](transport-contract.md). Keep its run/checkpoint and follow [recovery](transport-recovery.md); the returned result still needs the local handling described below.
+
 ## Keep the request correlated
 
 Before submission, retain in the invoking session the original objective and authorized follow-up scope, chosen surface/model/effort and observed settings, intended destination, and exact prompt. After Send, retain the observed ChatGPT URL/real ID, user message/turn identity when available, and its position relative to existing turns. Do not create a new local session to receive the answer. On context compaction or user interruption, preserve the known task and last verified stage through the session's supported continuation mechanism; resume reading that task rather than sending again.

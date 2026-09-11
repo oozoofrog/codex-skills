@@ -59,6 +59,11 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertEqual(tree_files(STANDALONE_SKILL), tree_files(PLUGIN_SKILL))
         manifest = json.loads((PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text())
         self.assertEqual("gptplease", manifest["name"])
+        self.assertEqual("0.2.0", manifest["version"].split("+")[0])
+        for relative in ("runtime/consult.mjs", "runtime/cua-chatgpt.mjs", "tests/consult.test.mjs", "tests/adapter.test.mjs", "references/transport-contract.md", "references/transport-recovery.md"):
+            self.assertTrue((STANDALONE_SKILL / relative).is_file())
+        for extension in ("json", "md", "swift"):
+            self.assertTrue((STANDALONE_SKILL / "tests" / "fixtures" / f"probe.{extension}").is_file())
         self.assertEqual("./skills/", manifest["skills"])
         self.assertNotIn("mcpServers", manifest)
         self.assertNotIn("apps", manifest)

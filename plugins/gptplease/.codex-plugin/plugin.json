@@ -1,6 +1,6 @@
 {
   "name": "gptplease",
-  "version": "0.1.0+codex.20260907134354",
+  "version": "0.2.0+codex.20260911162605",
   "description": "Send requests and files to ChatGPT Chat or Work with purpose-appropriate model and reasoning selection, then return the completed response.",
   "author": {
     "name": "oozoofrog",
@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "GPT Please",
     "shortDescription": "\ubaa9\uc801\ubcc4 Chat\u00b7Work \ubaa8\ub378 \uc120\ud0dd, \ud30c\uc77c \ucca8\ubd80\uc640 \uc751\ub2f5 \ud68c\uc218",
-    "longDescription": "Use $gptplease for requested ChatGPT consultation. Select model and reasoning from live Chat or Work options based on purpose, complexity, consequences, and time/cost limits. Preserve explicit settings, including Chat Pro or Astra Pro. Work is the unspecified new-request surface default. Verify settings and attachments before one UI submission, wait for completion, and process the full response here. Requires supported browser control and login.",
+    "longDescription": "Use $gptplease for requested ChatGPT consultation. Select model and reasoning from live Chat or Work options based on purpose, complexity, consequences, and time/cost limits. Preserve explicit settings, including Chat Pro or Astra Pro. Work is the unspecified new-request surface default. Verify settings and attachments before one UI submission, wait for completion, and process the full response here. Requires supported browser control and login. Runs bundled consultation modules in the supported browser session, with session-scoped single submission and read-only recovery; no provider changes or local tool bridge.",
     "developerName": "oozoofrog",
     "category": "Productivity",
     "capabilities": [

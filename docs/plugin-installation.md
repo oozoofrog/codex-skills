@@ -13,7 +13,7 @@ codex plugin add session-continuity@codex-skills
 
 이미 등록한 원격 marketplace는 `codex plugin marketplace upgrade codex-skills`로 snapshot을 갱신한 뒤 설치합니다. 로컬 checkout marketplace를 사용하는 경우에는 그 source를 확인한 뒤 같은 이름으로 재설치합니다.
 
-`gptplease`는 지원되는 브라우저 제어와 ChatGPT 로그인이 필요합니다. Chat·Work에서 목적·복잡도에 맞는 모델과 사고 수준을 선택하고 명시 설정을 지키며 전송 전에 확인한 뒤, 실제 파일 첨부와 완료 응답 회수를 같은 호출 세션에서 수행합니다. 설치 후 새 대화에서 `$gptplease` 또는 `$gptplease:gptplease`를 호출합니다. [사용 안내](../gptplease/README.md)를 참고하세요.
+`gptplease`는 지원되는 CUA 브라우저 제어와 ChatGPT 로그인이 필요합니다. Plugin과 standalone 모두 `runtime/` 모듈을 포함하며 해당 브라우저 JavaScript 세션에서 직접 import합니다. 추가 MCP 서버·실행기·npm 의존성은 없고, 자동 테스트만 Node.js 20 이상에서 실행합니다. [실행 계약](../gptplease/references/transport-contract.md)을 참고하세요. Chat·Work에서 목적·복잡도에 맞는 모델과 사고 수준을 선택하고 명시 설정을 지키며 전송 전에 확인한 뒤, 실제 파일 첨부와 완료 응답 회수를 같은 호출 세션에서 수행합니다. 설치 후 새 대화에서 `$gptplease` 또는 `$gptplease:gptplease`를 호출합니다. [사용 안내](../gptplease/README.md)를 참고하세요.
 
 설치 성공, 새 로더 노출, 실제 새 작업이 읽은 경로를 구분해 확인합니다. 2026-09-07에는 새 작업의 스킬 목록이 삭제된 이전 캐시 경로를 가리켜 같은 패키지의 현재 설치 경로를 찾아 읽어야 했습니다. 이 경우 실제 manifest·스킬 버전을 대조하고 경로 불일치를 보고하며, 이전 목록만으로 최신본 자동 로드를 성공 처리하지 않습니다. 계속 낡은 경로가 노출되면 Codex를 다시 열고 새 작업에서 확인합니다.
 

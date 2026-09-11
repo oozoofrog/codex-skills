@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+- #45: `gptplease` 0.2.0에 지원 CUA 세션에서 호출하는 번들 상담 transport를 추가했습니다. 정책과 전송을 분리하고 Chat·Work 설정 readback, 실제 파일 첨부, 단일 Send, 전송 불명 상태, user/assistant ID 상관관계, 취소·읽기 복구, 전체 Markdown 및 artifact 참조 회수를 구현했습니다. 별도 서버·provider 변경·로컬 도구 역연결은 없습니다. 자동 계약 검사와 실제 계정 E2E의 범위·한계는 패키지 내 runtime-validation 문서에 구분합니다.
+
 - #31: 현재 README에서 제거된 릴리스 문서 링크가 다시 깨지지 않도록 루트 Markdown과 `docs/` 전체의 로컬 파일 링크 검사를 추가했습니다. 인라인 링크·이미지·참조 링크를 검사하고 코드 예시·외부 URL·문서 내부 anchor는 제외합니다.
 
 - `session-continuity` Skill과 Plugin `0.1.0`을 추가했습니다. 일반 Codex 세션에서 기존 `AGENTS.md`·템플릿·task state를 보존하며 `.codex/work/<task-id>.md` 초기화, Git·관련 파일 대조 후 재개, checkpoint와 완료 정리를 지원합니다. Git 제외는 선택 사항이고 미실행 검증은 `NOT RUN`으로 기록합니다. 보조 도구의 격리 검사와 독립 에이전트의 오래된 state 재개 검증을 포함했으며, 자동 압축 감지·새 세션 생성·자동 commit은 제공하지 않습니다. Marketplace, standalone/Plugin 미러 동기화와 배포 검증에 등록하고 설치 안내를 추가했습니다. 사용자 환경의 실제 설치·새 세션 노출은 별도 확인이 필요합니다.
