@@ -1,0 +1,32 @@
+{
+  "name": "session-continuity",
+  "version": "0.1.0",
+  "description": "Bootstrap repository task states and resume ordinary Codex sessions with verified checkpoints.",
+  "author": {
+    "name": "oozoofrog",
+    "url": "https://github.com/oozoofrog"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Session Continuity",
+    "shortDescription": "일반 Codex 세션의 작업 상태 초기화, 재개 및 체크포인트",
+    "longDescription": "Initialize repository continuity rules and task states without replacing existing work. Resume by comparing AGENTS.md, state, Git and relevant files; record actual verification evidence and prepare checkpoints or task completion. Uses ordinary Codex sessions without leader/worker orchestration. Optional helpers require Python 3.9+ and Git.",
+    "developerName": "oozoofrog",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use $session-continuity to initialize task continuity in this repository while preserving existing rules and work.",
+      "Use $session-continuity to resume the requested task from its state and actual repository evidence."
+    ]
+  },
+  "repository": "https://github.com/oozoofrog/codex-skills",
+  "keywords": [
+    "codex",
+    "session-continuity",
+    "handoff",
+    "checkpoint"
+  ]
+}

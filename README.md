@@ -1,6 +1,6 @@
 # codex-skills
 
-ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위한 `$gptplease`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 작업 조정을 위한 `astra-orchestrator`, Figma UI 작업용 `figma-computer-use`를 제공합니다.
+ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위한 `$gptplease`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 작업 조정을 위한 `astra-orchestrator`, Figma UI 작업용 `figma-computer-use`, 일반 Codex 세션의 작업 인계용 `session-continuity`를 제공합니다.
 
 ## GPT Please
 
@@ -18,6 +18,17 @@ $gptplease Work에서 Astra로 이 기획안을 검토하고 답변을 가져와
 - 호출 세션이 최종 응답 완료를 기다리고 전체 내용을 읽어 검토·답변·허용된 수정을 이어갑니다.
 
 지원되는 브라우저 제어와 ChatGPT 로그인이 필요합니다. 기존 패키지의 자동 비밀정보 검사·불변 승인·영구 전송 기록·서명 스트림/전용 복구를 제공한다고 주장하지 않습니다. 코드 상담과 응답 회수 용도를 통합한 것이며, 공개 범위와 독립 검증은 호출 세션이 책임집니다. [사용 안내](gptplease/README.md), [모델 선택](gptplease/references/model-selection.md), [입력창 설정](gptplease/references/composer-settings.md), [파일 첨부](gptplease/references/file-attachments.md)를 참고하세요.
+
+## Session Continuity
+
+`$session-continuity`는 일반 Codex 세션용 Session Rotation Protocol을 저장소에 초기화합니다. 리더/워커 없이 `AGENTS.md`의 지속 규칙과 `.codex/work/<task-id>.md`를 사용해 작업 시작, 새 세션 재개, checkpoint와 완료 정리를 지원합니다.
+
+```text
+$session-continuity로 현재 저장소를 초기화하고 task 467의 목표와 완료 조건을 기록하세요.
+$session-continuity로 task 467을 재개하고 현재 Git 상태와 대조한 뒤 Exact Next Action부터 계속하세요.
+```
+
+기존 규칙·템플릿·task state를 보존하며 `.gitignore` 수정은 선택 사항입니다. 실제 실행하지 않은 검증은 `NOT RUN`으로 기록하고, 완료 후 장기 결론을 정식 문서 등에 반영한 뒤 state 삭제/보관을 안내합니다. 자동 압축 감지·새 세션 생성·commit은 포함하지 않습니다. 보조 도구는 Python 3.9+와 Git만 사용합니다. [설치와 사용 안내](session-continuity/README.md), [검증 기록](session-continuity/VALIDATION.md)을 참고하세요.
 
 ## 다른 Plugin
 
@@ -49,6 +60,7 @@ Figma `126.8.18` 네이티브 앱에서 프레임·한글 텍스트·Auto layout
 ```bash
 codex plugin marketplace add oozoofrog/codex-skills --ref main
 codex plugin add gptplease@codex-skills
+codex plugin add session-continuity@codex-skills
 ```
 
 설치 후 새 대화에서 `$gptplease`를 호출합니다. 이전 `gptwork`/`gptpro` 설치본의 중복 노출을 정리하되 과거 패키지와 계정 프로필은 보존합니다. 다른 Plugin의 요구 사항과 standalone 설치는 [Plugin 설치 안내](docs/plugin-installation.md)를 참고하세요.

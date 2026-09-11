@@ -34,7 +34,7 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertEqual("codex-skills", marketplace["name"])
         self.assertEqual("Codex Skills", marketplace["interface"]["displayName"])
         self.assertEqual(
-            ["swift-intelligence", "astra-orchestrator", "figma-computer-use", "gptplease"],
+            ["swift-intelligence", "astra-orchestrator", "figma-computer-use", "gptplease", "session-continuity"],
             [plugin["name"] for plugin in marketplace["plugins"]],
         )
         for entry in marketplace["plugins"]:
@@ -100,6 +100,29 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertTrue(1 <= len(prompts) <= 3)
         for prompt in prompts:
             self.assertIn("$figma-computer-use", prompt)
+            self.assertLessEqual(len(prompt), 128)
+        for path in source.rglob("*.md"):
+            import re
+            for target in re.findall(r"\[[^\]]*\]\(([^)]+)\)", path.read_text()):
+                if "://" not in target:
+                    self.assertTrue((path.parent / target.split("#")[0]).exists(), (path, target))
+
+    def test_session_continuity_distribution(self) -> None:
+        source = REPO_ROOT / "session-continuity"
+        plugin = REPO_ROOT / "plugins" / source.name
+        self.assertTrue((source / "SKILL.md").is_file())
+        self.assertEqual(tree_files(source), tree_files(plugin / "skills" / source.name))
+        manifest = json.loads((plugin / ".codex-plugin" / "plugin.json").read_text())
+        self.assertEqual(source.name, manifest["name"])
+        self.assertEqual("0.1.0", manifest["version"])
+        self.assertEqual("./skills/", manifest["skills"])
+        self.assertNotIn("mcpServers", manifest)
+        self.assertNotIn("apps", manifest)
+        prompts = manifest["interface"]["defaultPrompt"]
+        self.assertIsInstance(prompts, list)
+        self.assertTrue(1 <= len(prompts) <= 3)
+        for prompt in prompts:
+            self.assertIn("$session-continuity", prompt)
             self.assertLessEqual(len(prompt), 128)
         for path in source.rglob("*.md"):
             import re
