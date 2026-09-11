@@ -4,7 +4,7 @@
 
 ## [Unreleased]
 
-- #45: `gptplease` 0.2.0에 지원 CUA 세션에서 호출하는 번들 상담 transport를 추가했습니다. 정책과 전송을 분리하고 Chat·Work 설정 readback, 실제 파일 첨부, 단일 Send, 전송 불명 상태, user/assistant ID 상관관계, 취소·읽기 복구, 전체 Markdown 및 artifact 참조 회수를 구현했습니다. 별도 서버·provider 변경·로컬 도구 역연결은 없습니다. 자동 계약 검사와 실제 계정 E2E의 범위·한계는 패키지 내 runtime-validation 문서에 구분합니다.
+- #45: `gptplease` 0.2.0에 지원 CUA 세션에서 호출하는 번들 상담 transport를 추가했습니다. 정책과 전송을 분리하고 Chat·Work 설정 readback, 실제 파일 첨부, 단일 Send, 전송 불명 상태, user/assistant ID 상관관계, 취소·읽기 복구, 전체 Markdown 및 artifact 참조 회수를 구현했습니다. 별도 서버·provider 변경·로컬 도구 역연결은 없습니다. 자동 계약 검사와 실제 계정 E2E의 범위·한계는 패키지 내 runtime-validation 문서에 구분합니다. 코드 블록의 UI 도구 모음은 본문 검사에서 제외하고 들여쓰기·줄바꿈을 보존하며, 업로드 파일명이 자동 변경된 경우에는 전송 전에 중단합니다.
 
 - #31: 현재 README에서 제거된 릴리스 문서 링크가 다시 깨지지 않도록 루트 Markdown과 `docs/` 전체의 로컬 파일 링크 검사를 추가했습니다. 인라인 링크·이미지·참조 링크를 검사하고 코드 예시·외부 URL·문서 내부 anchor는 제외합니다.
 

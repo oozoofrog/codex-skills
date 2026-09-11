@@ -149,12 +149,24 @@ export class ChatAdapter {
     if(known&&known.url!==url)fail('TURN_IDENTITY_AMBIGUOUS','The tab left the known conversation.');
     const turns=await this.tab.playwright.evaluate(messages=>{
       let user=null;
+      // Read response content, excluding code-block toolbar labels such as Copy/Run.
+      function answerText(node) {
+        if(!node)return '';
+        if(node.nodeType===3)return node.textContent??'';
+        if(node.nodeType!==1||node.getAttribute('aria-hidden')==='true'||node.hasAttribute('hidden'))return '';
+        if(node.tagName==='PRE'&&node.querySelector('code'))return '\n'+node.querySelector('code').textContent+'\n';
+        if(node.tagName==='BUTTON')return node.hasAttribute('data-file-citation-primary-file-id')?(node.getAttribute('aria-label')??node.textContent):'';
+        if(node.tagName==='BR')return '\n';
+        const text=Array.from(node.childNodes).map(answerText).join('');
+        return /^(P|DIV|LI|TR|H[1-6])$/.test(node.tagName)?'\n'+text+'\n':text;
+      }
       const running=Array.from(document.querySelectorAll('main button')).some(e=>/^(답변 중지|Stop generating|Stop response)$/.test(e.getAttribute('aria-label')??''));
       return Array.from(document.querySelectorAll(`main ${messages}`)).map(e=>{
         const role=e.getAttribute('data-message-author-role'),id=e.getAttribute('data-message-id'),section=e.closest('[data-turn-id]');
         if(role==='user')user=id;
         const content=role==='assistant'?e.querySelector('.markdown'):e.querySelector('.whitespace-pre-wrap');
-        return {id,role,parent_user_id:role==='assistant'?user:null,text:content?.innerText.trim()??'',
+        return {id,role,parent_user_id:role==='assistant'?user:null,text:role==='assistant'?answerText(content).trim():(content?.innerText.trim()??''),
+          code_blocks:Array.from(content?.querySelectorAll('pre code')??[]).map(e=>e.textContent??''),
           attachments:Array.from(section?.querySelectorAll('[role="group"][aria-label]:has([data-default-action])')??[]).map(e=>e.getAttribute('aria-label')),
           final:role==='assistant'&&!running&&!!section?.querySelector('[data-testid="copy-turn-action-button"]')&&!!content,
           artifacts:Array.from(section?.querySelectorAll('a[href],img[src],button[data-file-citation-primary-file-id]')??[]).map(e=>({kind:e.tagName==='IMG'?'image':e.tagName==='BUTTON'?'file':'link',id:e.getAttribute('data-file-citation-primary-file-id')??undefined,url:e.href??e.src??null,label:e.getAttribute('aria-label')??e.getAttribute('alt')??e.textContent??'',bytes_retrieved:false}))};
@@ -180,7 +192,8 @@ export class ChatAdapter {
       }
       const after=await this.read();
       const current=after.turns.find(t=>t.id===id);
-      const complete=markdown!==sentinel&&!!markdown.trim()&&current?.final&&current.text===answer.text&&coversVisibleText(markdown,answer.text);
+      const complete=markdown!==sentinel&&!!markdown.trim()&&current?.final&&current.text===answer.text&&coversVisibleText(markdown,answer.text)&&
+        (answer.code_blocks??[]).every(code=>markdown.replace(/\r\n/g,'\n').includes(code.replace(/\r\n/g,'\n').trimEnd()));
       return {assistant_turn_id:id,complete:!!complete,markdown:complete?markdown:null,artifacts};
     } finally {if(before.length)await this.tab.clipboard.write(before);else await this.tab.clipboard.writeText('');}
   }

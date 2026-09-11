@@ -88,7 +88,7 @@ export function consult(request, adapter, checkpoint) {
     if (!answer.final) {previousFinal=null; mark('response_running'); return value();}
     mark('response_completed');
     // Two distinct reads must agree after a final-answer control appears. Streaming absence alone is insufficient.
-    const signature=JSON.stringify([answer.id,answer.text,answer.artifacts]);
+    const signature=JSON.stringify([answer.id,answer.text,answer.code_blocks,answer.artifacts]);
     if (signature !== previousFinal) {previousFinal=signature; return value();}
     const response=await adapter.retrieve(answer);
     checkCancelled();

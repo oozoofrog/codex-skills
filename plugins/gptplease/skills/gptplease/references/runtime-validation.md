@@ -12,7 +12,7 @@ python3 -m unittest discover -s scripts/tests -v
 python3 scripts/sync_skill_mirrors.py --package gptplease
 ```
 
-Node tests cover exact Chat/Work configuration, unsupported settings before Send, pending uploads and configuration drift, ambiguous Send/read recovery with one submission, old and duplicate turn identity, temporary response placeholders, stable completion, truncation, code-operator loss in copied text, actual attachment manifests including unexpected attachments on a zero-file request, cancellation and checkpoint restoration, reservation of restored request IDs, concurrent operation rejection, bounded read failures, and generated artifact link metadata. Advice remains data; no local tools or callbacks execute it.
+Node tests cover exact Chat/Work configuration, unsupported settings before Send, pending uploads and configuration drift, ambiguous Send/read recovery with one submission, old and duplicate turn identity, temporary response placeholders, stable completion, truncation, code-operator/indentation loss in copied text, actual attachment manifests including unexpected attachments on a zero-file request, cancellation and checkpoint restoration, reservation of restored request IDs, concurrent operation rejection, bounded read failures, and generated artifact link metadata. Advice remains data; no local tools or callbacks execute it.
 
 An independent evaluator exercised production adapter methods with additional fixtures. Its findings about zero-file preflight, lost operators, and restored request IDs became regression tests. These tests do not prove authentication, current menu availability, server-internal model routing, actual uploads, or live response retrieval.
 
@@ -37,6 +37,7 @@ During development, live checks caught paragraph newline expansion, temporary as
 ## Scope and limits
 
 - Supported live checks used the current Korean Chat/Work UI. English label candidates exist for common controls, but an English-account E2E was not run. Unknown controls/signatures stop the transport.
+- Reuploading a filename can make ChatGPT append `(1)` or another suffix. The exact-filename contract then fails before Send. Use explicitly prepared, authorized copies with unique filenames if necessary; the transport does not silently map renamed cards to source files.
 - Three very small files (JSON, Markdown, Swift) were tested together. This does not establish all extensions, large-file limits, upload size ceilings, or byte-for-byte round-trip integrity. No general size limit is invented here.
 - Artifact references and final Markdown are distinct from downloaded bytes. The transport does not automatically download all files/images or follow every citation. A caller that needs artifact contents must inspect them through supported tools.
 - Browser login and supported CUA control must already be available. Installing the package alone does not provide them. No cookies/session tokens are read or stored.

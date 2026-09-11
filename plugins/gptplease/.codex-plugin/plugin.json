@@ -1,6 +1,6 @@
 {
   "name": "gptplease",
-  "version": "0.2.0+codex.20260911162605",
+  "version": "0.2.0+codex.20260911163819",
   "description": "Send requests and files to ChatGPT Chat or Work with purpose-appropriate model and reasoning selection, then return the completed response.",
   "author": {
     "name": "oozoofrog",
