@@ -34,7 +34,7 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertEqual("codex-skills", marketplace["name"])
         self.assertEqual("Codex Skills", marketplace["interface"]["displayName"])
         self.assertEqual(
-            ["swift-intelligence", "astra-orchestrator", "figma-computer-use", "gptplease", "session-continuity"],
+            ["swift-intelligence", "astra-orchestrator", "figma-computer-use", "gptplease", "session-continuity", "ponytail-beck-tdd"],
             [plugin["name"] for plugin in marketplace["plugins"]],
         )
         for entry in marketplace["plugins"]:
@@ -134,6 +134,30 @@ class PluginDistributionTests(unittest.TestCase):
             for target in re.findall(r"\[[^\]]*\]\(([^)]+)\)", path.read_text()):
                 if "://" not in target:
                     self.assertTrue((path.parent / target.split("#")[0]).exists(), (path, target))
+
+    def test_ponytail_beck_tdd_distribution(self) -> None:
+        source = REPO_ROOT / "ponytail-beck-tdd"
+        plugin = REPO_ROOT / "plugins" / source.name
+        self.assertTrue((source / "SKILL.md").is_file())
+        self.assertTrue((source / "agents" / "openai.yaml").is_file())
+        self.assertTrue((source / "references" / "kent-beck.md").is_file())
+        self.assertEqual(tree_files(source), tree_files(plugin / "skills" / source.name))
+        manifest = json.loads((plugin / ".codex-plugin" / "plugin.json").read_text())
+        self.assertEqual(source.name, manifest["name"])
+        self.assertEqual("0.1.0", manifest["version"])
+        self.assertEqual("./skills/", manifest["skills"])
+        for key in ("mcpServers", "apps", "hooks"):
+            self.assertNotIn(key, manifest)
+        prompts = manifest["interface"]["defaultPrompt"]
+        self.assertIsInstance(prompts, list)
+        self.assertTrue(1 <= len(prompts) <= 3)
+        for prompt in prompts:
+            self.assertIn("$ponytail-beck-tdd", prompt)
+            self.assertLessEqual(len(prompt), 128)
+        from test_document_links import local_targets
+        for document in source.rglob("*.md"):
+            for target in local_targets(document.read_text(encoding="utf-8")):
+                self.assertTrue((document.parent / target).exists(), (document, target))
 
     def test_swift_intelligence_plugin_loads_skill_and_mcp_server(self) -> None:
         manifest = json.loads(

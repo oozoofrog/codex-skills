@@ -1,6 +1,6 @@
 # codex-skills
 
-ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위한 `$gptplease`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 작업 조정을 위한 `astra-orchestrator`, Figma UI 작업용 `figma-computer-use`, 일반 Codex 세션의 작업 인계용 `session-continuity`를 제공합니다.
+ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위한 `$gptplease`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 작업 조정을 위한 `astra-orchestrator`, Figma UI 작업용 `figma-computer-use`, 일반 Codex 세션의 작업 인계용 `session-continuity`, 켄트 벡의 글을 바탕으로 한 개발 절차 `ponytail-beck-tdd`를 제공합니다.
 
 ## GPT Please
 
@@ -29,6 +29,16 @@ $session-continuity로 task 467을 재개하고 현재 Git 상태와 대조한 �
 ```
 
 기존 규칙·템플릿·task state를 보존하며 `.gitignore` 수정은 선택 사항입니다. 실제 실행하지 않은 검증은 `NOT RUN`으로 기록하고, 완료 후 장기 결론을 정식 문서 등에 반영한 뒤 state 삭제/보관을 안내합니다. 자동 압축 감지·새 세션 생성·commit은 포함하지 않습니다. 보조 도구는 Python 3.9+와 Git만 사용합니다. [설치와 사용 안내](session-continuity/README.md), [검증 기록](session-continuity/VALIDATION.md)을 참고하세요.
+
+## Ponytail + Beck TDD
+
+`$ponytail-beck-tdd`는 명시적으로 선택하는 개발 스킬입니다. 켄트 벡의 공개 글 여섯 편에 근거해 테스트 시나리오 목록 → 하나의 실패 테스트 → 최소 구현 → 통과 후 필요한 구조 정리로 진행하고, Ponytail의 유지보수 가능한 최소 구현 원칙을 적용합니다.
+
+```text
+$ponytail-beck-tdd로 저장 요청이 중복 처리되는 버그를 재현하고 수정해주세요.
+```
+
+작은 테스트를 큰 테스트로 바꾸면서 의무적으로 삭제하지 않습니다. 테스트 전체의 신뢰성·속도·진단력을 함께 다듬고, 통합·관통 테스트는 실제 연결과 상호작용을 확인할 때 사용합니다. 벡이 작성하거나 공인한 스킬은 아닙니다. 일반 코딩 요청에는 자동 적용하지 않으며, 별도 Ponytail 설치·MCP 서버·실행기·전역 개인 지시 변경 없이 사용할 수 있습니다. [스킬 본문](ponytail-beck-tdd/SKILL.md), [근거와 해석](ponytail-beck-tdd/references/kent-beck.md), [설치 안내](docs/plugin-installation.md)를 참고하세요.
 
 ## 다른 Plugin
 

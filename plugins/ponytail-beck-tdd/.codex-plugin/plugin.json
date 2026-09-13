@@ -1,0 +1,23 @@
+{
+  "name": "ponytail-beck-tdd",
+  "version": "0.1.0",
+  "description": "An explicitly selected Kent Beck TDD workflow with Ponytail's maintainable implementation principles.",
+  "author": {
+    "name": "oozoofrog",
+    "url": "https://github.com/oozoofrog"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Ponytail + Beck TDD",
+    "shortDescription": "켄트 벡의 TDD와 Ponytail로 명시적으로 선택하는 개발 절차",
+    "longDescription": "When explicitly requested, develop one failing test at a time, implement the minimum change, tidy structure while tests pass, and compose focused tests with necessary integration checks. Grounded in six Kent Beck essays and self-contained Ponytail implementation principles. No automatic deletion of small tests, additional runtime, or global instruction changes.",
+    "developerName": "oozoofrog",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": [
+      "$ponytail-beck-tdd로 요청한 변경을 한 번에 하나의 실패 테스트, 최소 구현, 구조 정리 순서로 완성해주세요."
+    ]
+  },
+  "repository": "https://github.com/oozoofrog/codex-skills",
+  "keywords": ["codex", "tdd", "kent-beck", "ponytail", "tidy-first"]
+}
