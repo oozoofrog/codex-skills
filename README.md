@@ -32,13 +32,17 @@ $session-continuity로 task 467을 재개하고 현재 Git 상태와 대조한 �
 
 ## Ponytail + Beck TDD
 
-`$ponytail-beck-tdd`는 명시적으로 선택하는 개발 스킬입니다. 켄트 벡의 공개 글 여섯 편에 근거해 테스트 시나리오 목록 → 하나의 실패 테스트 → 최소 구현 → 통과 후 필요한 구조 정리로 진행하고, Ponytail의 유지보수 가능한 최소 구현 원칙을 적용합니다.
+`$ponytail-beck-tdd`는 구현과 기존 테스트 점검·개선에 명시적으로 선택하는 스킬입니다. 새 동작은 켄트 벡의 TDD 순환으로 개발하고, 기존 테스트는 요구사항·실제 호출자·구현과 대조해 동작 보장, 진단력, 안정성과 유지비를 개선합니다. Ponytail의 유지보수 가능한 최소 구현 원칙을 함께 적용합니다.
 
 ```text
 $ponytail-beck-tdd로 저장 요청이 중복 처리되는 버그를 재현하고 수정해주세요.
+$ponytail-beck-tdd로 기존 구현과 테스트를 점검하고 개선안을 보고해주세요. 파일은 수정하지 마세요.
+$ponytail-beck-tdd로 기존 동작을 보존하면서 테스트의 검증과 구성을 개선하고 효과를 확인해주세요.
 ```
 
 작은 테스트를 큰 테스트로 바꾸면서 의무적으로 삭제하지 않습니다. 테스트 전체의 신뢰성·속도·진단력을 함께 다듬고, 통합·관통 테스트는 실제 연결과 상호작용을 확인할 때 사용합니다. 벡이 작성하거나 공인한 스킬은 아닙니다. 일반 코딩 요청에는 자동 적용하지 않으며, 별도 Ponytail 설치·MCP 서버·실행기·전역 개인 지시 변경 없이 사용할 수 있습니다. [스킬 본문](ponytail-beck-tdd/SKILL.md), [근거와 해석](ponytail-beck-tdd/references/kent-beck.md), [설치 안내](docs/plugin-installation.md)를 참고하세요.
+
+점검 요청은 근거와 개선안을 보고하고, 개선 요청은 필요한 변경과 검증까지 수행합니다. 기존 동작의 테스트 보강은 처음부터 통과할 수 있으며, 실패하면 기대값·환경·제품 결함을 구분합니다. 커버리지 증가는 참고 지표로 사용하고 구체적인 이득과 보장 보존으로 변경을 채택합니다. [기존 테스트 개선 절차](ponytail-beck-tdd/references/existing-tests.md), [실제 사례와 설계 근거](ponytail-beck-tdd/references/test-improvement-research.md)를 참고하세요.
 
 ## 다른 Plugin
 

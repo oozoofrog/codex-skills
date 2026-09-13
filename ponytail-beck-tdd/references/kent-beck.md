@@ -29,6 +29,8 @@
 
 ## 개인 지시와 스킬의 배치
 
+기존 테스트의 점검·개선에는 Test Desiderata, TDD Outcomes 및 실제 테스트 개선 연구를 추가로 검토했다. [연구와 적용 판단](test-improvement-research.md)은 벡의 품질 기준, 외부 연구 사례, 작성자의 절차 설계를 구분한다.
+
 [Codex 공식 스킬 문서](https://developers.openai.com/codex/skills/)는 반복 가능한 절차를 스킬로 묶고 필요한 때 상세 내용을 읽는 방식을 설명한다. [AGENTS.md 문서](https://developers.openai.com/codex/guides/agents-md/)는 지속적인 작업 원칙을 개인·프로젝트 지시로 두는 방식을 설명한다.
 
 상세 절차는 명시적으로 선택하는 이 스킬에 둔다. 개인 지시에 짧은 개발 원칙을 두는 것은 별도 선택이며, 이 패키지의 설치가 전역 개인 지시나 다른 Ponytail 플러그인을 변경하지 않는다.

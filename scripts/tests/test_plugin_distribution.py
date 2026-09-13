@@ -144,7 +144,7 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertEqual(tree_files(source), tree_files(plugin / "skills" / source.name))
         manifest = json.loads((plugin / ".codex-plugin" / "plugin.json").read_text())
         self.assertEqual(source.name, manifest["name"])
-        self.assertEqual("0.1.0", manifest["version"])
+        self.assertEqual("0.1.0", manifest["version"].split("+")[0])
         self.assertEqual("./skills/", manifest["skills"])
         for key in ("mcpServers", "apps", "hooks"):
             self.assertNotIn(key, manifest)

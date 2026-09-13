@@ -14,7 +14,7 @@ codex plugin add ponytail-beck-tdd@codex-skills
 
 이미 등록한 원격 marketplace는 `codex plugin marketplace upgrade codex-skills`로 snapshot을 갱신한 뒤 설치합니다. 로컬 checkout marketplace를 사용하는 경우에는 그 source를 확인한 뒤 같은 이름으로 재설치합니다.
 
-`ponytail-beck-tdd`는 켄트 벡의 TDD·Tidy First 글과 Ponytail의 구현 원칙을 담은 명시적 호출용 스킬입니다. 설치 후 새 작업에서 `$ponytail-beck-tdd` 또는 `$ponytail-beck-tdd:ponytail-beck-tdd`로 호출합니다. 필요한 원칙을 자체 포함하므로 별도 Ponytail 설치나 MCP 서버가 필요하지 않습니다. 개인 지시를 수정하거나 일반 코딩에 자동 적용하지 않으며, 작은 테스트의 의무 삭제 규칙도 없습니다. [스킬 본문](../ponytail-beck-tdd/SKILL.md)과 [원문 근거](../ponytail-beck-tdd/references/kent-beck.md)를 참고하세요. Standalone 설치를 선택할 때는 `ponytail-beck-tdd/`를 skill-installer로 설치하고 Plugin과 중복 설치하지 않습니다.
+`ponytail-beck-tdd`는 켄트 벡의 TDD·Tidy First 글과 Ponytail의 구현 원칙을 담은 명시적 호출용 스킬입니다. 설치 후 새 작업에서 `$ponytail-beck-tdd` 또는 `$ponytail-beck-tdd:ponytail-beck-tdd`로 호출합니다. 필요한 원칙을 자체 포함하므로 별도 Ponytail 설치나 MCP 서버가 필요하지 않습니다. 개인 지시를 수정하거나 일반 코딩에 자동 적용하지 않으며, 작은 테스트의 의무 삭제 규칙도 없습니다. [스킬 본문](../ponytail-beck-tdd/SKILL.md)과 [원문 근거](../ponytail-beck-tdd/references/kent-beck.md)를 참고하세요. Standalone 설치를 선택할 때는 `ponytail-beck-tdd/`를 skill-installer로 설치하고 Plugin과 중복 설치하지 않습니다. 기존 구현·테스트의 점검과 개선을 모두 지원하며, 점검만 요청하면 파일 변경 없이 보고합니다. 개선 시에는 [기존 테스트 개선 절차](../ponytail-beck-tdd/references/existing-tests.md)에 따라 전후 효과를 확인합니다.
 
 `gptplease`는 지원되는 CUA 브라우저 제어와 ChatGPT 로그인이 필요합니다. Plugin과 standalone 모두 `runtime/` 모듈을 포함하며 해당 브라우저 JavaScript 세션에서 직접 import합니다. 추가 MCP 서버·실행기·npm 의존성은 없고, 자동 테스트만 Node.js 20 이상에서 실행합니다. [실행 계약](../gptplease/references/transport-contract.md)을 참고하세요. Chat·Work에서 목적·복잡도에 맞는 모델과 사고 수준을 선택하고 명시 설정을 지키며 전송 전에 확인한 뒤, 실제 파일 첨부와 완료 응답 회수를 같은 호출 세션에서 수행합니다. 설치 후 새 대화에서 `$gptplease` 또는 `$gptplease:gptplease`를 호출합니다. [사용 안내](../gptplease/README.md)를 참고하세요.
 
