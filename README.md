@@ -1,6 +1,6 @@
 # codex-skills
 
-ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위한 `$gptplease`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 작업 조정을 위한 `astra-orchestrator`, Figma UI 작업용 `figma-computer-use`, 일반 Codex 세션의 작업 인계용 `session-continuity`, 켄트 벡의 글을 바탕으로 한 개발 절차 `ponytail-beck-tdd`, Jev 판단을 개발 과정에 연결하는 `jev-*` 스킬 7개를 제공합니다.
+ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위한 `$gptplease`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 작업 조정을 위한 `astra-orchestrator`, Figma UI 작업용 `figma-computer-use`, 일반 Codex 세션의 작업 인계용 `session-continuity`, 켄트 벡의 글을 바탕으로 한 개발 절차 `ponytail-beck-tdd`, Jev 판단 스킬 7개와 데스크톱·브라우저 조작 스킬 2개를 제공합니다.
 
 ## GPT Please
 
@@ -55,6 +55,8 @@ $jev-calibrate 저장한 판정의 후보 순서·한국어 표현 민감도를 
 ```
 
 Jev 모음은 Plugin marketplace 항목이 아닌 standalone 스킬입니다. [설치 안내](docs/jev/README.md), [실행 계약](jev-workbench/references/runtime.md), [평가 절차](jev-workbench/references/contract-calibration.md), [검증 범위](docs/jev/TEST_REPORT.md)를 참고하세요. 실제 API에는 승인된 입력과 `TYPESAFE_API_KEY`가 필요하며 오프라인 fixture 성공은 모델 정확도 측정이 아닙니다.
+
+추가로 전역 설치에서 가져온 [Jev Computer Use](jev-computer-use/SKILL.md)는 OCR·접근성 정보를 이용한 macOS 화면 조작을, [Jev Ultrafast](jev-ultrafast/SKILL.md)는 Jev의 브라우저 행동 선택과 Codex Luna의 텍스트 입력을 지원합니다. 두 스킬은 별도 로컬 실행 환경에 연결하는 어댑터이며, 실행 환경·인증 정보는 저장소에 포함하지 않습니다. 현재 런처의 경로와 설치 범위는 [Jev 설치 안내](docs/jev/README.md#데스크톱브라우저-조작-스킬)를 확인하세요.
 
 ## 다른 Plugin
 

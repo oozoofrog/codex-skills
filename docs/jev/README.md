@@ -1,6 +1,6 @@
 # Jev 스킬 모음 — codex-skills 통합판
 
-이 폴더는 Jev 스킬 모음의 안내·출처를 담습니다. 최초 `jev-skills-collection-0.1.0` 통합 이후 현재 실행기는 `0.1.1`입니다. 스킬 7개는 저장소 루트에 각각 있으며 설치기는 기존 스킬·AGENTS.md·config.toml·모델·인증·훅을 변경하지 않습니다.
+이 폴더는 Jev 스킬 모음의 안내·출처를 담습니다. 최초 `jev-skills-collection-0.1.0` 통합 이후 판단용 공통 실행기는 `0.1.1`입니다. 저장소 루트에는 판단 스킬 7개와 별도 실행 환경을 사용하는 데스크톱·브라우저 조작 스킬 2개가 있습니다. 판단 스킬 설치기는 기존 스킬·AGENTS.md·config.toml·모델·인증·훅을 변경하지 않습니다.
 
 ## 구성
 
@@ -13,6 +13,8 @@
 | `jev-review-evidence` | 코드 검토 신호·완료 주장의 근거·추가 테스트 순서 평가 |
 | `jev-product-choice` | 명시한 사용자 기준에 맞춰 제품 문구·UX 대안 중 선택 |
 | `jev-calibrate` | 저장된 판정의 정확도와 한국어·표현·후보 순서 민감도 평가 |
+| `jev-computer-use` | OCR·접근성 정보를 바탕으로 Jev와 Codex Luna가 macOS 화면 조작 |
+| `jev-ultrafast` | Jev가 브라우저 행동을 선택하고 Codex Luna가 입력할 텍스트 생성 |
 
 ## 설치
 
@@ -25,6 +27,17 @@ python3 scripts/install_jev_skills.py --dest "$HOME/.agents/skills" --preset all
 ```
 
 동일 이름의 기존 스킬을 덮어쓰지 않습니다. 공통 스킬만 설치하려면 `--preset core`, 공식 TypeSafe 문서 스킬도 함께 복사하려면 `--with-typesafe`를 사용합니다. 외부 `jev-review`는 MCP 런타임이 포함되지 않아 참고용으로만 둡니다.
+
+### 데스크톱·브라우저 조작 스킬
+
+`jev-computer-use/`와 `jev-ultrafast/`는 전역 설치의 스킬 본문·UI 메타데이터·실행 보조 파일을 내용과 실행 권한 그대로 보존한 사본입니다. 위 설치기의 `--preset all`은 기존 판단 스킬 7개를 대상으로 하며 이 두 어댑터를 설치하지 않습니다.
+
+- [jev-computer-use](../../jev-computer-use/SKILL.md)는 `/Users/oozoofrog/.local/share/typesafe-computer-use`의 실행 환경을 사용합니다.
+- [jev-ultrafast](../../jev-ultrafast/SKILL.md)는 `/Users/oozoofrog/.local/share/jev-ultrafast`의 실행 환경을 사용합니다.
+
+현재 명령 예시와 런처는 원래 사용자 경로(`/Users/oozoofrog`) 및 전역 스킬 경로를 참조합니다. 다른 환경에 폴더만 복사해 독립 실행할 수 있는 패키지는 아닙니다. 실행 환경·의존성·인증·OS/브라우저 권한을 별도로 갖춰야 합니다. 비공개 `.env`, API 키, 로그인 정보와 화면 캡처·실행 기록은 가져오지 않았습니다.
+
+가져올 때 원본 파일·권한 일치, 스킬 구조, 셸/Python 문법을 확인합니다. 실제 화면·브라우저 조작 검증을 의미하지 않습니다.
 
 ## 검증
 
