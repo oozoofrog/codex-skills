@@ -1,6 +1,6 @@
 # Jev 스킬 모음 — codex-skills 통합판
 
-이 폴더는 `jev-skills-collection-0.1.0`을 저장소의 루트형 스킬 배치에 맞춘 안내·출처 모음입니다. 새 스킬 7개는 저장소 루트에 각각 설치됩니다. 기존 스킬, AGENTS.md, config.toml, 모델·인증·훅은 변경하지 않습니다.
+이 폴더는 Jev 스킬 모음의 안내·출처를 담습니다. 최초 `jev-skills-collection-0.1.0` 통합 이후 현재 실행기는 `0.1.1`입니다. 스킬 7개는 저장소 루트에 각각 있으며 설치기는 기존 스킬·AGENTS.md·config.toml·모델·인증·훅을 변경하지 않습니다.
 
 ## 구성
 
@@ -34,6 +34,8 @@ python3 jev-workbench/scripts/jev_cli.py doctor
 ```
 
 API 키 없이 실행되는 오프라인 검증입니다. 합성 응답의 통과는 실제 Jev 모델의 정확도나 API 호환성 검증이 아닙니다. 실제 API 호출에는 승인된 입력, TYPESAFE_API_KEY, 명시적인 `--live` 옵션이 필요합니다. 자세한 명령은 `../../jev-workbench/references/runtime.md`를 확인하세요.
+
+0.1.1의 macOS·실제 API 확인 결과는 [TEST_REPORT.md](TEST_REPORT.md)에 있습니다. 질문 형식의 호환성, 모델 판단 품질, 새 세션의 실제 스킬 행동을 구분해 검토하려면 [평가 절차](../../jev-workbench/references/contract-calibration.md)를 참고하세요.
 
 ## 명시적 사용
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Jev Skills Kit 0.1.0: explicit, auditable, cooperative API runner.
+"""Jev Skills Kit 0.1.1: explicit, auditable, cooperative API runner.
 
 Not the official Jev CLI and not the full jev-decide authority controller.
 Python 3.10+, standard library only. No shell execution or automatic file upload.
@@ -22,8 +22,10 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
+MODEL_ALIASES = {"jev-latest", "jev-preview"}
+MODEL_VERSION_PATTERN = r"jev-\d+\.\d+\.\d+"
 MAX_BYTES = 262144  # Local safety budget; NOT the provider's token limit.
 MAX_RESPONSE_BYTES = 2097152
 BASE = Path(__file__).resolve().parent.parent
@@ -50,6 +52,16 @@ def digest(value: Any) -> str:
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
+def request_bytes(request: Any) -> bytes:
+    """Preserve candidate and criteria order in the actual HTTP body."""
+    return json.dumps(request, ensure_ascii=False, separators=(",", ":"),
+                      allow_nan=False).encode("utf-8")
+
+
+def request_digest(request: Any) -> str:
+    return hashlib.sha256(request_bytes(request)).hexdigest()
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -57,6 +69,10 @@ def now() -> str:
 def reject_symlinks(path: Path) -> None:
     path = path.absolute()
     for part in [*path.parents, path]:
+        # macOS temp roots use these system aliases; user-created links stay forbidden.
+        if (sys.platform == "darwin" and part in (Path("/tmp"), Path("/var"))
+                and part.resolve() == Path("/private") / part.name):
+            continue
         require(not part.is_symlink(), f"Symlink paths are not supported: {part}")
 
 
@@ -122,8 +138,10 @@ def validate_request(request: Any) -> None:
     require(isinstance(request, dict), "request must be an object")
     require(set(request) == {"state", "model", "questions"},
             "request requires exactly state, model, questions")
-    require(isinstance(request["model"], str) and request["model"].startswith("jev-"),
-            "Use an explicit Jev model ID or documented alias")
+    model = request["model"]
+    require(isinstance(model, str) and (model in MODEL_ALIASES or
+            re.fullmatch(MODEL_VERSION_PATTERN, model) is not None),
+            "Use a versioned Jev model ID, jev-latest, or jev-preview")
     present(request["state"], "state")
     questions = request["questions"]
     require(isinstance(questions, dict) and 1 <= len(questions) <= 64,
@@ -140,7 +158,8 @@ def validate_request(request: Any) -> None:
                     f"{qid} Choice requires at least two options")
             for key, val in q["criteria"].items():
                 require(isinstance(key, str) and bool(key), "Empty choice option")
-                present(val, f"{qid}.criteria.{key}")
+                if val is not None:
+                    present(val, f"{qid}.criteria.{key}")
         elif q["type"] == "score":
             require(isinstance(q.get("criteria"), list) and len(q["criteria"]) >= 2,
                     f"{qid} Score requires at least two ordered levels")
@@ -190,7 +209,11 @@ def validate_packet(packet: Any) -> None:
 def validate_response(request: dict[str, Any], response: Any) -> None:
     require(isinstance(response, dict), "Response must be an object")
     require(isinstance(response.get("model"), str) and bool(response["model"]), "Response model missing")
-    if request["model"] != "jev-latest":
+    if request["model"] in MODEL_ALIASES:
+        require(response["model"] == request["model"] or
+                re.fullmatch(MODEL_VERSION_PATTERN, response["model"]) is not None,
+                "Returned model is not a Jev version or the requested alias")
+    else:
         require(response["model"] == request["model"], "Returned model does not match pinned model")
     answers = response.get("answers")
     require(isinstance(answers, dict) and set(answers) == set(request["questions"]), "Response question IDs do not match request")
@@ -245,10 +268,16 @@ def inspect_run(directory: Path, require_fresh: bool = True) -> dict[str, Any]:
     packet = read_json(directory / "packet.json")
     payload = read_json(directory / "payload.json")
     validate_packet(packet)
-    require(payload == packet["request"], "payload.json does not match packet.json")
+    legacy = manifest.get("kit_version") == "0.1.0"
+    require(legacy or manifest.get("kit_version") == VERSION, "Unsupported prepared-run version")
+    matches = payload == packet["request"] if legacy else request_bytes(payload) == request_bytes(packet["request"])
+    require(matches, "payload.json does not match packet.json (including request order)")
     require(digest(packet) == manifest["packet_sha256"], "Packet hash mismatch")
-    require(digest(payload) == manifest["payload_sha256"], "Payload hash mismatch")
+    payload_hash = digest(payload) if legacy else request_digest(payload)
+    require(payload_hash == manifest["payload_sha256"], "Payload hash mismatch")
     binding = {"packet_sha256": manifest["packet_sha256"], "root": manifest["root"], "watched": manifest["watched"]}
+    if not legacy:
+        binding["payload_sha256"] = manifest["payload_sha256"]
     require(digest(binding) == manifest["approval_sha256"], "Approval binding mismatch")
     fresh = True
     try:
@@ -258,7 +287,7 @@ def inspect_run(directory: Path, require_fresh: bool = True) -> dict[str, Any]:
         fresh = False
     if require_fresh and not fresh:
         raise KitError("STALE: watched files changed or disappeared. Reprepare with new evidence.", 3)
-    return {"manifest": manifest, "packet": packet, "fresh": fresh}
+    return {"manifest": manifest, "packet": packet, "fresh": fresh, "legacy_read_only": legacy}
 
 
 def prepare(input_path: Path, out: Path, root: Path, watch: list[str]) -> dict[str, Any]:
@@ -268,9 +297,10 @@ def prepare(input_path: Path, out: Path, root: Path, watch: list[str]) -> dict[s
     require(not out.exists(), "Output already exists; use status/check rather than overwriting a run")
     watched = hash_watched(root, watch)
     manifest = {"kit_version": VERSION, "created_at": now(), "packet_sha256": digest(packet),
-                "payload_sha256": digest(packet["request"]), "root": str(root.resolve()), "watched": watched,
+                "payload_sha256": request_digest(packet["request"]), "root": str(root.resolve()), "watched": watched,
                 "watched_contents_uploaded": False, "endpoint": ENDPOINT}
-    binding = {"packet_sha256": manifest["packet_sha256"], "root": manifest["root"], "watched": watched}
+    binding = {"packet_sha256": manifest["packet_sha256"], "payload_sha256": manifest["payload_sha256"],
+               "root": manifest["root"], "watched": watched}
     manifest["approval_sha256"] = digest(binding)
     out.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=".jev-prepare-", dir=out.parent))
@@ -296,7 +326,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 def live_request(request: dict[str, Any], timeout: float) -> dict[str, Any]:
     key = os.environ.get("TYPESAFE_API_KEY", "")
     require(bool(key.strip()) and "\n" not in key and "\r" not in key, "TYPESAFE_API_KEY is missing or malformed")
-    call = urllib.request.Request(ENDPOINT, data=canonical(request), method="POST",
+    call = urllib.request.Request(ENDPOINT, data=request_bytes(request), method="POST",
                                   headers={"Authorization": "Bearer " + key,
                                            "Content-Type": "application/json",
                                            "User-Agent": "jev-skills-kit/" + VERSION})
@@ -314,7 +344,8 @@ def live_request(request: dict[str, Any], timeout: float) -> dict[str, Any]:
         raise KitError("DELIVERY_UNKNOWN: transport failed; request may have reached provider. No automatic retry.", 4) from exc
 
 
-def build_receipt(packet: dict[str, Any], response: dict[str, Any], origin: str) -> dict[str, Any]:
+def build_receipt(packet: dict[str, Any], response: dict[str, Any], origin: str,
+                  kit_version: str = VERSION) -> dict[str, Any]:
     selected = None
     status = "EVALUATED"
     question = packet["policy"]["decision_question"]
@@ -327,7 +358,7 @@ def build_receipt(packet: dict[str, Any], response: dict[str, Any], origin: str)
             status = "NEEDS_REVIEW"
     eligible = (origin == "live" and packet["authority"] == "delegated" and
                 status == "SELECTED" and not packet["is_example"])
-    return {"schema_version": 1, "kit_version": VERSION, "task_id": packet["task_id"],
+    receipt = {"schema_version": 1, "kit_version": kit_version, "task_id": packet["task_id"],
             "workflow": packet["workflow"], "authority": packet["authority"], "origin": origin,
             "decision_status": status, "selected": selected,
             "eligible_for_delegated_followup": eligible,
@@ -335,14 +366,17 @@ def build_receipt(packet: dict[str, Any], response: dict[str, Any], origin: str)
             "packet_sha256": digest(packet), "response_sha256": digest(response),
             "policy_revision": packet["policy"]["revision"],
             "note": "Selection is not factual proof or user execution permission. Cooperative record only."}
+    if kit_version != "0.1.0":
+        receipt["payload_sha256"] = request_digest(packet["request"])
+    return receipt
 
 
-def verified_receipt(directory: Path, packet: dict[str, Any]) -> dict[str, Any]:
+def verified_receipt(directory: Path, packet: dict[str, Any], kit_version: str) -> dict[str, Any]:
     receipt = read_json(directory / "receipt.json")
     raw = read_json(directory / "response.json")
     validate_response(packet["request"], raw)
     require(receipt.get("origin") in {"live", "fixture", "external"}, "Invalid receipt origin")
-    expected = build_receipt(packet, raw, receipt["origin"])
+    expected = build_receipt(packet, raw, receipt["origin"], kit_version)
     require(receipt == expected, "Receipt content mismatch")
     return receipt
 
@@ -354,11 +388,13 @@ def run(directory: Path, live: bool, fixture: Path | None, approved_sha: str | N
     require(sum((live, fixture is not None, external is not None)) == 1, "Choose exactly one provider mode")
     origin = "live" if live else "fixture" if fixture else "external"
     if (directory / "receipt.json").exists():
-        saved = verified_receipt(directory, packet)
+        saved = verified_receipt(directory, packet, manifest["kit_version"])
         require(saved["origin"] == origin, "Provider-mode mismatch; fixture/import cannot become live in the same run")
         return {"status": "CACHED", "receipt": saved}
     require(not (directory / "attempt.json").exists(),
             "An attempt already exists without a valid receipt. Inspect status; do not blindly replay.")
+    require(not data["legacy_read_only"],
+            "Legacy run is read-only. Preserve prior attempts; prepare and review new input before any new request.")
     if live:
         require(not packet["is_example"], "Example packets cannot be sent live. Replace all sample data and set is_example=false.")
         require(approved_sha == manifest["approval_sha256"], "Exact approval_sha256 required after reviewing payload.json")
@@ -398,15 +434,17 @@ def run(directory: Path, live: bool, fixture: Path | None, approved_sha: str | N
 def status(directory: Path, actionable: bool = False) -> dict[str, Any]:
     data = inspect_run(directory, require_fresh=False)
     result: dict[str, Any] = {"status": "READY" if data["fresh"] else "STALE", "fresh": data["fresh"],
+                              "legacy_read_only": data["legacy_read_only"],
                               "watched_files": len(data["manifest"]["watched"]),
                               "task_id": data["packet"]["task_id"], "workflow": data["packet"]["workflow"]}
     if (directory / "receipt.json").exists():
-        result["receipt"] = verified_receipt(directory, data["packet"])
+        result["receipt"] = verified_receipt(directory, data["packet"], data["manifest"]["kit_version"])
     elif (directory / "failure.json").exists():
         result["failure"] = read_json(directory / "failure.json")
     elif (directory / "attempt.json").exists():
         result["status"] = "DELIVERY_UNKNOWN" if data["fresh"] else "STALE"
     if actionable:
+        require(not data["legacy_read_only"], "Legacy run is read-only; it cannot authorize new delegated followup")
         require(data["fresh"], "STALE: cannot use a stale decision")
         require(result.get("receipt", {}).get("eligible_for_delegated_followup") is True,
                 "Not eligible: require a live, delegated, selected, non-example result")

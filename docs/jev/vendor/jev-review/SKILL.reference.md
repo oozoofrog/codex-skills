@@ -79,7 +79,7 @@ Never send secrets, credentials, private keys, environment files, generated outp
 Stop the loop when:
 
 - The implementation satisfies the user's requirements and normal validation passes.
-- Important targeted metrics improved and no meaningful regression was introducedced.
+- Important targeted metrics improved and no meaningful regression was introduced.
 - Remaining weak or low-confidence metrics have no concrete, justified improvement available.
 - Further score-seeking changes would add scope, complexity, coupling, or behavioral risk.
 Scores are evidence, not objectives to game. Never improve a score by adding speculative architecture, unnecessary abstraction, meaningless tests or comments, mechanical file splitting, scope expansion, or behavior changes the user did not request. Correctness and the user's actual requirements always come first.

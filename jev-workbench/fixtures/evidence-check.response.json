@@ -3,12 +3,12 @@
   "answers": {
     "claim_c1": {
       "type": "choice",
-      "choice": "SUPPORTED",
+      "choice": "INSUFFICIENT",
       "probabilities": {
-        "SUPPORTED": 0.7,
-        "CONTRADICTED": 0.09999999999999999,
-        "INSUFFICIENT": 0.09999999999999999,
-        "NOT_APPLICABLE": 0.09999999999999999
+        "SUPPORTED": 0.1,
+        "CONTRADICTED": 0.1,
+        "INSUFFICIENT": 0.7,
+        "NOT_APPLICABLE": 0.1
       },
       "confidence": 0.4
     }

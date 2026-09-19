@@ -39,7 +39,7 @@ description: Use Jev for bounded development decisions, context ranking, issue t
 4. 외부 전송에 대한 실제 사용자 승인/프로젝트 정책이 있어야 `run --live --approved-sha ...`를 사용한다. 해시 옵션은 인간 승인 증명도 권한 우회 수단도 아니다.
 5. JSON의 `decision_status`와 `origin`을 읽는다. 종료 코드 0은 선택 확정·테스트 통과가 아니다. fixture/external/evaluation 결과는 위임 실행용 live 결정으로 쓰지 않는다.
 6. delegated에서 유효 SELECTED면 해당 방향을 따른다. NEEDS_EVIDENCE/NEEDS_REVIEW는 조사·검토, REJECT_ALL은 후보 재구성, 서비스 실패는 보류다. 임의 Codex fallback을 하지 않는다.
-7. 실행 시작 직전에 `check --require-actionable`로 검사한다. 실행 권한·필수 검사 충족은 별도로 확인한다. 적법한 구현 후 변경된 파일을 이전 계획의 즉시 위반으로 오해하지 않는다.
+7. delegated 선택에 따라 구현을 시작하기 직전에 `check --require-actionable`로 검사한다. advisory/evaluation은 `check`로 기록과 freshness를 확인한다. 실행 권한·필수 검사 충족은 별도로 확인한다. 적법한 구현 후 변경된 파일을 이전 계획의 즉시 위반으로 오해하지 않는다.
 8. 새 증거가 있을 때만 재심한다. 원 packet 해시와 변경 이유를 `lineage`로 남긴다. 이 경량판에는 강제 appeal 서버가 없다. 문구만 바꾼 반복으로 원하는 결과를 얻지 않는다.
 9. 완료 시 task ID, packet 해시, 선택, 원 응답 위치, 실제 검증, 미검증, 다음 행동만 요약한다. Jev가 반환하지 않은 설명은 “Codex의 사후 해석”으로 표시한다.
 

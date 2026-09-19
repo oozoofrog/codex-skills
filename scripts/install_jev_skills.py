@@ -14,6 +14,10 @@ JEV_SKILLS = ('jev-calibrate', 'jev-context', 'jev-decision', 'jev-product-choic
 
 def reject_links(path: Path) -> None:
     for item in [*path.absolute().parents, path.absolute()]:
+        # Match the standalone runner's narrow exception for macOS temp roots.
+        if (sys.platform == 'darwin' and item in (Path('/tmp'), Path('/var'))
+                and item.resolve() == Path('/private') / item.name):
+            continue
         if item.is_symlink():
             raise ValueError(f"Symlink destination/source component refused: {item}")
 

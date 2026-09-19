@@ -1,6 +1,6 @@
 # codex-skills
 
-ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위한 `$gptplease`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 작업 조정을 위한 `astra-orchestrator`, Figma UI 작업용 `figma-computer-use`, 일반 Codex 세션의 작업 인계용 `session-continuity`, 켄트 벡의 글을 바탕으로 한 개발 절차 `ponytail-beck-tdd`를 제공합니다.
+ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위한 `$gptplease`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 작업 조정을 위한 `astra-orchestrator`, Figma UI 작업용 `figma-computer-use`, 일반 Codex 세션의 작업 인계용 `session-continuity`, 켄트 벡의 글을 바탕으로 한 개발 절차 `ponytail-beck-tdd`, Jev 판단을 개발 과정에 연결하는 `jev-*` 스킬 7개를 제공합니다.
 
 ## GPT Please
 
@@ -44,6 +44,18 @@ $ponytail-beck-tdd로 기존 동작을 보존하면서 테스트의 검증과 �
 
 점검 요청은 근거와 개선안을 보고하고, 개선 요청은 필요한 변경과 검증까지 수행합니다. 기존 동작의 테스트 보강은 처음부터 통과할 수 있으며, 실패하면 기대값·환경·제품 결함을 구분합니다. 커버리지 증가는 참고 지표로 사용하고 구체적인 이득과 보장 보존으로 변경을 채택합니다. [기존 테스트 개선 절차](ponytail-beck-tdd/references/existing-tests.md), [실제 사례와 설계 근거](ponytail-beck-tdd/references/test-improvement-research.md)를 참고하세요.
 
+## Jev 스킬
+
+`$jev-workbench`는 공통 실행기와 12개 판단 절차를 제공합니다. 목적에 따라 `$jev-decision`, `$jev-context`, `$jev-triage`, `$jev-review-evidence`, `$jev-product-choice`, `$jev-calibrate`를 명시적으로 호출합니다. 위임된 선택·검토 보조·평가를 구분하며 실제 빌드·테스트와 사용자 권한을 대신하지 않습니다.
+
+```text
+$jev-decision 구현 대안과 근거를 준비하고 위임한 선택을 Jev에게 맡겨주세요.
+$jev-review-evidence 완료 보고를 실제 테스트 실행 기록과 대조해주세요.
+$jev-calibrate 저장한 판정의 후보 순서·한국어 표현 민감도를 평가해주세요.
+```
+
+Jev 모음은 Plugin marketplace 항목이 아닌 standalone 스킬입니다. [설치 안내](docs/jev/README.md), [실행 계약](jev-workbench/references/runtime.md), [평가 절차](jev-workbench/references/contract-calibration.md), [검증 범위](docs/jev/TEST_REPORT.md)를 참고하세요. 실제 API에는 승인된 입력과 `TYPESAFE_API_KEY`가 필요하며 오프라인 fixture 성공은 모델 정확도 측정이 아닙니다.
+
 ## 다른 Plugin
 
 `swift-intelligence`는 Xcode의 SourceKit-LSP로 Swift 정의, 참조, 구현, 타입, 심볼 및 진단을 읽기 전용으로 조회합니다. MCP 서버가 필요한 Plugin이므로 `plugins/swift-intelligence/`에만 제공합니다. Python 3 외의 Python 패키지나 외부 MCP 바이너리를 추가로 설치하지 않습니다.
@@ -83,6 +95,7 @@ codex plugin add session-continuity@codex-skills
 
 ```bash
 python3 -m unittest discover -s scripts/tests -v
+python3 -m unittest discover -s tests/jev -v
 python3 scripts/sync_skill_mirrors.py --package gptplease
 node --test gptplease/tests/*.test.mjs
 python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py gptplease
