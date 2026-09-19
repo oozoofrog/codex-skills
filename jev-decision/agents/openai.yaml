@@ -1,6 +1,6 @@
 interface:
   display_name: "Jev 개발 의사결정"
-  short_description: "Jev 개발 판단과 근거 기반 작업 흐름"
-  default_prompt: "$jev-decision 요청에 맞는 Jev 절차를 적용하고 외부 전송 전 입력과 권한을 확인해주세요."
+  short_description: "구현 대안·작업 범위·다음 조사·사용할 스킬 중 선택"
+  default_prompt: "$jev-decision 구현 대안과 근거를 비교하고, 제가 위임한 범위에서 구현 방향이나 다음 행동을 Jev로 선택해주세요."
 policy:
   allow_implicit_invocation: false

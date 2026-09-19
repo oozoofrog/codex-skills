@@ -6,13 +6,13 @@
 
 | 스킬 | 용도 |
 |---|---|
-| `jev-workbench` | 공통 CLI와 12개 판단 절차 |
-| `jev-decision` | 구현안·범위·다음 행동의 위임된 선택 |
-| `jev-context` | 검색 후보의 관련성·알려진 값 선택 |
-| `jev-triage` | 버그·제보 분류 |
-| `jev-review-evidence` | 품질 신호·완료 주장과 증거 대조 |
-| `jev-product-choice` | 명시한 제품·UX 기준의 대안 선택 |
-| `jev-calibrate` | 판정 사례·질문 민감도 평가 |
+| `jev-workbench` | Jev 판단 작업을 시작하고 입력 준비·실행·결과 확인 |
+| `jev-decision` | 구현 대안·작업 범위·다음 조사·사용할 스킬 중 선택 |
+| `jev-context` | 읽을 자료의 우선순위를 정하고 원문에서 값·경로 선택 |
+| `jev-triage` | 버그 제보를 기능 영역·사용자 영향·발생 조건으로 분류 |
+| `jev-review-evidence` | 코드 검토 신호·완료 주장의 근거·추가 테스트 순서 평가 |
+| `jev-product-choice` | 명시한 사용자 기준에 맞춰 제품 문구·UX 대안 중 선택 |
+| `jev-calibrate` | 저장된 판정의 정확도와 한국어·표현·후보 순서 민감도 평가 |
 
 ## 설치
 

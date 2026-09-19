@@ -1,6 +1,6 @@
 interface:
   display_name: "Jev 제품 가치 선택"
-  short_description: "Jev 개발 판단과 근거 기반 작업 흐름"
-  default_prompt: "$jev-product-choice 요청에 맞는 Jev 절차를 적용하고 외부 전송 전 입력과 권한을 확인해주세요."
+  short_description: "명시한 사용자 기준에 맞춰 제품 문구·UX 대안 중 선택"
+  default_prompt: "$jev-product-choice 명시한 사용자 목표와 선호를 기준으로 제품 문구·UX 후보를 비교하고, 측정하지 않은 효과는 가정하지 마세요."
 policy:
   allow_implicit_invocation: false
