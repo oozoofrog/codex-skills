@@ -1,0 +1,22 @@
+[
+  {
+    "case_id": "synthetic-plan",
+    "packet": "../templates/plan-choice.json",
+    "response": "plan-choice.response.json",
+    "question_id": "decision",
+    "acceptable": [
+      "local_handler",
+      "new_adapter"
+    ]
+  },
+  {
+    "case_id": "synthetic-scope",
+    "packet": "../templates/scope-choice.json",
+    "response": "scope-choice.response.json",
+    "question_id": "decision",
+    "acceptable": [
+      "DEFER",
+      "OUT_OF_SCOPE"
+    ]
+  }
+]

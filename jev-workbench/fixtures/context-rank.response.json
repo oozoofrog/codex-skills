@@ -1,0 +1,43 @@
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "relevance_d1": {
+      "type": "score",
+      "score": 1.5,
+      "legend": {
+        "0": "The excerpt is unrelated to the question.",
+        "1": "The excerpt provides background but no direct explanation.",
+        "2": "The excerpt describes a relevant component or mechanism.",
+        "3": "The excerpt directly addresses the reported failure condition."
+      },
+      "probabilities": {
+        "0": 0.25,
+        "1": 0.25,
+        "2": 0.25,
+        "3": 0.25
+      },
+      "confidence": 0.0
+    },
+    "relevance_d2": {
+      "type": "score",
+      "score": 1.5,
+      "legend": {
+        "0": "The excerpt is unrelated to the question.",
+        "1": "The excerpt provides background but no direct explanation.",
+        "2": "The excerpt describes a relevant component or mechanism.",
+        "3": "The excerpt directly addresses the reported failure condition."
+      },
+      "probabilities": {
+        "0": 0.25,
+        "1": 0.25,
+        "2": 0.25,
+        "3": 0.25
+      },
+      "confidence": 0.0
+    }
+  },
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "condition": {
+      "type": "choice",
+      "choice": "reconnection",
+      "probabilities": {
+        "reconnection": 0.7,
+        "launch": 0.15,
+        "not_stated": 0.15
+      },
+      "confidence": 0.4
+    }
+  },
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0
+  }
+}

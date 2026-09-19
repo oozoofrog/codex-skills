@@ -1,0 +1,21 @@
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "decision": {
+      "type": "choice",
+      "choice": "DO_NOW",
+      "probabilities": {
+        "DO_NOW": 0.7,
+        "DEFER": 0.075,
+        "OUT_OF_SCOPE": 0.075,
+        "NEEDS_EVIDENCE": 0.075,
+        "REJECT_ALL": 0.075
+      },
+      "confidence": 0.4
+    }
+  },
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0
+  }
+}

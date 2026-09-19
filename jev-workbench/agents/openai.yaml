@@ -1,0 +1,6 @@
+interface:
+  display_name: "Jev Workbench"
+  short_description: "Jev 개발 판단과 근거 기반 작업 흐름"
+  default_prompt: "$jev-workbench 요청에 맞는 Jev 절차를 적용하고 외부 전송 전 입력과 권한을 확인해주세요."
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,91 @@
+{
+  "version": "0.1.0",
+  "created_date": "2026-09-19",
+  "workflows": [
+    {
+      "id": "plan-choice",
+      "title": "구현안 선택",
+      "authority": "delegated",
+      "template": "jev-workbench/templates/plan-choice.json",
+      "playbook": "jev-workbench/references/plan-choice.md"
+    },
+    {
+      "id": "scope-choice",
+      "title": "작업 범위 조절",
+      "authority": "delegated",
+      "template": "jev-workbench/templates/scope-choice.json",
+      "playbook": "jev-workbench/references/scope-choice.md"
+    },
+    {
+      "id": "next-step-choice",
+      "title": "다음 조사·실험 선택",
+      "authority": "delegated",
+      "template": "jev-workbench/templates/next-step-choice.json",
+      "playbook": "jev-workbench/references/next-step-choice.md"
+    },
+    {
+      "id": "context-rank",
+      "title": "컨텍스트·자료 선별",
+      "authority": "advisory",
+      "template": "jev-workbench/templates/context-rank.json",
+      "playbook": "jev-workbench/references/context-rank.md"
+    },
+    {
+      "id": "issue-triage",
+      "title": "버그·이슈 분류",
+      "authority": "advisory",
+      "template": "jev-workbench/templates/issue-triage.json",
+      "playbook": "jev-workbench/references/issue-triage.md"
+    },
+    {
+      "id": "review-signal",
+      "title": "변경 품질 신호",
+      "authority": "advisory",
+      "template": "jev-workbench/templates/review-signal.json",
+      "playbook": "jev-workbench/references/review-signal.md"
+    },
+    {
+      "id": "evidence-check",
+      "title": "완료 주장·근거 대조",
+      "authority": "advisory",
+      "template": "jev-workbench/templates/evidence-check.json",
+      "playbook": "jev-workbench/references/evidence-check.md"
+    },
+    {
+      "id": "test-priority",
+      "title": "추가 테스트 우선순위",
+      "authority": "advisory",
+      "template": "jev-workbench/templates/test-priority.json",
+      "playbook": "jev-workbench/references/test-priority.md"
+    },
+    {
+      "id": "product-choice",
+      "title": "제품·UX 가치 선택",
+      "authority": "delegated",
+      "template": "jev-workbench/templates/product-choice.json",
+      "playbook": "jev-workbench/references/product-choice.md"
+    },
+    {
+      "id": "candidate-extract",
+      "title": "알려진 값·원문 후보 선택",
+      "authority": "advisory",
+      "template": "jev-workbench/templates/candidate-extract.json",
+      "playbook": "jev-workbench/references/candidate-extract.md"
+    },
+    {
+      "id": "skill-route",
+      "title": "허용된 스킬 선택",
+      "authority": "delegated",
+      "template": "jev-workbench/templates/skill-route.json",
+      "playbook": "jev-workbench/references/skill-route.md"
+    },
+    {
+      "id": "contract-calibration",
+      "title": "질문·선택 계약 보정",
+      "authority": "evaluation",
+      "template": "jev-workbench/templates/contract-calibration.json",
+      "playbook": "jev-workbench/references/contract-calibration.md"
+    }
+  ],
+  "paths_relative_to": "repository_root"
+}

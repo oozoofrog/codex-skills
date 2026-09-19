@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "task_id": "DEMO-contract-calibration",
+  "workflow": "contract-calibration",
+  "authority": "evaluation",
+  "is_example": true,
+  "policy": {
+    "revision": "synthetic-project-policy@1",
+    "decision_question": null,
+    "min_confidence": null
+  },
+  "request": {
+    "model": "jev-1.13.0",
+    "state": {
+      "example_notice": "SYNTHETIC EXAMPLE: not observations from the user repository.",
+      "project_policy": {
+        "mandatory": [
+          "Preserve the explicit user requirements.",
+          "Do not change permissions, execute destructive actions, or claim unrun tests passed."
+        ],
+        "preferences": [
+          "Prefer the smallest justified change that meets the current requirement.",
+          "Avoid abstractions based only on hypothetical future needs."
+        ]
+      },
+      "evidence": [
+        {
+          "id": "E1",
+          "kind": "user_requirement",
+          "text": "Bookmarks removed on one device must not reappear after reconnecting another device."
+        },
+        {
+          "id": "E2",
+          "kind": "agent_claim",
+          "text": "The cause is not confirmed. No build or XCTest run has been performed in this synthetic example."
+        }
+      ],
+      "case_id": "synthetic-boundary-case",
+      "message": "The record came back after reconnecting the device.",
+      "labeling_rule": "Select the named triggering condition explicitly present in the message."
+    },
+    "questions": {
+      "condition": {
+        "type": "choice",
+        "instructions": "Which triggering condition is explicitly named in `message` under `labeling_rule`?",
+        "criteria": {
+          "reconnection": "The message explicitly names reconnecting a device.",
+          "launch": "The message explicitly names launching an application.",
+          "not_stated": "No supplied condition is explicitly named."
+        }
+      }
+    }
+  }
+}

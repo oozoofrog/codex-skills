@@ -1,0 +1,43 @@
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "change_scope": {
+      "type": "score",
+      "score": 1.5,
+      "legend": {
+        "0": "The change is mostly unrelated to the requirement.",
+        "1": "The change contains substantial unrelated additions.",
+        "2": "The change is mostly focused with some extra scope.",
+        "3": "The change is narrowly tied to the requested behavior."
+      },
+      "probabilities": {
+        "0": 0.25,
+        "1": 0.25,
+        "2": 0.25,
+        "3": 0.25
+      },
+      "confidence": 0.0
+    },
+    "reviewability": {
+      "type": "score",
+      "score": 1.5,
+      "legend": {
+        "0": "Essential implementation and validation evidence are missing.",
+        "1": "Only fragments of implementation are supplied.",
+        "2": "The implementation is visible but important validation is missing.",
+        "3": "Relevant implementation and explicit validation observations are supplied."
+      },
+      "probabilities": {
+        "0": 0.25,
+        "1": 0.25,
+        "2": 0.25,
+        "3": 0.25
+      },
+      "confidence": 0.0
+    }
+  },
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "target": {
+      "type": "choice",
+      "choice": "p1",
+      "probabilities": {
+        "p1": 0.7,
+        "p2": 0.09999999999999999,
+        "NOT_FOUND": 0.09999999999999999,
+        "AMBIGUOUS": 0.09999999999999999
+      },
+      "confidence": 0.4
+    }
+  },
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0
+  }
+}

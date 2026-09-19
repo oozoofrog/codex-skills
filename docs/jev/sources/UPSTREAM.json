@@ -1,0 +1,40 @@
+[
+  {
+    "name": "typesafe-ai",
+    "repository": "https://github.com/typesafe-ai/skills",
+    "source_url": "https://raw.githubusercontent.com/typesafe-ai/skills/main/skills/typesafe-ai/SKILL.md",
+    "license_url": "https://raw.githubusercontent.com/typesafe-ai/skills/main/LICENSE",
+    "license": "MIT",
+    "retrieved_date": "2026-09-19",
+    "observed_ref": "main",
+    "upstream_commit": null,
+    "acquisition": "web-rendered full text transcription; byte identity unverified",
+    "local_skill_sha256": "4320e0d008634417f795d7f552760a2caeb01d6f3a3e9e6f8ed9f3e4aacb391a",
+    "local_license_sha256": "835f233f1d6ed84a9b9a351aba0689b47644a4137d6316911fc7957bde523b02",
+    "installation": "optional",
+    "collection_local_path": "docs/jev/vendor/typesafe-ai/SKILL.reference.md"
+  },
+  {
+    "name": "jev-review",
+    "repository": "https://github.com/NiazMorshed2007/jev-review",
+    "source_url": "https://raw.githubusercontent.com/NiazMorshed2007/jev-review/main/skills/jev-review/SKILL.md",
+    "license_url": "https://raw.githubusercontent.com/NiazMorshed2007/jev-review/main/LICENSE",
+    "license": "MIT",
+    "retrieved_date": "2026-09-19",
+    "observed_ref": "main",
+    "upstream_commit": null,
+    "acquisition": "web-rendered full text transcription; byte identity unverified",
+    "local_skill_sha256": "a71b93ecca490f9f4626f09b9c16091f3025851fef844605cbfc556cc9b5ee9a",
+    "local_license_sha256": "cce609bf4ec40a3a935e3fefdacfd5b8333a954b32466c53b8bb6ac9fc8a94f4",
+    "installation": "reference-only, upstream MCP runtime not bundled",
+    "collection_local_path": "docs/jev/vendor/jev-review/SKILL.reference.md"
+  },
+  {
+    "name": "building-with-jev-skill",
+    "repository": "https://github.com/dbreunig/building-with-jev-skill",
+    "retrieved_date": "2026-09-19",
+    "license": "not confirmed in inspected sources",
+    "redistributed": false,
+    "installation": "link and review note only"
+  }
+]
