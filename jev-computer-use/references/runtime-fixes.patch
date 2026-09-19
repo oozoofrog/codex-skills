@@ -1,0 +1,1168 @@
+--- a/typesafe_computer_use/perception.py
++++ b/typesafe_computer_use/perception.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+
+ import math
++import os
+ from dataclasses import replace
+ from pathlib import Path
+
+@@ -37,12 +38,51 @@
+     url: str | None = None,
+     browser: str = "",
+     timing: dict[str, float] | None = None,
++    background_only: bool = False,
++    target_app: str | None = None,
++    window_id: int | None = None,
++    window_title: str | None = None,
+ ) -> Screen:
+     """Capture the main display, or load a saved capture for replay (then app/url are taken as given).
+
+     Each query below is a round trip to the window server, AX, or AppleScript. Pass `timing` to
+     record the seconds each one costs under "screenshot", "app", "window", "field", and "url".
+     """
++    if target_app and image_path is None:
++        pid = macos.app_pid(target_app)
++        selected = macos.select_window(pid, window_id, window_title)
++        ident, title, bounds = macos.window_record(selected)
++        image = macos.window_screenshot(ident)
++        scale = image.width / bounds[2]
++        if abs(image.height / bounds[3] - scale) > 0.05:
++            from .models import TargetUnavailable
++
++            raise TargetUnavailable("Window capture geometry does not match the selected window")
++        focused = macos.focused_field(pid)
++        x, y, width, height = bounds
++        if focused and not (
++            x <= focused.x
++            and y <= focused.y
++            and focused.x + focused.w <= x + width
++            and focused.y + focused.h <= y + height
++            and focused.w > 0
++            and focused.h > 0
++        ):
++            focused = None  # the app's key field can belong to another window
++        return Screen(
++            image=image,
++            scale=scale,
++            app=target_app,
++            field=focused,
++            url=macos.browser_url(browser) if target_app == browser else None,
++            pid=pid,
++            window=bounds,
++            window_id=ident,
++            background_only=background_only,
++            window_title=title,
++            origin=bounds[:2],
++            actual_frontmost_app=macos.frontmost_app(),
++        )
+     replay = image_path is not None and app is not None
+     with phase(timing, "screenshot"):
+         image = Image.open(image_path).convert("RGB") if image_path else macos.screenshot()
+@@ -121,7 +161,7 @@
+     if timing is not None:
+         timing[OCR_REGION_PCT] = round(read_pct, 1)
+         timing[OCR_RECTS] = rects
+-    echoes = goal_echoes(goal)
++    echoes = set() if screen.window_id is not None else goal_echoes(goal)
+     kept: list[Line] = [
+         (t.strip(), c, b) for t, c, b in lines if t.strip() and c >= MIN_OCR_CONFIDENCE and not is_echo(t, echoes)
+     ]
+@@ -213,7 +253,7 @@
+     unread. They stay clickable: the accessibility tree lists them as AXMenuBarItem controls.
+     """
+     width, height = float(screen.image.width), float(screen.image.height)
+-    if screen.window is None:
++    if screen.window_id is not None or screen.window is None or os.environ.get("CLICKER_FULL_SCREEN") == "1":
+         return (0.0, 0.0, width, height)
+     x, y, w, h = screen.window
+     scale, margin = screen.scale, REGION_MARGIN_PT
+@@ -228,8 +268,16 @@
+     knows a crop happened."""
+     x1, y1, x2, y2 = (round(v) for v in rect)
+     crop = image if (x1, y1, x2, y2) == (0, 0, image.width, image.height) else image.crop((x1, y1, x2, y2))
+-    raw = ocrmac.OCR(crop, recognition_level="accurate").recognize(px=True)
+-    return [(text, conf, (b[0] + x1, b[1] + y1, b[2] + x1, b[3] + y1)) for text, conf, b in raw]
++    # Vision misses small Korean button labels on full Retina captures. Normalize the
++    # OCR input, then restore every box to the original capture before any click.
++    original_width, original_height = crop.size
++    if max(crop.size) > 1920:
++        crop = crop.copy()
++        crop.thumbnail((1920, 1920), Image.Resampling.LANCZOS)
++    sx, sy = original_width / crop.width, original_height / crop.height
++    languages = os.environ.get("CLICKER_OCR_LANGUAGES", "ko-KR,en-US").split(",")
++    raw = ocrmac.OCR(crop, recognition_level="accurate", language_preference=languages).recognize(px=True)
++    return [(text, conf, (b[0] * sx + x1, b[1] * sy + y1, b[2] * sx + x1, b[3] * sy + y1)) for text, conf, b in raw]
+
+
+ def thumbnail(image: Image.Image, divisor: int = THUMB_DIVISOR) -> Image.Image:
+@@ -437,6 +485,12 @@
+     if screen.pid is None:
+         return [], []
+     width_pt, height_pt = screen.size_pt
++    if screen.window_id is not None:
++        try:
++            nodes, _, _ = macos.actionable_window_elements(screen.pid, screen.window)
++        except Exception:
++            return [], []
++        return [n for n in nodes if n.label][:budget], []
+     try:
+         nodes, hidden, _capped = macos.actionable_elements(screen.pid, width_pt, height_pt)
+     except Exception:
+--- a/typesafe_computer_use/runner.py
++++ b/typesafe_computer_use/runner.py
+@@ -14,7 +14,7 @@
+ from .actions import Context, is_noop, perform
+ from .config import DEFAULT_DELAY, DEFAULT_MIN_CONFIDENCE, DEFAULT_STEPS, MAX_OPTIONS
+ from .decide import Decision, decide, offscreen_records
+-from .models import Abort, Item, Screen
++from .models import Abort, Item, Screen, TargetUnavailable
+ from .perception import OcrCache, capture, perceive
+ from .report import Log, annotate, ax_count, render_payload, top
+ from .timing import format_timing, phase, summarize
+@@ -44,6 +44,11 @@
+     image: Path | None = None  # replay a saved capture (never acts)
+     app: str | None = None  # frontmost app to report during replay
+     url: str | None = None  # browser URL to report during replay
++
++    background_only: bool = False
++    target_app: str | None = None
++    window_id: int | None = None
++    window_title: str | None = None
+
+     @property
+     def replay(self) -> bool:
+@@ -82,6 +87,9 @@
+                 log(f"\nstopped after {cfg.steps} steps")
+                 state.outcome = "step limit"
+             conclude(cfg, ctx, state, log)
++    except TargetUnavailable as e:
++        state.outcome = "target unavailable"
++        log(f"\n{state.outcome}: {e}. No foreground fallback was used.")
+     except (KeyboardInterrupt, Abort) as e:
+         state.outcome = f"aborted ({e or 'Ctrl-C'})"
+         log(f"\n{state.outcome} after {len(state.history)} actions")
+@@ -93,6 +101,8 @@
+             "outcome": state.outcome,
+             "answer": state.answer.text if state.answer else None,
+             "goal_achieved": state.answer.achieved if state.answer else None,
++            "verification_required": True,
++            "answer_evidence": "answer-evidence.json" if (cfg.out / "answer-evidence.json").exists() else None,
+             "seconds": round(time.time() - started, 1),
+             "timing": summarize(state.timings),
+             "history": state.history,
+@@ -118,10 +128,38 @@
+     started = time.perf_counter()
+     if state.view is None:
+         macos.check_abort()
+-        screen = capture(cfg.image, cfg.app, cfg.url, ctx.browser)
++        screen = capture(
++            cfg.image,
++            cfg.app,
++            cfg.url,
++            ctx.browser,
++            target_app=cfg.target_app,
++            background_only=cfg.background_only,
++            window_id=cfg.window_id,
++            window_title=cfg.window_title,
++        )
+         screen.image.save(cfg.out / "answer-raw.png")
+         state.view = (screen, perceive(screen, MAX_OPTIONS, cfg.goal))
+     screen, items = state.view
++    screen.image.save(cfg.out / "answer-raw.png")
++    (cfg.out / "answer-evidence.json").write_text(
++        json.dumps(
++            {
++                "image": "answer-raw.png",
++                "app": screen.app,
++                "frontmost_app": screen.actual_frontmost_app or screen.app,
++                "target_pid": screen.pid,
++                "window_id": screen.window_id,
++                "window_title": screen.window_title,
++                "url": screen.url,
++                "outcome": state.outcome,
++                "screen_text": [item.text for item in items],
++                "verification_required": True,
++            },
++            ensure_ascii=False,
++            indent=2,
++        )
++    )
+     try:
+         state.answer = compose_answer(ctx.writer, cfg.goal, screen, items, state.history, stopped)
+     except (anthropic.APIError, RuntimeError) as e:
+@@ -136,7 +174,20 @@
+     timing: dict[str, float] = {}
+     started = time.perf_counter()
+     with phase(timing, "capture"):
+-        screen = capture(cfg.image, cfg.app, cfg.url, ctx.browser, timing)
++        screen = capture(
++            cfg.image,
++            cfg.app,
++            cfg.url,
++            ctx.browser,
++            timing,
++            target_app=cfg.target_app,
++            background_only=cfg.background_only,
++            window_id=cfg.window_id,
++            window_title=cfg.window_title,
++        )
++        if cfg.target_app and screen.window_id is not None:
++            cfg.window_id = screen.window_id  # pin the first observed window for the run
++            cfg.window_title = None  # titles may change inside the same bound window
+     items = perceive(screen, MAX_OPTIONS, cfg.goal, timing, None if cfg.replay else state.ocr_cache)
+     state.view = (screen, items)
+     prefix = cfg.out / f"step-{step:03d}"  # three digits, so a run of 100 steps still lists in order
+@@ -243,5 +294,9 @@
+         "items": [asdict(it) for it in items],
+         "field": screen.field.record() if screen.field else None,
+         "app": screen.app,
++        "frontmost_app": screen.actual_frontmost_app or screen.app,
++        "target_pid": screen.pid,
++        "window_id": screen.window_id,
++        "window_title": screen.window_title,
+         "url": screen.url,
+     }
+--- a/typesafe_computer_use/report.py
++++ b/typesafe_computer_use/report.py
+@@ -21,7 +21,7 @@
+         self.path = path
+
+     def __call__(self, msg: str = "") -> None:
+-        print(msg)
++        print(msg, flush=True)
+         if self.path is not None:
+             with self.path.open("a") as f:
+                 f.write(msg + "\n")
+@@ -46,7 +46,7 @@
+         RULE,
+         "QUESTION kind  (Choice criteria)",
+         RULE,
+-        json.dumps(kind_criteria(browser, email, bool(screen.offscreen)), indent=2),
++        json.dumps(kind_criteria(browser, email, bool(screen.offscreen), screen.window_id is not None), indent=2),
+         "",
+         RULE,
+         "QUESTION item  (Choice criteria)",
+@@ -110,5 +110,6 @@
+     f = screen.field
+     if f is not None:
+         s = screen.scale
+-        draw.rectangle((f.x * s, f.y * s, (f.x + f.w) * s, (f.y + f.h) * s), outline=(0, 200, 0), width=3)
++        x, y = f.x - screen.origin[0], f.y - screen.origin[1]
++        draw.rectangle((x * s, y * s, (x + f.w) * s, (y + f.h) * s), outline=(0, 200, 0), width=3)
+     image.save(out)
+--- a/typesafe_computer_use/writer.py
++++ b/typesafe_computer_use/writer.py
+@@ -73,7 +73,10 @@
+     packet = {
+         "goal": goal,
+         "now": now_context(),
+-        "frontmost_app": screen.app,
++        "frontmost_app": screen.actual_frontmost_app or screen.app,
++        "target_app": screen.app,
++        "target_window_id": screen.window_id,
++        "target_window_title": screen.window_title,
+         "previous_actions": history[-8:],
+         "focused_field": screen.field.summary() if screen.field else None,
+         "text_near_field": near_field(screen, items),
+@@ -134,7 +137,10 @@
+         "now": now_context(),
+         "why_the_run_stopped": stopped,
+         "actions_taken": history,
+-        "frontmost_app": screen.app,
++        "frontmost_app": screen.actual_frontmost_app or screen.app,
++        "target_app": screen.app,
++        "target_window_id": screen.window_id,
++        "target_window_title": screen.window_title,
+         "browser_active_tab_url": screen.url,
+         "screen_text_in_reading_order": [it.text for it in items],
+     }
+@@ -147,7 +153,10 @@
+             "information, lead with that information, taken only from the screen: never from memory, "
+             "and never a guess. When the goal asks for something to be done, say whether the screen "
+             "shows it done. When the screen does not hold the result, say so plainly, then say what is "
+-            "on screen and the one next step that would get there. Trust the capture over the text "
++            "on screen and the one next step that would get there. The supplied frontmost app and URL are "
++            "observations from this capture; target_app identifies a background window when set. "
++            "Read that target window even when a different app is foreground. Do not infer app identity from text displayed inside a page. "
++            "If evidence conflicts, explain the conflict and set achieved=false. Trust the capture over the text "
+             "where the two disagree. Plain text, no markdown, four sentences at most. Set achieved to "
+             "true only when the screen itself shows the goal reached."
+         ),
+--- a/typesafe_computer_use/models.py
++++ b/typesafe_computer_use/models.py
+@@ -29,6 +29,10 @@
+     "AXTextArea": "field",
+     "AXTextField": "field",
+ }
++
++
++class TargetUnavailable(RuntimeError):
++    """The explicitly selected app/window is unavailable; never use the foreground instead."""
+
+
+ class Abort(Exception):
+@@ -133,6 +137,12 @@
+     ax_refs: dict[int, object] = field(default_factory=dict)  # item index -> accessibility element, when it has one
+     offscreen: list[AxNode] = field(default_factory=list)  # labelled controls the app exposes but does not show
+
++    window_id: int | None = None  # explicit background window, never a foreground substitute
++    window_title: str = ""
++    background_only: bool = False
++    origin: tuple[float, float] = (0.0, 0.0)
++    actual_frontmost_app: str | None = None
++
+     @property
+     def size_pt(self) -> tuple[float, float]:
+         return self.image.width / self.scale, self.image.height / self.scale
+@@ -145,4 +155,4 @@
+
+     def to_points(self, item: Item) -> tuple[float, float]:
+         cx, cy = item.center
+-        return cx / self.scale, cy / self.scale
++        return cx / self.scale + self.origin[0], cy / self.scale + self.origin[1]
+--- a/typesafe_computer_use/macos.py
++++ b/typesafe_computer_use/macos.py
+@@ -11,15 +11,18 @@
+ import time
+ from collections import deque
+ from collections.abc import Callable, Iterable
++from contextlib import contextmanager
+ from pathlib import Path
+ from typing import NamedTuple
+
+ import ApplicationServices as AS
+ import Quartz
++from AppKit import NSApplicationActivateIgnoringOtherApps, NSRunningApplication, NSWorkspace
++from Foundation import NSDate, NSRunLoop
+ from PIL import Image
+
+ from .config import ABORT_CORNER_PX
+-from .models import Abort, AxNode, Field
++from .models import Abort, AxNode, Field, TargetUnavailable
+
+ KEYCODES = {"return": 36, "tab": 48, "escape": 53, "a": 0, "delete": 51}
+ MIN_WINDOW_SIDE_PT = 50.0  # anything smaller is a palette or a shadow, not the window being worked in
+@@ -33,6 +36,8 @@
+
+
+ def check_abort() -> None:
++    if not input_session_available():
++        raise TargetUnavailable("GUI session is locked or unavailable; unlock it directly before input")
+     x, y = mouse_location()
+     if x <= ABORT_CORNER_PX and y <= ABORT_CORNER_PX:
+         raise Abort("mouse in top-left corner")
+@@ -96,36 +101,52 @@
+
+
+ def osascript(script: str) -> str:
+-    return subprocess.run(["osascript", "-e", script], capture_output=True, text=True, check=True).stdout.strip()
++    return subprocess.run(["osascript", "-e", script], capture_output=True, text=True, check=True, timeout=5).stdout.strip()
+
+
+ def frontmost_app() -> str:
+-    return osascript('tell application "System Events" to get name of first application process whose frontmost is true')
++    NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.01))
++    app = NSWorkspace.sharedWorkspace().frontmostApplication()
++    return str(app.localizedName()) if app else "unknown"
+
+
+ def frontmost_app_and_pid() -> tuple[str, int]:
+-    """Name and pid of the frontmost process in one AppleScript round trip."""
+-    name, _, pid = osascript(
+-        'tell application "System Events" to tell (first application process whose frontmost is true) to get {name, unix id}'
+-    ).rpartition(", ")
+-    return name, int(pid)
++    NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.01))
++    app = NSWorkspace.sharedWorkspace().frontmostApplication()
++    if app is None:
++        raise TargetUnavailable("No active GUI session")
++    return str(app.localizedName()), int(app.processIdentifier())
+
+
+ def frontmost_pid() -> int:
+-    return int(osascript('tell application "System Events" to get unix id of first application process whose frontmost is true'))
++    return frontmost_app_and_pid()[1]
++
++
++def input_session_available() -> bool:
++    return frontmost_app() not in {"loginwindow", "ScreenSaverEngine", "unknown"}
+
+
+ def activate(app: str, timeout: float = 3.0) -> bool:
+-    """Bring an app to the front and confirm it got there."""
+-    osascript(f'tell application "{app}" to activate')
++    """Activate only the requested running app; verify without blocking Apple Events."""
++    try:
++        running = NSRunningApplication.runningApplicationWithProcessIdentifier_(app_pid(app))
++    except TargetUnavailable:
++        return False
++    if not input_session_available() or running is None:
++        return False
++    running.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+     end = time.monotonic() + timeout
+     while time.monotonic() < end:
+-        if frontmost_app() == app:
++        if frontmost_pid() == running.processIdentifier():
+             return True
+-        time.sleep(0.1)
+-    osascript(f'tell application "System Events" to set frontmost of process "{app}" to true')
+-    time.sleep(0.3)
+-    return frontmost_app() == app
++        time.sleep(0.05)
++    try:
++        osascript(
++            f'tell application "System Events" to set frontmost of first application process whose unix id is {int(running.processIdentifier())} to true'
++        )
++    except (subprocess.SubprocessError, OSError):
++        return False
++    return frontmost_pid() == running.processIdentifier()
+
+
+ def open_url(browser: str, url: str) -> bool:
+@@ -136,7 +157,7 @@
+ def browser_url(browser: str) -> str | None:
+     try:
+         return osascript(f'tell application "{browser}" to get URL of active tab of front window') or None
+-    except subprocess.CalledProcessError:
++    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+         return None
+
+
+@@ -187,8 +208,8 @@
+     return value if err == 0 else None
+
+
+-def focused_field() -> Field | None:
+-    system = AS.AXUIElementCreateSystemWide()
++def focused_field(pid: int | None = None) -> Field | None:
++    system = AS.AXUIElementCreateApplication(pid) if pid is not None else AS.AXUIElementCreateSystemWide()
+     element = _ax_attr(system, AS.kAXFocusedUIElementAttribute)
+     if element is None:
+         return None
+@@ -333,7 +354,7 @@
+ def subtree_key(role: str, label: str, frame: Frame | None) -> tuple | None:
+     """Identity of a node for de-duplication: same role, label and frame is the same control, whatever
+     object the bridge wrapped it in. Frameless and zero-size nodes are containers and are never keyed."""
+-    if frame is None or frame[2] <= 0 or frame[3] <= 0:
++    if frame is None or frame[2] <= 0 or frame[3] <= 0 or (role == "AXGroup" and not label):
+         return None
+     return (role, label, round(frame[0]), round(frame[1]), round(frame[2]), round(frame[3]))
+
+@@ -478,3 +499,205 @@
+     app = AS.AXUIElementCreateApplication(pid)
+     AS.AXUIElementSetMessagingTimeout(app, AX_MESSAGE_TIMEOUT)
+     return walk_actionable(app, _ax_children, _ax_attrs, _ax_actions, display_w_pt, display_h_pt)
++
++
++# ------------------------------------------------------------------ explicit app/window surfaces
++
++
++def app_pid(name: str) -> int:
++    matches = [
++        int(app.processIdentifier())
++        for app in NSWorkspace.sharedWorkspace().runningApplications()
++        if name in (app.localizedName(), app.bundleIdentifier())
++    ]
++    if len(matches) != 1:
++        raise TargetUnavailable(f"Expected one running app for {name!r}; found {len(matches)}")
++    return matches[0]
++
++
++def app_windows(pid: int) -> list[dict]:
++    windows = (
++        Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionAll | Quartz.kCGWindowListExcludeDesktopElements, 0) or []
++    )
++    return [
++        dict(w)
++        for w in windows
++        if w.get("kCGWindowOwnerPID") == pid
++        and w.get("kCGWindowLayer") == 0
++        and w["kCGWindowBounds"]["Width"] > MIN_WINDOW_SIDE_PT
++        and w["kCGWindowBounds"]["Height"] > MIN_WINDOW_SIDE_PT
++    ]
++
++
++def window_record(window: dict) -> tuple[int, str, tuple[float, float, float, float]]:
++    b = window["kCGWindowBounds"]
++    return (
++        int(window["kCGWindowNumber"]),
++        str(window.get("kCGWindowName", "")),
++        tuple(float(b[k]) for k in ("X", "Y", "Width", "Height")),
++    )
++
++
++def select_window(pid: int, window_id: int | None = None, title: str | None = None) -> dict:
++    candidates = app_windows(pid)
++    if window_id is not None:
++        candidates = [w for w in candidates if w["kCGWindowNumber"] == window_id]
++    if title is not None:
++        candidates = [w for w in candidates if title in w.get("kCGWindowName", "")]
++    if window_id is None and title is None:
++        # Exclude toolbar helper windows; prefer the top app window (including native sheets).
++        candidates = [w for w in candidates if w.get("kCGWindowName") and w.get("kCGWindowIsOnscreen")]
++        candidates = candidates[:1]
++    if len(candidates) != 1:
++        raise TargetUnavailable(f"Expected one target window; found {len(candidates)}")
++    return candidates[0]
++
++
++def window_screenshot(window_id: int) -> Image.Image:
++    with tempfile.TemporaryDirectory(prefix="jev-window-") as folder:
++        path = Path(folder) / "window.png"
++        try:
++            subprocess.run(
++                ["screencapture", "-x", "-o", "-a", "-l", str(window_id), str(path)], capture_output=True, check=True, timeout=10
++            )
++            with Image.open(path) as image:
++                return image.convert("RGB")
++        except (OSError, subprocess.SubprocessError) as error:
++            raise TargetUnavailable("The selected window could not be captured") from error
++
++
++def window_is_current(screen) -> bool:
++    try:
++        current = select_window(screen.pid, screen.window_id)
++    except TargetUnavailable:
++        return False
++    return window_record(current) == (screen.window_id, screen.window_title, screen.window)
++
++
++def top_window_at(point: tuple[float, float]) -> int | None:
++    windows = (
++        Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements, 0)
++        or []
++    )
++    x, y = point
++    for window in windows:
++        b = window["kCGWindowBounds"]
++        if (
++            window.get("kCGWindowLayer") == 0
++            and window.get("kCGWindowAlpha", 1) > 0
++            and b["X"] <= x < b["X"] + b["Width"]
++            and b["Y"] <= y < b["Y"] + b["Height"]
++        ):
++            return int(window["kCGWindowNumber"])
++    return None
++
++
++@contextmanager
++def target_focus(screen):
++    """Use focus only for native input unsupported in the background, then restore it."""
++    if screen.background_only or not input_session_available() or not window_is_current(screen):
++        yield False
++        return
++    previous = frontmost_app_and_pid()
++    try:
++        if not activate(screen.app):
++            yield False
++            return
++        app = AS.AXUIElementCreateApplication(screen.pid)
++        for window in _ax_attr(app, "AXWindows") or []:
++            if _ax_frame(window) == screen.window:
++                AS.AXUIElementPerformAction(window, "AXRaise")
++                break
++        yield frontmost_pid() == screen.pid and window_is_current(screen)
++    finally:
++        # A user switching to a third app wins; never steal their newer focus choice.
++        if previous[1] != screen.pid and frontmost_pid() == screen.pid:
++            activate(previous[0])
++
++
++def click_window(screen, point: tuple[float, float]) -> bool:
++    with target_focus(screen) as ready:
++        if not ready or top_window_at(point) != screen.window_id:
++            return False
++        err, element = AS.AXUIElementCopyElementAtPosition(AS.AXUIElementCreateSystemWide(), *point, None)
++        if err or element is None or AS.AXUIElementGetPid(element, None) != (0, screen.pid):
++            return False
++        old_mouse = mouse_location()
++        click_at(point)
++        if all(abs(a - b) < 2 for a, b in zip(mouse_location(), point, strict=True)):
++            Quartz.CGWarpMouseCursorPosition(old_mouse)
++        return True
++
++
++def key_window(screen, key: str, command: bool = False) -> bool:
++    with target_focus(screen) as ready:
++        if not ready:
++            return False
++        x, y, w, h = screen.window
++        if top_window_at((x + w / 2, y + h / 2)) != screen.window_id:
++            return False
++        press(key, command)
++        return True
++
++
++def scroll_window(screen, lines: int) -> bool:
++    with target_focus(screen) as ready:
++        if not ready:
++            return False
++        x, y, w, h = screen.window
++        point = (x + w / 2, y + h / 2)
++        if top_window_at(point) != screen.window_id:
++            return False
++        old_mouse = mouse_location()
++        _post(Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, point, Quartz.kCGMouseButtonLeft))
++        _post(Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitLine, 1, lines))
++        if all(abs(a - b) < 2 for a, b in zip(mouse_location(), point, strict=True)):
++            Quartz.CGWarpMouseCursorPosition(old_mouse)
++        return True
++
++
++def type_window(screen, text: str) -> bool:
++    with target_focus(screen) as ready:
++        if not ready:
++            return False
++        field = focused_field()
++        if field != screen.field or not field.is_text:
++            return False
++        press("a", command=True)
++        type_text(text)
++        return True
++
++
++def actionable_window_elements(pid: int, bounds: Frame) -> tuple[list[AxNode], list[AxNode], bool]:
++    """Walk the selected native window/sheet first, before a browser's large page tree."""
++    app = AS.AXUIElementCreateApplication(pid)
++    AS.AXUIElementSetMessagingTimeout(app, AX_MESSAGE_TIMEOUT)
++    queue = deque((w, 0) for w in (_ax_attr(app, "AXWindows") or []))
++    candidate = None
++    visited = set()
++    deadline = time.monotonic() + 2
++    while queue and time.monotonic() < deadline:
++        node, depth = queue.popleft()
++        identity = node_identity(node)
++        if identity in visited:
++            continue
++        visited.add(identity)
++        role, _, frame = _ax_attrs(node)
++        if frame and all(abs(a - b) < 2 for a, b in zip(frame, bounds, strict=True)):
++            if role in {"AXSheet", "AXDialog", "AXWindow"}:
++                candidate = node
++                break
++            candidate = node
++        if depth < 4:
++            queue.extend((child, depth + 1) for child in _ax_children(node))
++    if candidate is None:
++        return [], [], False
++    x, y, width, height = bounds
++
++    def local_attrs(node):
++        role, label, frame = _ax_attrs(node)
++        if frame:
++            frame = (frame[0] - x, frame[1] - y, frame[2], frame[3])
++        return AxAttrs(role, label, frame)
++
++    return walk_actionable(candidate, _ax_children, local_attrs, _ax_actions, width, height)
+--- a/typesafe_computer_use/actions.py
++++ b/typesafe_computer_use/actions.py
+@@ -6,6 +6,7 @@
+ from dataclasses import dataclass
+
+ import anthropic
++from PIL import ImageChops, ImageStat
+ from typesafe_sdk import TypeSafeClient
+
+ from . import macos
+@@ -34,6 +35,10 @@
+
+ def perform(decision: Decision, screen: Screen, items: list[Item], ctx: Context) -> str:
+     key = decision.chosen
++    if screen.window_id is not None and not macos.window_is_current(screen):
++        return "action refused: target window changed; observe again"
++    if screen.window_id is None and screen.pid is not None and key != "use_browser" and macos.frontmost_pid() != screen.pid:
++        return "action refused: foreground app changed; observe again"
+     by_index = {str(it.index): it for it in items}
+     if key in by_index:
+         return click_item(by_index[key], screen)
+@@ -51,6 +56,27 @@
+     A press goes to the control itself, so it lands even when the center of the box is covered by
+     a sticky header, a cookie banner, or a tooltip. An element that refuses still has a location.
+     """
++    if screen.window_id is not None:
++        if not macos.window_is_current(screen):
++            return "click refused: target window changed"
++        current = macos.window_screenshot(screen.window_id)
++        box = (
++            max(0, int(item.x1) - 4),
++            max(0, int(item.y1) - 4),
++            min(screen.image.width, int(item.x2) + 4),
++            min(screen.image.height, int(item.y2) + 4),
++        )
++        if (
++            current.size != screen.image.size
++            or max(ImageStat.Stat(ImageChops.difference(current.crop(box), screen.image.crop(box))).mean) > 8
++        ):
++            return "click refused: observed target changed; observe again"
++        ref = screen.ax_refs.get(item.index)
++        if ref is not None and macos.ax_press(ref):
++            return f"pressed {item.text!r} via accessibility in target window {screen.window_id}"
++        if macos.click_window(screen, screen.to_points(item)):
++            return f"clicked {item.text!r} in target window {screen.window_id} via temporary focus (verify outcome)"
++        return "click refused: background-only policy, unavailable focus, or covered/changed target"
+     ref = screen.ax_refs.get(item.index)
+     if ref is not None and macos.ax_press(ref):
+         return f"pressed {item.text!r} via accessibility"
+@@ -76,13 +102,21 @@
+     return f"press_offscreen refused: {node.label!r} did not accept the press"
+
+
+-def fill_field(field: Field, text: str) -> str:
++def fill_field(field: Field, text: str, screen: Screen | None = None) -> str:
+     """Put text in the focused field, by value if the element accepts one and keystrokes otherwise.
+
+     Setting the value is one message instead of one per character, and it cannot be stolen by a
+     page that moves the focus mid-word. It is also widely ignored, so the value is read back and
+     only a field that really holds the text counts. Returns which path ran, for the history.
+     """
++    if screen is not None and screen.window_id is not None:
++        if not macos.window_is_current(screen):
++            return "refused: target window changed"
++        if field.ref is not None and macos.ax_set_value(field.ref, text) and macos.ax_value(field.ref) == text:
++            return "via target accessibility"
++        if macos.focused_field(screen.pid) != field:
++            return "refused: target field changed"
++        return "via temporary target focus" if macos.type_window(screen, text) else "refused: target window changed"
+     ref = field.ref
+     if ref is not None:
+         macos.ax_focus(ref)
+@@ -101,6 +135,8 @@
+     catalog key is its URL, and `other` is a site outside the catalog, which only the writer can
+     name. Opening a URL activates the browser too, so the three cases differ only in the page.
+     """
++    if screen.window_id is not None:
++        return "use_browser refused: targeted mode preserves focus; use Ultrafast for browser navigation"
+     site = decision.site.choice
+     if site == "none":
+         if macos.activate(ctx.browser):
+@@ -121,7 +157,7 @@
+ def _type_email(decision, screen: Screen, items, ctx: Context) -> str:
+     if not (screen.field and screen.field.is_text):
+         return "type_email refused: no text field is focused"
+-    how = fill_field(screen.field, ctx.email or "")
++    how = fill_field(screen.field, ctx.email or "", screen)
+     return f"typed email {how}"
+
+
+@@ -134,13 +170,20 @@
+     if not text:
+         return "type_text refused: writer declined to fill this field"
+     macos.check_abort()
+-    current = macos.focused_field()
+-    if macos.frontmost_app() != screen.app or current != screen.field or current.ref != screen.field.ref:
++    current = macos.focused_field(screen.pid) if screen.window_id is not None else macos.focused_field()
++    wrong_app = screen.window_id is None and macos.frontmost_app() != screen.app
++    if wrong_app or current != screen.field or current.ref != screen.field.ref:
+         return "type_text refused: app or focused field changed while the writer was running"
+-    how = fill_field(screen.field, text)
++    how = fill_field(screen.field, text, screen)
++    if "refused" in how:
++        return f"type_text {how}"
+     time.sleep(0.3)
+-    p = verify_typed(ctx.typesafe, ctx.goal, screen.field, text, macos.focused_field())
++    observed = macos.focused_field(screen.pid) if screen.window_id is not None else macos.focused_field()
++    p = verify_typed(ctx.typesafe, ctx.goal, screen.field, text, observed)
+     if p < VERIFY_THRESHOLD:
++        if screen.window_id is not None:
++            cleared = screen.field.ref is not None and macos.ax_set_value(screen.field.ref, "")
++            return f"target text verification failed ({p:.2f}); cleared={cleared}; verify field"
+         macos.clear_field()
+         return f"typed {text!r} into {screen.field.label!r} {how} but verification failed ({p:.2f}); cleared it"
+     return f"typed {text!r} into {screen.field.label!r} {how} (verified {p:.2f})"
+@@ -148,6 +191,12 @@
+
+ def _key(name: str, description: str):
+     def handler(decision, screen, items, ctx) -> str:
++        if screen.window_id is not None:
++            return (
++                f"{description} with temporary target focus (verify outcome)"
++                if macos.key_window(screen, name)
++                else "key refused: target changed"
++            )
+         macos.press(name)
+         return description
+
+@@ -156,6 +205,12 @@
+
+ def _scroll(lines: int, description: str):
+     def handler(decision, screen, items, ctx) -> str:
++        if screen.window_id is not None:
++            return (
++                f"{description} with temporary target focus (verify outcome)"
++                if macos.scroll_window(screen, lines)
++                else "scroll refused: target changed"
++            )
+         macos.scroll(lines)
+         return description
+
+--- a/typesafe_computer_use/decide.py
++++ b/typesafe_computer_use/decide.py
+@@ -48,11 +48,15 @@
+     return actions
+
+
+-def kind_criteria(browser: str, email: str | None, offscreen: bool = False) -> dict[str, str]:
++def kind_criteria(browser: str, email: str | None, offscreen: bool = False, targeted: bool = False) -> dict[str, str]:
+     clicks = {"click_item": "Click one of the on-screen text items (chosen in the item question)."}
+     if offscreen:
+         clicks["press_offscreen"] = PRESS_OFFSCREEN
+-    return {**clicks, **fixed_actions(browser, email)}
++    choices = {**clicks, **fixed_actions(browser, email)}
++    if targeted:
++        choices.pop("use_browser")
++        choices["click_item"] = "Click an observed control in the target app window, independently of the foreground app."
++    return choices
+
+
+ def item_criteria(screen: Screen, items: list[Item]) -> dict[str, str]:
+@@ -91,7 +95,10 @@
+     return {
+         "goal": goal,
+         "now": now_context(),
+-        "frontmost_app": screen.app,
++        "frontmost_app": screen.actual_frontmost_app or screen.app,
++        "target_app": screen.app,
++        "target_window_id": screen.window_id,
++        "target_window_title": screen.window_title,
+         "browser_active_tab_url": screen.url,
+         "focused_field": screen.field.summary() if screen.field else None,
+         "previous_actions": history[-8:],
+@@ -159,7 +166,7 @@
+                 "makes the most progress toward the goal right now? Do not repeat an action "
+                 "that was just taken unless the screen changed."
+             ),
+-            criteria=kind_criteria(browser, email, bool(screen.offscreen)),
++            criteria=kind_criteria(browser, email, bool(screen.offscreen), screen.window_id is not None),
+         ),
+         "site": Choice(
+             instructions=(
+--- a/typesafe_computer_use/cli.py
++++ b/typesafe_computer_use/cli.py
+@@ -40,7 +40,13 @@
+     parser.add_argument("--image", type=Path, help="replay a saved capture instead of the live screen (never acts)")
+     parser.add_argument("--app", help="frontmost app to report during replay")
+     parser.add_argument("--url", help="browser URL to report during replay")
++    parser.add_argument("--target-app", help="capture and control this running app independently of foreground focus")
++    parser.add_argument("--window-id", type=int, help="observed window ID within --target-app")
++    parser.add_argument("--window-title", help="unambiguous observed title substring within --target-app")
++    parser.add_argument("--background-only", action="store_true", help="refuse native input requiring temporary focus")
+     args = parser.parse_args(argv)
++    if (args.window_id is not None or args.window_title) and not args.target_app:
++        parser.error("--window-id/--window-title require --target-app")
+
+     _prepare()
+     if args.act and not macos.accessibility_trusted():
+@@ -59,6 +65,10 @@
+         image=args.image,
+         app=args.app,
+         url=args.url,
++        background_only=args.background_only,
++        target_app=args.target_app,
++        window_id=args.window_id,
++        window_title=args.window_title,
+     )
+
+     def ctx_factory(typesafe, history):
+@@ -72,6 +82,8 @@
+         )
+
+     state = run(cfg, ctx_factory)
++    if state.outcome == "target unavailable":
++        sys.exit(3)
+     if state.outcome.startswith("aborted"):
+         sys.exit(130)
+
+@@ -85,7 +97,13 @@
+     parser.add_argument("--countdown", type=int, default=3)
+     parser.add_argument("--no-open", action="store_true", help="write files without opening them")
+     parser.add_argument("--out", type=Path, default=Path("inspections") / time.strftime("%Y%m%d-%H%M%S"))
++    parser.add_argument("--target-app", help="capture and control this running app independently of foreground focus")
++    parser.add_argument("--window-id", type=int, help="observed window ID within --target-app")
++    parser.add_argument("--window-title", help="unambiguous observed title substring within --target-app")
++    parser.add_argument("--background-only", action="store_true", help="refuse native input requiring temporary focus")
+     args = parser.parse_args(argv)
++    if (args.window_id is not None or args.window_title) and not args.target_app:
++        parser.error("--window-id/--window-title require --target-app")
+     config.load_dotenv(DOTENV)
+     args.out.mkdir(parents=True, exist_ok=True)
+
+@@ -96,7 +114,14 @@
+
+     browser = config.browser()
+     timing: dict[str, float] = {}
+-    screen = capture(browser=browser, timing=timing)
++    screen = capture(
++        browser=browser,
++        timing=timing,
++        background_only=args.background_only,
++        target_app=args.target_app,
++        window_id=args.window_id,
++        window_title=args.window_title,
++    )
+     items = perceive(screen, config.MAX_OPTIONS, args.goal, timing)
+     annotated = args.out / "annotated.png"
+     text = args.out / "state.txt"
+--- a/README.md
++++ b/README.md
+@@ -56,6 +56,17 @@
+ The private `.env` contains only the TypeSafe key, Codex binary and model names.
+ The installed `jev-computer-use` skill supplies preview, inspection and bounded
+ live launchers. Upstream cost and latency claims below do not measure this adapter.
++The installed launcher defaults to full-display Korean/English OCR; set
++`CLICKER_FULL_SCREEN=0` for window cropping or `CLICKER_OCR_LANGUAGES` for another
++supported language list. Retina OCR normalizes to 1920 pixels and restores click
++coordinates. Answers always retain `answer-raw.png` and `answer-evidence.json`;
++`goal_achieved` is a model judgment and `verification_required` remains true.
++For a named app, use `--target-app` and optionally an observed `--window-id` or
++`--window-title`. The window is captured independently of foreground focus and pinned
++for that run. AX controls are used in the background. Native fallback input temporarily
++activates and validates the target, then restores the previous app; `--background-only`
++refuses that fallback. Locked sessions stop input. This behavior is tested on a small
++AppKit fixture and a Chrome permission dialog, not every native application.
+
+ macOS 14 or newer, Python 3.12 or newer, [uv](https://docs.astral.sh/uv/).
+
+--- /dev/null
++++ b/tests/test_permission_ocr.py
+@@ -0,0 +1,41 @@
++from PIL import Image
++
++from typesafe_computer_use import perception
++from typesafe_computer_use.models import Screen
++
++
++def test_full_display_includes_dialog_outside_helper_window(monkeypatch):
++    screen = Screen(Image.new("RGB", (2048, 1152)), 1, "Google Chrome", None, None, window=(0, 0, 2048, 25))
++    monkeypatch.setenv("CLICKER_FULL_SCREEN", "1")
++    assert perception.ocr_region(screen) == (0, 0, 2048, 1152)
++    monkeypatch.setenv("CLICKER_FULL_SCREEN", "0")
++    assert perception.ocr_region(screen)[3] < 100
++
++
++def test_ocr_passes_korean_and_english_to_vision(monkeypatch):
++    captured = {}
++
++    class OCR:
++        def __init__(self, image, **kwargs):
++            captured.update(kwargs)
++
++        def recognize(self, px):
++            return [("허용", 1.0, (10, 20, 30, 40))]
++
++    monkeypatch.delenv("CLICKER_OCR_LANGUAGES", raising=False)
++    monkeypatch.setattr(perception.ocrmac, "OCR", OCR)
++    assert perception.ocr_crop(Image.new("RGB", (100, 100)), (0, 0, 100, 100))[0][0] == "허용"
++    assert captured["language_preference"] == ["ko-KR", "en-US"]
++
++
++def test_retina_ocr_restores_click_coordinates(monkeypatch):
++    class OCR:
++        def __init__(self, image, **kwargs):
++            assert image.size == (1920, 1080)
++
++        def recognize(self, px):
++            return [("허용", 0.5, (1120, 600, 1160, 625))]
++
++    monkeypatch.setattr(perception.ocrmac, "OCR", OCR)
++    result = perception.ocr_crop(Image.new("RGB", (3840, 2160)), (0, 0, 3840, 2160))
++    assert result[0][2] == (2240, 1200, 2320, 1250)
+--- /dev/null
++++ b/tests/test_background_window.py
+@@ -0,0 +1,168 @@
++import pytest
++from PIL import Image
++
++from typesafe_computer_use import actions, macos, perception
++from typesafe_computer_use.models import Item, Screen, TargetUnavailable
++
++
++def target():
++    return Screen(
++        Image.new("RGB", (800, 400), "white"),
++        2,
++        "Target",
++        None,
++        None,
++        pid=42,
++        window=(100, 200, 400, 200),
++        window_id=77,
++        window_title="Fixture",
++        origin=(100, 200),
++        actual_frontmost_app="Other app",
++    )
++
++
++def test_target_coordinates_include_window_origin():
++    assert target().to_points(Item(0, "button", 1, 200, 100, 240, 140)) == (210, 260)
++
++
++def test_capture_uses_target_window_not_current_display(monkeypatch):
++    monkeypatch.setattr(macos, "app_pid", lambda name: 42)
++    monkeypatch.setattr(macos, "select_window", lambda *args: object())
++    monkeypatch.setattr(macos, "window_record", lambda w: (77, "Fixture", (100, 200, 400, 200)))
++    monkeypatch.setattr(macos, "window_screenshot", lambda ident: target().image)
++    monkeypatch.setattr(macos, "focused_field", lambda pid: None)
++    monkeypatch.setattr(macos, "frontmost_app", lambda: "Other app")
++    monkeypatch.setattr(macos, "screenshot", lambda: pytest.fail("must not capture another app"))
++    screen = perception.capture(target_app="Target")
++    assert screen.window_id == 77 and screen.app == "Target" and screen.actual_frontmost_app == "Other app"
++    assert screen.origin == (100, 200) and screen.scale == 2
++
++
++def test_missing_target_never_falls_back_to_foreground(monkeypatch):
++    def unavailable(name):
++        raise TargetUnavailable("missing app")
++
++    monkeypatch.setattr(macos, "app_pid", unavailable)
++    monkeypatch.setattr(macos, "screenshot", lambda: pytest.fail("foreground fallback"))
++    with pytest.raises(TargetUnavailable):
++        perception.capture(target_app="Missing")
++
++
++def test_background_click_does_not_use_global_mouse(monkeypatch):
++    screen = target()
++    dispatched = []
++    monkeypatch.setattr(macos, "window_is_current", lambda s: True)
++    monkeypatch.setattr(macos, "window_screenshot", lambda ident: screen.image)
++    monkeypatch.setattr(macos, "click_at", lambda point: pytest.fail("global input"))
++    monkeypatch.setattr(macos, "click_window", lambda s, point: dispatched.append((s.pid, s.window_id, point)) or True)
++    result = actions.click_item(Item(0, "button", 1, 200, 100, 240, 140), screen)
++    assert "temporary focus" in result
++    assert dispatched == [(42, 77, (210, 260))]
++
++
++def test_changed_target_pixels_refuse_mutation(monkeypatch):
++    monkeypatch.setattr(macos, "window_is_current", lambda s: True)
++    monkeypatch.setattr(macos, "window_screenshot", lambda ident: Image.new("RGB", (800, 400), "black"))
++    monkeypatch.setattr(macos, "click_window", lambda *args: pytest.fail("stale mutation"))
++    assert "refused" in actions.click_item(Item(0, "button", 1, 200, 100, 240, 140), target())
++
++
++def test_moved_window_refuses_mutation(monkeypatch):
++    monkeypatch.setattr(macos, "window_is_current", lambda s: False)
++    monkeypatch.setattr(macos, "window_screenshot", lambda ident: pytest.fail("stale capture"))
++    assert "refused" in actions.click_item(Item(0, "button", 1, 200, 100, 240, 140), target())
++
++
++def test_target_keys_and_scroll_never_use_global_input(monkeypatch):
++    calls = []
++    monkeypatch.setattr(macos, "press", lambda *args: pytest.fail("global keyboard"))
++    monkeypatch.setattr(macos, "scroll", lambda *args: pytest.fail("global scroll"))
++    monkeypatch.setattr(macos, "key_window", lambda s, key: calls.append(key) or True)
++    monkeypatch.setattr(macos, "scroll_window", lambda s, lines: calls.append(lines) or True)
++    actions._key("return", "Return")(None, target(), [], None)
++    actions._scroll(-10, "Scroll")(None, target(), [], None)
++    assert calls == ["return", -10]
++
++
++def test_window_identity_includes_title_and_geometry(monkeypatch):
++    monkeypatch.setattr(macos, "select_window", lambda *args: object())
++    monkeypatch.setattr(macos, "window_record", lambda w: (77, "Replacement", (100, 200, 400, 200)))
++    assert not macos.window_is_current(target())
++
++
++def test_target_action_space_does_not_offer_focus_stealing_browser_action():
++    from typesafe_computer_use.decide import kind_criteria
++
++    assert "use_browser" not in kind_criteria("Google Chrome", None, targeted=True)
++
++
++def test_nested_identical_layout_groups_do_not_hide_native_buttons():
++    button = {"role": "AXButton", "label": "허용", "frame": (300, 150, 50, 30), "children": []}
++    nested = button
++    for _ in range(4):
++        nested = {"role": "AXGroup", "label": "", "frame": (0, 0, 400, 200), "children": [nested]}
++    nodes, _, _ = macos.walk_actionable(
++        nested,
++        lambda n: n["children"],
++        lambda n: macos.AxAttrs(n["role"], n["label"], n["frame"]),
++        lambda n: ["AXPress"] if n["role"] == "AXButton" else [],
++        400,
++        200,
++    )
++    assert [n.label for n in nodes] == ["허용"]
++
++
++def test_target_goal_echo_does_not_filter_actual_control(monkeypatch):
++    monkeypatch.setattr(perception, "ocr_lines", lambda *a: ([("Record background result", 1, (10, 10, 250, 40))], 100, 0))
++    assert [i.text for i in perception.ocr(target(), 255, "Record background result")] == ["Record background result"]
++
++
++def test_locked_session_stops_before_input(monkeypatch):
++    monkeypatch.setattr(macos, "input_session_available", lambda: False)
++    monkeypatch.setattr(macos, "mouse_location", lambda: pytest.fail("must stop before input"))
++    with pytest.raises(TargetUnavailable, match="locked"):
++        macos.check_abort()
++
++
++def test_background_only_never_activates_an_app(monkeypatch):
++    from dataclasses import replace
++
++    monkeypatch.setattr(macos, "activate", lambda app: pytest.fail("focus must stay unchanged"))
++    with macos.target_focus(replace(target(), background_only=True)) as ready:
++        assert ready is False
++
++
++@pytest.mark.parametrize("user_switches", [False, True])
++def test_temporary_focus_restores_only_its_own_focus_change(monkeypatch, user_switches):
++    active = ["Other app", 99]
++    calls = []
++    monkeypatch.setattr(macos, "input_session_available", lambda: True)
++    monkeypatch.setattr(macos, "window_is_current", lambda s: True)
++    monkeypatch.setattr(macos, "frontmost_app_and_pid", lambda: tuple(active))
++    monkeypatch.setattr(macos, "frontmost_pid", lambda: active[1])
++    monkeypatch.setattr(macos.AS, "AXUIElementCreateApplication", lambda pid: object())
++    monkeypatch.setattr(macos, "_ax_attr", lambda *args: [])
++
++    def activate(app):
++        calls.append(app)
++        active[:] = [app, 42 if app == "Target" else 99]
++        return True
++
++    monkeypatch.setattr(macos, "activate", activate)
++    with macos.target_focus(target()) as ready:
++        assert ready is True
++        if user_switches:
++            active[:] = ["New user choice", 123]
++    assert calls == (["Target"] if user_switches else ["Target", "Other app"])
++
++
++def test_target_capture_does_not_offer_a_field_in_another_window(monkeypatch):
++    from typesafe_computer_use.models import Field
++
++    monkeypatch.setattr(macos, "app_pid", lambda name: 42)
++    monkeypatch.setattr(macos, "select_window", lambda *args: object())
++    monkeypatch.setattr(macos, "window_record", lambda w: (77, "Fixture", (100, 200, 400, 200)))
++    monkeypatch.setattr(macos, "window_screenshot", lambda ident: target().image)
++    monkeypatch.setattr(macos, "focused_field", lambda pid: Field("AXTextField", "Other", "", "", 800, 500, 100, 20))
++    monkeypatch.setattr(macos, "frontmost_app", lambda: "Other app")
++    assert perception.capture(target_app="Target").field is None
+--- a/tests/test_answer.py
++++ b/tests/test_answer.py
+@@ -108,7 +108,12 @@
+
+     assert state.answer == Answer(text="Sep 19, 2026 in Miami.", achieved=True)
+     assert "goal achieved" in lines[0] and "Sep 19, 2026 in Miami." in lines[0]
+-    assert not (tmp_path / "answer-raw.png").exists()
++    assert (tmp_path / "answer-raw.png").exists()
++    evidence = json.loads((tmp_path / "answer-evidence.json").read_text())
++    assert evidence["app"] == screen.app
++    assert evidence["url"] == screen.url
++    assert evidence["screen_text"] == ["SEP 19, 2026"]
++    assert evidence["verification_required"] is True
+     assert "already achieved" in json.loads(fake.requests[0]["messages"][0]["content"][1]["text"])["why_the_run_stopped"]
+
+
+--- a/tests/test_ocr_cache.py
++++ b/tests/test_ocr_cache.py
+@@ -200,7 +200,7 @@
+
+ def test_ocr_crop_offsets_boxes_back_into_full_capture_coordinates(monkeypatch):
+     class FakeOCR:
+-        def __init__(self, image, recognition_level="accurate"):
++        def __init__(self, image, recognition_level="accurate", language_preference=None):
+             self.image = image
+
+         def recognize(self, px=True):

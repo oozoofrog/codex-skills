@@ -30,12 +30,16 @@ python3 scripts/install_jev_skills.py --dest "$HOME/.agents/skills" --preset all
 
 ### 데스크톱·브라우저 조작 스킬
 
-`jev-computer-use/`와 `jev-ultrafast/`는 전역 설치의 스킬 본문·UI 메타데이터·실행 보조 파일을 내용과 실행 권한 그대로 보존한 사본입니다. 위 설치기의 `--preset all`은 기존 판단 스킬 7개를 대상으로 하며 이 두 어댑터를 설치하지 않습니다.
+`jev-computer-use/`와 `jev-ultrafast/`는 전역 설치에서 가져온 standalone 스킬이며, 이후 개선 사항은 이 저장소에서 관리합니다. 위 설치기의 `--preset all`은 기존 판단 스킬 7개를 대상으로 하며 이 두 어댑터를 설치하지 않습니다.
 
 - [jev-computer-use](../../jev-computer-use/SKILL.md)는 `/Users/oozoofrog/.local/share/typesafe-computer-use`의 실행 환경을 사용합니다.
 - [jev-ultrafast](../../jev-ultrafast/SKILL.md)는 `/Users/oozoofrog/.local/share/jev-ultrafast`의 실행 환경을 사용합니다.
 
 현재 명령 예시와 런처는 원래 사용자 경로(`/Users/oozoofrog`) 및 전역 스킬 경로를 참조합니다. 다른 환경에 폴더만 복사해 독립 실행할 수 있는 패키지는 아닙니다. 실행 환경·의존성·인증·OS/브라우저 권한을 별도로 갖춰야 합니다. 비공개 `.env`, API 키, 로그인 정보와 화면 캡처·실행 기록은 가져오지 않았습니다.
+
+Ultrafast 연결은 `jev.sh prepare` → 필요 시 Chrome 권한 창 처리 → `jev.sh status` → `run` 순서로 준비합니다. 준비 명령은 종료되며 실제 작업을 대기시키지 않습니다. 두 스킬의 런처는 같은 제어 잠금을 사용합니다. Computer Use의 화면 인식·증거 기록 변경은 별도 로컬 실행 환경에도 필요하며, [런타임 패치와 검증 안내](../../jev-computer-use/references/runtime-validation.md)를 확인하세요.
+
+네이티브 앱 작업은 `clicker.sh windows APP`으로 대상을 찾고 `--target-app APP` 및 필요한 창 ID/제목으로 실행합니다. 접근성 입력은 백그라운드에서, 일반 네이티브 입력은 자동 활성화·복귀로 처리하며 `--background-only`는 후자를 차단합니다. Ultrafast는 전용 백그라운드 탭을 사용합니다. 실제 검증 범위와 브라우저 런타임 변경은 [백그라운드 검증 기록](../../jev-ultrafast/references/background-validation.md)에 구분했습니다.
 
 가져올 때 원본 파일·권한 일치, 스킬 구조, 셸/Python 문법을 확인합니다. 실제 화면·브라우저 조작 검증을 의미하지 않습니다.
 

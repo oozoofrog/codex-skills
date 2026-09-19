@@ -1,0 +1,77 @@
+--- a/jev_ultrafast/browser.py
++++ b/jev_ultrafast/browser.py
+@@ -19,18 +19,22 @@
+
+ class Browser:
+     def __init__(self, url):
+-        ensure_daemon()
++        ensure_daemon(wait=5)
+         self.target = cdp("Target.createTarget", url="about:blank", background=True)["targetId"]
+-        self.session = cdp("Target.attachToTarget", targetId=self.target, flatten=True)["sessionId"]
+-        self.call("Emulation.setDeviceMetricsOverride", width=1120, height=780, deviceScaleFactor=1, mobile=False)
+-        # Keep rAF/menus rendering in an owned background tab, without activating the user's Chrome tab.
+-        self.call("Emulation.setFocusEmulationEnabled", enabled=True)
+-        self.call("Page.navigate", url=url)
+-        deadline = time.monotonic() + 15
+-        while time.monotonic() < deadline:
+-            if self.evaluate("document.readyState") == "complete":
+-                break
+-            time.sleep(0.02)
++        try:
++            self.session = cdp("Target.attachToTarget", targetId=self.target, flatten=True)["sessionId"]
++            # Wake a background renderer before a metrics change that may await repaint.
++            self.call("Emulation.setFocusEmulationEnabled", enabled=True)
++            self.call("Emulation.setDeviceMetricsOverride", width=1120, height=780, deviceScaleFactor=1, mobile=False)
++            self.call("Page.navigate", url=url)
++            deadline = time.monotonic() + 15
++            while time.monotonic() < deadline:
++                if self.evaluate("document.readyState") == "complete":
++                    break
++                time.sleep(0.02)
++        except Exception:
++            self.close()  # only the tab this constructor created
++            raise
+
+     def call(self, method, **params):
+         return cdp(method, session_id=self.session, **params)
+--- /dev/null
++++ b/tests/test_background_browser.py
+@@ -0,0 +1,38 @@
++import pytest
++
++from jev_ultrafast import browser
++
++
++def test_background_renderer_is_awake_before_metrics(monkeypatch):
++    calls = []
++    monkeypatch.setattr(browser, 'ensure_daemon', lambda **kwargs: None)
++    def cdp(method, **kwargs):
++        calls.append((method, kwargs))
++        return {
++            'Target.createTarget': {'targetId': 'owned'},
++            'Target.attachToTarget': {'sessionId': 'session'},
++            'Runtime.evaluate': {'result': {'value': 'complete'}},
++        }.get(method, {})
++    monkeypatch.setattr(browser, 'cdp', cdp)
++    instance = browser.Browser('https://example.com')
++    assert calls[0][1]['background'] is True
++    names = [method for method, _ in calls]
++    assert names.index('Emulation.setFocusEmulationEnabled') < names.index('Emulation.setDeviceMetricsOverride')
++    instance.close()
++    assert calls[-1] == ('Target.closeTarget', {'targetId': 'owned'})
++
++
++def test_failed_constructor_closes_only_its_owned_tab(monkeypatch):
++    closed = []
++    monkeypatch.setattr(browser, 'ensure_daemon', lambda **kwargs: None)
++    def cdp(method, **kwargs):
++        if method == 'Emulation.setDeviceMetricsOverride':
++            raise TimeoutError('renderer timed out')
++        if method == 'Target.closeTarget':
++            closed.append(kwargs['targetId'])
++        return {'Target.createTarget': {'targetId': 'owned'},
++                'Target.attachToTarget': {'sessionId': 'session'}}.get(method, {})
++    monkeypatch.setattr(browser, 'cdp', cdp)
++    with pytest.raises(TimeoutError):
++        browser.Browser('https://example.com')
++    assert closed == ['owned']
