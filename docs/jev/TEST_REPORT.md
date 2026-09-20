@@ -18,7 +18,7 @@ Jev 1.13의 공식 [모델](https://docs.typesafe.ai/models.md), [알려진 약�
 - 시스템 `skill-creator/scripts/quick_validate.py`로 변경한 `jev-workbench`, `jev-decision`, `jev-product-choice`: **3개 모두 통과**.
 - 설치기를 임시 대상에 `all`로 실행해 판단 스킬 7개의 설치 파일을 소스와 바이트 비교: **모두 일치**, 새 `project-fit.md` 포함.
 - `python3 -B jev-workbench/scripts/jev_cli.py doctor`: 실행기 `0.1.1`, 템플릿 12개, 네트워크 호출 없음. `git diff --check`: 통과.
-- 전체 `python3 -B -m unittest discover -s scripts/tests -v`: **11개 중 10개 통과, 1개 실패**. `test_marketplace_points_to_available_plugins`의 예상 목록에 이미 저장소에 있는 `fast-jev-compaction` 항목이 빠져 있다. 해당 Plugin은 이 변경의 대상이 아니므로 marketplace·Plugin·테스트의 기존 불일치는 수정하지 않았다.
+- 전체 `python3 -B -m unittest discover -s scripts/tests -v`: **11개 중 10개 통과, 1개 실패**. 당시 marketplace의 불완전한 Plugin 골격이 테스트 예상 목록에 없어 실패했다. 이 작업에서는 변경하지 않았으며, 위의 제거 절에 현재 해결 결과를 기록했다.
 
 위 검사는 스킬 파일·링크·기존 실행기 계약을 확인한다. 새 지침에 따른 **새 Codex 세션의 실제 선택 행동**, 프로젝트별 Jev 판단 품질, UI 조작, 설치본의 새 세션 노출은 이 단계에서 검증하지 않았다. 이전 `evidence-check` 합성 사례 결과는 다른 절차의 정확도 근거가 아니다.
 
