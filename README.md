@@ -48,8 +48,10 @@ $ponytail-beck-tdd로 기존 동작을 보존하면서 테스트의 검증과 �
 
 `$jev-workbench`는 공통 실행기와 12개 판단 절차를 제공합니다. 목적에 따라 `$jev-decision`, `$jev-context`, `$jev-triage`, `$jev-review-evidence`, `$jev-product-choice`, `$jev-calibrate`를 명시적으로 호출합니다. 위임된 선택·검토 보조·평가를 구분하며 실제 빌드·테스트와 사용자 권한을 대신하지 않습니다.
 
+Jev는 후보와 기준이 정해진 좁은 텍스트 판단에 사용합니다. 프로젝트의 필수 제약과 사용자 가치의 우선순위를 먼저 확인하고, 넓은 설계·제품 결정은 분리된 보조 판단으로 다룹니다. [프로젝트 적합성 안내](jev-workbench/references/project-fit.md)에 사용 대상과 한국어·확신도 평가 기준을 정리했습니다.
+
 ```text
-$jev-decision 구현 대안과 근거를 준비하고 위임한 선택을 Jev에게 맡겨주세요.
+$jev-decision 프로젝트 제약과 선호 기준을 확인하고, 제가 위임한 좁은 후보 중에서만 Jev로 선택해주세요.
 $jev-review-evidence 완료 보고를 실제 테스트 실행 기록과 대조해주세요.
 $jev-calibrate 저장한 판정의 후보 순서·한국어 표현 민감도를 평가해주세요.
 ```

@@ -1,6 +1,6 @@
 interface:
   display_name: "Jev 개발 의사결정"
-  short_description: "구현 대안·작업 범위·다음 조사·사용할 스킬 중 선택"
-  default_prompt: "$jev-decision 구현 대안과 근거를 비교하고, 제가 위임한 범위에서 구현 방향이나 다음 행동을 Jev로 선택해주세요."
+  short_description: "명시한 프로젝트 기준으로 좁은 구현·작업 후보 선택"
+  default_prompt: "$jev-decision 프로젝트 제약과 선호 기준을 확인하고, 제가 위임한 좁은 후보 중에서만 Jev로 선택해주세요."
 policy:
   allow_implicit_invocation: false

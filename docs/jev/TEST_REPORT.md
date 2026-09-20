@@ -1,5 +1,18 @@
 # Jev 실행기·스킬 검증
 
+## 프로젝트 맥락·사용 대상 안내 — 2026-09-20
+
+Jev 1.13의 공식 [모델](https://docs.typesafe.ai/models.md), [알려진 약점](https://docs.typesafe.ai/model-jaggedness/jev-1.13.md), [확신도](https://docs.typesafe.ai/confidence.md), [복합 판단](https://docs.typesafe.ai/patterns/composite-scoring.md) 문서를 대조해 [프로젝트 적합성](../../jev-workbench/references/project-fit.md)을 추가했다. 넓은 구현·범위·제품 선택에서 필수 조건과 사용자 가치 우선순위를 먼저 확인하고, 불명확하면 위임 선택을 보류하도록 스킬 지침과 UI 설명을 좁혔다. API 요청 형식·실행기·모델·템플릿은 변경하지 않았다.
+
+- `python3 -B -m unittest discover -s tests/jev -v`: **74개 통과**. 기존 실행기·설치기 계약 검사다.
+- `python3 -B -m unittest discover -s scripts/tests -p test_document_links.py -v`: **2개 통과**. 새 참고 문서와 README 링크를 포함한다.
+- 시스템 `skill-creator/scripts/quick_validate.py`로 변경한 `jev-workbench`, `jev-decision`, `jev-product-choice`: **3개 모두 통과**.
+- 설치기를 임시 대상에 `all`로 실행해 판단 스킬 7개의 설치 파일을 소스와 바이트 비교: **모두 일치**, 새 `project-fit.md` 포함.
+- `python3 -B jev-workbench/scripts/jev_cli.py doctor`: 실행기 `0.1.1`, 템플릿 12개, 네트워크 호출 없음. `git diff --check`: 통과.
+- 전체 `python3 -B -m unittest discover -s scripts/tests -v`: **11개 중 10개 통과, 1개 실패**. `test_marketplace_points_to_available_plugins`의 예상 목록에 이미 저장소에 있는 `fast-jev-compaction` 항목이 빠져 있다. 해당 Plugin은 이 변경의 대상이 아니므로 marketplace·Plugin·테스트의 기존 불일치는 수정하지 않았다.
+
+위 검사는 스킬 파일·링크·기존 실행기 계약을 확인한다. 새 지침에 따른 **새 Codex 세션의 실제 선택 행동**, 프로젝트별 Jev 판단 품질, UI 조작, 설치본의 새 세션 노출은 이 단계에서 검증하지 않았다. 이전 `evidence-check` 합성 사례 결과는 다른 절차의 정확도 근거가 아니다.
+
 ## 근거 검토 질문 개선 — 2026-09-19
 
 0.1.1 실행기에서 `evidence-check` 질문·선택지 정의를 개선했습니다. 최종 변경 전후 비교는 한국어·영어 28개 원본 사례 × 3회 반복 × 두 문구로 총 336회이며, 변경 전 138/168에서 변경 후 168/168로 사전 정답 일치가 높아졌습니다. 마지막에 추가한 8개 사례는 45/48 → 48/48로 별도 집계했습니다. 실패한 첫 수정안까지 포함한 전체 576회, 평가 한계와 전달 문구는 [근거 검토 개선 검증](EVIDENCE_CHECK_VALIDATION.md)을 확인하세요.

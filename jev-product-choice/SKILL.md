@@ -1,12 +1,14 @@
 ---
 name: jev-product-choice
-description: Choose among supplied product-copy or UX alternatives using explicit user preferences and Jev. Do not infer user values or claim unmeasured product outcomes.
+description: Choose among bounded product-copy or UX alternatives using explicit user preferences and Jev. Do not infer user values or claim unmeasured product outcomes.
 ---
 # Jev 제품 가치 선택
 
 이것은 `jev-workbench`의 목적별 진입 스킬이다. 현재 스킬 폴더의 형제 경로 `../jev-workbench/SKILL.md`를 먼저 읽어 공통 권한·전송·상태·재심 계약을 적용한다. 루트 경로가 다르게 설치되었다면 실제 스킬 목록에서 `jev-workbench` 경로를 찾아 사용한다. 존재하지 않으면 의존성이 없다고 알리고 허구의 CLI 명령을 실행하지 않는다.
 
-요청에 맞는 문서 하나만 추가로 읽는다.
+제품 가치가 충돌하면 `../jev-workbench/references/project-fit.md`를 읽고 사용자 선호의 우선순위를 확인한다. 없는 가치 기준을 Jev가 정하게 하지 않는다.
+
+요청에 맞는 목적별 문서 하나만 추가로 읽는다.
 
 - `product-choice`: `../jev-workbench/references/product-choice.md`
 
