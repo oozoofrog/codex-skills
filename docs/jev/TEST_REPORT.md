@@ -1,5 +1,14 @@
 # Jev 실행기·스킬 검증
 
+## 불완전한 Plugin 골격 제거 — 2026-09-20
+
+`fast-jev-compaction`은 marketplace에 등록됐지만 실제 스킬 본문이 없는 골격이었다. 로컬 Plugin 목록에서 미설치 상태를 확인했고 캐시도 없었다. marketplace 등록과 manifest를 제거했으며 빈 폴더도 정리했다. 기존 배포 테스트의 예상 목록은 이미 이 Plugin을 제외하고 있었다.
+
+- `python3 -B -m unittest discover -s scripts/tests -v`: **11개 모두 통과**. marketplace 항목과 실제 Plugin 파일의 일치를 확인한다.
+- `python3 -B -m unittest discover -s tests/jev -v`: **74개 모두 통과**. 판단 스킬·실행기의 기존 동작 범위를 확인한다.
+
+아래 프로젝트 맥락 안내 절의 배포 테스트 실패는 **제거 전 실행 기록**이며 현재 결과가 아니다.
+
 ## 프로젝트 맥락·사용 대상 안내 — 2026-09-20
 
 Jev 1.13의 공식 [모델](https://docs.typesafe.ai/models.md), [알려진 약점](https://docs.typesafe.ai/model-jaggedness/jev-1.13.md), [확신도](https://docs.typesafe.ai/confidence.md), [복합 판단](https://docs.typesafe.ai/patterns/composite-scoring.md) 문서를 대조해 [프로젝트 적합성](../../jev-workbench/references/project-fit.md)을 추가했다. 넓은 구현·범위·제품 선택에서 필수 조건과 사용자 가치 우선순위를 먼저 확인하고, 불명확하면 위임 선택을 보류하도록 스킬 지침과 UI 설명을 좁혔다. API 요청 형식·실행기·모델·템플릿은 변경하지 않았다.

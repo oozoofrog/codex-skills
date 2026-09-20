@@ -35,8 +35,9 @@ attempted separately. A model's DONE status is still not independent proof.
 
 The repository launcher regression suite has 7 passing tests, including ambiguous timeout
 recording without replay. Local-link checks and both skill validators are separate checks.
-The optional distribution suite retains its pre-existing expected-inventory mismatch for
-`fast-jev-compaction`; neither marketplace inventory file was changed here.
+At the time of this validation, the optional distribution suite had a separate
+marketplace inventory mismatch. This run did not change the marketplace; the later
+[Jev test report](../../docs/jev/TEST_REPORT.md) records its resolution.
 
 This validates the specified workflow, not universal equivalence to Codex computer use.
 Frames, shadow roots, file uploads, popup tabs and canvas widgets remain outside this
