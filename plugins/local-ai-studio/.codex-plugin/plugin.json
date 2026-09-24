@@ -1,0 +1,25 @@
+{
+  "name": "local-ai-studio",
+  "version": "0.1.0",
+  "description": "Use installed Local AI Studio models via the local ai CLI for media and English-to-Korean translation; verify and deliver saved results. Not an installer or general AI development skill.",
+  "author": {
+    "name": "oozoofrog",
+    "url": "https://github.com/oozoofrog"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Local AI Studio",
+    "shortDescription": "설치된 로컬 모델로 이미지·음성·영상·음악·번역 실행 및 결과 확인",
+    "longDescription": "Discover the installed Local AI Studio CLI on Apple Silicon for local image, speech, video, music and English-to-Korean translation requests. Respect user-selected tools and outputs, run one large generator at a time, and inspect saved results separately from readiness. No models, media, runtimes, credentials, MCP, apps or hooks are bundled.",
+    "developerName": "oozoofrog",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "$local-ai-studio로 설치된 로컬 모델을 찾아 요청한 미디어·번역 작업을 실행하고 결과 파일을 확인해주세요."
+    ]
+  },
+  "repository": "https://github.com/oozoofrog/codex-skills"
+}

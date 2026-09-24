@@ -34,7 +34,7 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertEqual("codex-skills", marketplace["name"])
         self.assertEqual("Codex Skills", marketplace["interface"]["displayName"])
         self.assertEqual(
-            ["swift-intelligence", "astra-orchestrator", "figma-computer-use", "gptplease", "session-continuity", "ponytail-beck-tdd", "unreal-agent"],
+            ["swift-intelligence", "astra-orchestrator", "figma-computer-use", "gptplease", "session-continuity", "ponytail-beck-tdd", "unreal-agent", "local-ai-studio"],
             [plugin["name"] for plugin in marketplace["plugins"]],
         )
         for entry in marketplace["plugins"]:
@@ -207,6 +207,63 @@ class PluginDistributionTests(unittest.TestCase):
             set(scalars),
         )
         self.assertEqual("false", scalars["allow_implicit_invocation"])
+        manifest = json.loads(
+            (REPO_ROOT / "plugins" / source.name / ".codex-plugin" / "plugin.json").read_text()
+        )
+        self.assertEqual(manifest["interface"]["displayName"], scalars["display_name"])
+        self.assertEqual(manifest["interface"]["shortDescription"], scalars["short_description"])
+        self.assertTrue(25 <= len(scalars["short_description"]) <= 64)
+        self.assertIn(scalars["default_prompt"], manifest["interface"]["defaultPrompt"])
+
+    def test_local_ai_studio_distribution(self) -> None:
+        source = REPO_ROOT / "local-ai-studio"
+        plugin = REPO_ROOT / "plugins" / source.name
+        mirror = plugin / "skills" / source.name
+        skill_files = {"SKILL.md", "agents/openai.yaml", "references/cli-workflows.md"}
+        self.assertEqual(skill_files, set(tree_files(source)))
+        self.assertEqual(tree_files(source), tree_files(mirror))
+        # Exact allowlist excludes weights, generated media, credentials and binaries.
+        self.assertEqual(
+            {".codex-plugin/plugin.json"}
+            | {f"skills/{source.name}/{relative}" for relative in skill_files},
+            set(tree_files(plugin)),
+        )
+        for root in (source, plugin):
+            for path in root.rglob("*"):
+                self.assertFalse(path.is_symlink(), path)
+        manifest = json.loads((plugin / ".codex-plugin" / "plugin.json").read_text())
+        self.assertEqual(source.name, manifest["name"])
+        self.assertEqual("0.1.0", manifest["version"])
+        self.assertEqual("./skills/", manifest["skills"])
+        for key in ("mcpServers", "apps", "hooks"):
+            self.assertNotIn(key, manifest)
+        prompts = manifest["interface"]["defaultPrompt"]
+        self.assertIsInstance(prompts, list)
+        self.assertTrue(1 <= len(prompts) <= 3)
+        for prompt in prompts:
+            self.assertIsInstance(prompt, str)
+            self.assertIn("$local-ai-studio", prompt)
+            self.assertLessEqual(len(prompt), 128)
+        from test_sync_skill_mirrors import load_module
+        self.assertIn(source.name, load_module().PACKAGES)
+        from test_document_links import local_targets
+        for root in (source, mirror):
+            for document in root.rglob("*.md"):
+                for target in local_targets(document.read_text(encoding="utf-8")):
+                    self.assertTrue((document.parent / target).exists(), (document, target))
+
+    def test_local_ai_studio_discovery_metadata(self) -> None:
+        source = REPO_ROOT / "local-ai-studio"
+        # This package uses only JSON-compatible quoted YAML scalars, no dependencies
+        # or explicit-only policy: normal automatic skill discovery remains enabled.
+        lines = (source / "agents" / "openai.yaml").read_text().splitlines()
+        self.assertEqual(["interface:"], [line for line in lines if line and not line.startswith(" ")])
+        scalars = {}
+        for line in lines:
+            if line.startswith("  "):
+                key, value = line.strip().split(": ", 1)
+                scalars[key] = json.loads(value)
+        self.assertEqual({"display_name", "short_description", "default_prompt"}, set(scalars))
         manifest = json.loads(
             (REPO_ROOT / "plugins" / source.name / ".codex-plugin" / "plugin.json").read_text()
         )

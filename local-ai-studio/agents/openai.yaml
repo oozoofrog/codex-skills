@@ -1,0 +1,4 @@
+interface:
+  display_name: "Local AI Studio"
+  short_description: "설치된 로컬 모델로 이미지·음성·영상·음악·번역 실행 및 결과 확인"
+  default_prompt: "$local-ai-studio로 설치된 로컬 모델을 찾아 요청한 미디어·번역 작업을 실행하고 결과 파일을 확인해주세요."

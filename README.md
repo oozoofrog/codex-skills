@@ -1,6 +1,6 @@
 # codex-skills
 
-ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위한 `$gptplease`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 작업 조정을 위한 `astra-orchestrator`, Figma UI 작업용 `figma-computer-use`, 일반 Codex 세션의 작업 인계용 `session-continuity`, 켄트 벡의 글을 바탕으로 한 개발 절차 `ponytail-beck-tdd`, 명시적 외부 runner 호출용 `unreal-agent`, Jev 판단 스킬 7개와 데스크톱·브라우저 조작 스킬 2개를 제공합니다.
+ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위한 `$gptplease`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 작업 조정을 위한 `astra-orchestrator`, Figma UI 작업용 `figma-computer-use`, 일반 Codex 세션의 작업 인계용 `session-continuity`, 켄트 벡의 글을 바탕으로 한 개발 절차 `ponytail-beck-tdd`, 명시적 외부 runner 호출용 `unreal-agent`, 설치된 로컬 미디어·번역 모델 실행용 `local-ai-studio`, Jev 판단 스킬 7개와 데스크톱·브라우저 조작 스킬 2개를 제공합니다.
 
 ## GPT Please
 
@@ -56,6 +56,20 @@ Standalone `unreal-agent/`와 byte-identical skills-only Plugin `0.1.1`을 제�
 
 [스킬 본문](unreal-agent/SKILL.md)과 [설치 안내](docs/plugin-installation.md#unreal-agent)를 참고하세요. 배포 검사는 구조·메타데이터·미러 일치를 확인할 뿐 실제 runner 실행, 인증, 모델 응답이나 새 세션 노출을 보장하지 않습니다. 실행 시 runner의 작업과 Codex가 직접 확인한 검증을 구분해 보고합니다.
 
+## Local AI Studio
+
+`$local-ai-studio`는 Apple Silicon Mac에 **이미 설치된** Local AI Studio의 `ai` CLI를 발견해 로컬 이미지 생성·편집, 음성 합성·전사, 영상·음악 생성, 영어→한국어 번역을 실행하고 저장된 결과물을 검증·전달하는 스킬입니다. 해당 로컬 작업 요청에 자동 발견되며 명시적으로도 호출할 수 있습니다. 모델 설치·학습이나 일반 AI 개발용이 아니며, 사용자가 지정한 다른 도구·모델·출력 위치·형식을 우선합니다.
+
+```text
+$local-ai-studio로 이 녹음을 전사해 지정한 폴더에 SRT로 저장하고 결과를 확인해주세요.
+$local-ai-studio로 비상업적 평가용 찻주전자 이미지를 만들고 PNG 파일을 확인해주세요.
+$local-ai-studio로 이 영어 문서를 한국어로 번역해 지정한 TXT 파일로 저장해주세요.
+```
+
+Standalone `local-ai-studio/`와 byte-identical skills-only Plugin `0.1.0`을 제공합니다. 모델·런타임·생성 미디어·인증·실행기 바이너리는 포함하지 않습니다. 현재 CLI 도움말과 선택한 AI root/`AIHUB_ROOT`를 확인하며, `/Volumes/eyedisk/AI`는 참조 Mac의 발견 후보일 뿐 보편적인 기본값이 아닙니다. 24 GB Mac에서는 대형 생성 모델을 한 번에 하나만 실행합니다. Qwen Image 2.1의 공개 라이선스는 비상업적 연구/평가용이며 상업적 사용에는 별도 라이선스 확인이 필요합니다.
+
+`ai music --prompt`는 서버 없이 한 곡을 생성하고 bare `ai music`은 웹 UI를 엽니다. `READY`·종료 코드·`Output:` 로그만으로 결과 품질을 주장하지 않으며 실제 파일·형식·미리보기/재생/내용 확인 여부를 구분해 전달합니다. [스킬 본문](local-ai-studio/SKILL.md), [명령·출력 규칙](local-ai-studio/references/cli-workflows.md), [설치 안내](docs/plugin-installation.md#local-ai-studio)를 참고하세요.
+
 ## Jev 스킬
 
 `$jev-workbench`는 공통 실행기와 12개 판단 절차를 제공합니다. 목적에 따라 `$jev-decision`, `$jev-context`, `$jev-triage`, `$jev-review-evidence`, `$jev-product-choice`, `$jev-calibrate`를 명시적으로 호출합니다. 위임된 선택·검토 보조·평가를 구분하며 실제 빌드·테스트와 사용자 권한을 대신하지 않습니다.
@@ -104,6 +118,7 @@ codex plugin marketplace add oozoofrog/codex-skills --ref main
 codex plugin add gptplease@codex-skills
 codex plugin add session-continuity@codex-skills
 codex plugin add unreal-agent@codex-skills
+codex plugin add local-ai-studio@codex-skills
 ```
 
 설치 후 새 대화에서 `$gptplease`를 호출합니다. 이전 `gptwork`/`gptpro` 설치본의 중복 노출을 정리하되 과거 패키지와 계정 프로필은 보존합니다. 다른 Plugin의 요구 사항과 standalone 설치는 [Plugin 설치 안내](docs/plugin-installation.md)를 참고하세요.
@@ -121,6 +136,10 @@ python3 scripts/sync_skill_mirrors.py --package unreal-agent
 python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py unreal-agent
 python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py plugins/unreal-agent/skills/unreal-agent
 python3 ~/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py plugins/unreal-agent
+python3 scripts/sync_skill_mirrors.py --package local-ai-studio
+python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py local-ai-studio
+python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py plugins/local-ai-studio/skills/local-ai-studio
+python3 ~/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py plugins/local-ai-studio
 git diff --check
 ```
 
