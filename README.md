@@ -1,6 +1,6 @@
 # codex-skills
 
-ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위한 `$gptplease`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 작업 조정을 위한 `astra-orchestrator`, Figma UI 작업용 `figma-computer-use`, 일반 Codex 세션의 작업 인계용 `session-continuity`, 켄트 벡의 글을 바탕으로 한 개발 절차 `ponytail-beck-tdd`, Jev 판단 스킬 7개와 데스크톱·브라우저 조작 스킬 2개를 제공합니다.
+ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위한 `$gptplease`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 작업 조정을 위한 `astra-orchestrator`, Figma UI 작업용 `figma-computer-use`, 일반 Codex 세션의 작업 인계용 `session-continuity`, 켄트 벡의 글을 바탕으로 한 개발 절차 `ponytail-beck-tdd`, 명시적 외부 runner 호출용 `unreal-agent`, Jev 판단 스킬 7개와 데스크톱·브라우저 조작 스킬 2개를 제공합니다.
 
 ## GPT Please
 
@@ -43,6 +43,18 @@ $ponytail-beck-tdd로 기존 동작을 보존하면서 테스트의 검증과 �
 작은 테스트를 큰 테스트로 바꾸면서 의무적으로 삭제하지 않습니다. 테스트 전체의 신뢰성·속도·진단력을 함께 다듬고, 통합·관통 테스트는 실제 연결과 상호작용을 확인할 때 사용합니다. 벡이 작성하거나 공인한 스킬은 아닙니다. 일반 코딩 요청에는 자동 적용하지 않으며, 별도 Ponytail 설치·MCP 서버·실행기·전역 개인 지시 변경 없이 사용할 수 있습니다. [스킬 본문](ponytail-beck-tdd/SKILL.md), [근거와 해석](ponytail-beck-tdd/references/kent-beck.md), [설치 안내](docs/plugin-installation.md)를 참고하세요.
 
 점검 요청은 근거와 개선안을 보고하고, 개선 요청은 필요한 변경과 검증까지 수행합니다. 기존 동작의 테스트 보강은 처음부터 통과할 수 있으며, 실패하면 기대값·환경·제품 결함을 구분합니다. 커버리지 증가는 참고 지표로 사용하고 구체적인 이득과 보장 보존으로 변경을 채택합니다. [기존 테스트 개선 절차](ponytail-beck-tdd/references/existing-tests.md), [실제 사례와 설계 근거](ponytail-beck-tdd/references/test-improvement-research.md)를 참고하세요.
+
+## Unreal Agent
+
+`$unreal-agent`는 사용자가 Unreal Agent 사용을 명시적으로 요청할 때만 별도 로컬 `unreal-agent-runner`에 한정된 작업을 맡기고, Codex가 변경 사항과 결과를 직접 검토하는 스킬입니다. Codex 실행 모드가 아니며 일반 코딩이나 이름에 Unreal이 포함된 Unreal Engine 작업에 자동 적용하지 않습니다.
+
+```text
+$unreal-agent로 현재 저장소의 지정한 버그를 수정하고 결과를 검토해주세요. 커밋과 푸시는 하지 마세요.
+```
+
+Standalone `unreal-agent/`와 byte-identical skills-only Plugin `0.1.0`을 제공합니다. runner 실행 파일·인증 정보·MCP·app·hook은 포함하지 않습니다. 별도 runner 설치와 해당 provider의 인증·모델 가용성이 필요하며, 없으면 한계를 알리고 Codex로 조용히 대체하지 않습니다. 스킬에 적힌 로컬 설치 경로와 과거 smoke run 모델은 이식 가능한 기본값이 아닙니다.
+
+[스킬 본문](unreal-agent/SKILL.md)과 [설치 안내](docs/plugin-installation.md#unreal-agent)를 참고하세요. 배포 검사는 구조·메타데이터·미러 일치를 확인할 뿐 실제 runner 실행, 인증, 모델 응답이나 새 세션 노출을 보장하지 않습니다. 실행 시 runner의 작업과 Codex가 직접 확인한 검증을 구분해 보고합니다.
 
 ## Jev 스킬
 
@@ -91,6 +103,7 @@ Figma `126.8.18` 네이티브 앱에서 프레임·한글 텍스트·Auto layout
 codex plugin marketplace add oozoofrog/codex-skills --ref main
 codex plugin add gptplease@codex-skills
 codex plugin add session-continuity@codex-skills
+codex plugin add unreal-agent@codex-skills
 ```
 
 설치 후 새 대화에서 `$gptplease`를 호출합니다. 이전 `gptwork`/`gptpro` 설치본의 중복 노출을 정리하되 과거 패키지와 계정 프로필은 보존합니다. 다른 Plugin의 요구 사항과 standalone 설치는 [Plugin 설치 안내](docs/plugin-installation.md)를 참고하세요.
@@ -104,6 +117,10 @@ python3 scripts/sync_skill_mirrors.py --package gptplease
 node --test gptplease/tests/*.test.mjs
 python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py gptplease
 python3 ~/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py plugins/gptplease
+python3 scripts/sync_skill_mirrors.py --package unreal-agent
+python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py unreal-agent
+python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py plugins/unreal-agent/skills/unreal-agent
+python3 ~/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py plugins/unreal-agent
 git diff --check
 ```
 

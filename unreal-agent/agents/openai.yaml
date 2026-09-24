@@ -1,0 +1,6 @@
+interface:
+  display_name: "Unreal Agent"
+  short_description: "명시적 요청으로 외부 Unreal Agent runner 실행 후 Codex 검토"
+  default_prompt: "$unreal-agent로 지정한 작업을 로컬 runner에서 수행하고 변경 사항과 검증 결과를 Codex에서 검토해주세요."
+policy:
+  allow_implicit_invocation: false

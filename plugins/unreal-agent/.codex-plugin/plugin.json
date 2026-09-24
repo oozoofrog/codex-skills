@@ -1,0 +1,25 @@
+{
+  "name": "unreal-agent",
+  "version": "0.1.0",
+  "description": "Run an external local Unreal Agent runner only on explicit request, then review its results in Codex. Not an Unreal Engine trigger.",
+  "author": {
+    "name": "oozoofrog",
+    "url": "https://github.com/oozoofrog"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Unreal Agent",
+    "shortDescription": "명시적 요청으로 외부 Unreal Agent runner 실행 후 Codex 검토",
+    "longDescription": "Explicitly delegate a bounded task to the separately installed unreal-agent-runner, then inspect changes and evidence in Codex. Not a Codex execution mode or an automatic Unreal Engine workflow. No runner, credentials, MCP, app, or hooks are bundled.",
+    "developerName": "oozoofrog",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "$unreal-agent로 지정한 작업을 로컬 runner에서 수행하고 변경 사항과 검증 결과를 Codex에서 검토해주세요."
+    ]
+  },
+  "repository": "https://github.com/oozoofrog/codex-skills"
+}
