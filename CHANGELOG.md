@@ -6,6 +6,8 @@
 
 - `unreal-agent` Plugin을 `0.1.2`, `local-ai-studio` Plugin을 `0.2.1`로 올렸습니다. 배포 버전과 설치 캐시 식별자만 갱신했으며 스킬 동작은 바꾸지 않았습니다.
 
+- `scripts/install_unreal_agent.sh`를 추가했습니다. GitHub curl 명령으로 고정 upstream runner v0.2.0과 지정한 Codex Plugin을 설치합니다. Go 1.27+에서 로컬 빌드하고 관리본만 재설치하며, Codex marketplace/Plugin 목록을 확인하고 Codex 변경 전 config·inventory를 백업합니다. 기존 미관리 바이너리·충돌 marketplace·비활성 Plugin·인증은 건드리지 않습니다. 오프라인 fixture로 설치·재실행·충돌·실패 보존을 검증합니다.
+
 - `local-ai-studio` Plugin을 `0.2.0`으로 갱신했습니다. LocalAIHub/CLI 또는 필요한 모델 그룹이 없을 때 소스 버전·저장 위치·용량·라이선스를 확인하고 요청 그룹만 설치한 뒤 원래 작업을 이어가도록 했습니다. 공개 소스와 로컬 체크아웃의 기능 차이는 실제 `ai --help`로 확인하며, 설치·readiness와 추론 결과 검증을 분리합니다. Plugin 자체에는 모델·런타임·미디어를 포함하지 않습니다.
 
 - `local-ai-studio` standalone 스킬과 byte-identical skills-only Plugin `0.1.0`을 추가했습니다. 설치된 Local AI Studio `ai` CLI로 로컬 이미지·음성·영상·음악 및 영어→한국어 번역 작업을 실행하고 결과를 검증·전달합니다. 최신 CLI 발견, 사용자 지정 도구·출력 우선, 출력 경로 계약, readiness와 실제 추론 구분, Qwen Image 라이선스 확인, 대형 모델 직렬화 지침을 포함합니다. marketplace·미러 동기화·배포 검사·설치 안내를 갱신했으며 모델 가중치·생성 미디어·인증·실행기는 포함하지 않습니다.

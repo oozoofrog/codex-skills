@@ -54,6 +54,14 @@ $unreal-agent로 현재 저장소의 지정한 버그를 수정하고 결과를 
 
 Standalone `unreal-agent/`와 byte-identical skills-only Plugin `0.1.2`를 제공합니다. runner 실행 파일·인증 정보·MCP·app·hook은 포함하지 않습니다. 별도 runner 설치와 해당 provider의 인증·모델 가용성이 필요하며, 없으면 한계를 알리고 Codex로 조용히 대체하지 않습니다. 스킬에 적힌 로컬 설치 경로와 과거 smoke run 모델은 이식 가능한 기본값이 아닙니다.
 
+Go 1.27+, Git, Python 3.9+, Codex CLI가 있으면 다음 한 명령으로 upstream runner와 Codex Plugin을 설치할 수 있습니다.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/oozoofrog/codex-skills/main/scripts/install_unreal_agent.sh | bash
+```
+
+설치기는 기존 marketplace source와 Plugin 상태를 먼저 검사합니다. 미등록이면 원격 marketplace와 Plugin을 설치하고, 의도한 원격 source는 필요할 때 갱신하며, 같은 저장소의 로컬 checkout은 등록을 유지합니다. 다른 source면 변경 없이 중단합니다. Codex 변경 전에 config와 설치 목록을 백업하고 다른 Plugin·인증은 건드리지 않습니다. 비활성화된 기존 Plugin은 그대로 두며 새 Codex 대화에서 노출을 확인하세요. 기존 미관리 바이너리는 덮어쓰지 않습니다.
+
 [스킬 본문](unreal-agent/SKILL.md)과 [설치 안내](docs/plugin-installation.md#unreal-agent)를 참고하세요. 배포 검사는 구조·메타데이터·미러 일치를 확인할 뿐 실제 runner 실행, 인증, 모델 응답이나 새 세션 노출을 보장하지 않습니다. 실행 시 runner의 작업과 Codex가 직접 확인한 검증을 구분해 보고합니다.
 
 ## Local AI Studio

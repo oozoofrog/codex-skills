@@ -47,6 +47,16 @@ Swift Intelligence는 macOS, Command Line Tools를 포함한 Xcode, Python 3가 
 
 변경이 원격에 반영되기 전에는 위 원격 설치 명령만으로 새 Plugin을 받을 수 없습니다. 로컬에서 시험하려면 이 저장소 루트에서 `codex plugin marketplace add "$PWD"`로 checkout을 등록한 뒤 `codex plugin add unreal-agent@codex-skills`를 사용합니다. 같은 이름의 marketplace가 이미 있으면 먼저 source가 이 checkout인지 확인하세요. 저장소 파일 추가와 실제 설치·활성화·새 세션 노출은 별개입니다.
 
+Go 1.27+, Git, Python 3.9+, Codex CLI가 있는 환경에서는 runner와 Plugin을 한 명령으로 준비할 수 있습니다:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/oozoofrog/codex-skills/main/scripts/install_unreal_agent.sh | bash
+```
+
+이 명령은 upstream `v0.2.0`의 고정 commit을 확인해 `~/.local/bin/unreal-agent-runner`에 빌드·설치합니다 (`UNREAL_AGENT_BIN_DIR`로 경로 선택 가능). Go 버전은 upstream `go.mod`의 최소 1.27.0 이상이어야 합니다. 이미 관리 중인 바이너리는 재실행 시 그대로 두고, `bash scripts/install_unreal_agent.sh --reinstall`은 checksum이 맞는 관리본만 교체하며 이전 바이너리와 marker의 보관 위치를 출력합니다. 기존 미관리/변조 바이너리나 symlink는 덮어쓰지 않습니다. PATH에 설치 디렉터리가 없으면 추가하세요. provider 인증은 설치하지 않습니다. curl 파이프라인 실행 전에는 스크립트 소스를 확인하세요.
+
+기본 실행은 `codex plugin marketplace list --json` 및 `codex plugin list --json`으로 먼저 source와 설치/활성화 상태를 검사합니다. marketplace가 없으면 `codex plugin marketplace add oozoofrog/codex-skills --ref main`, 일치하는 원격 등록에서 Plugin을 새로 설치할 때는 upgrade, 검증된 로컬 checkout에서는 등록 변경 없이 `codex plugin add unreal-agent@codex-skills`를 실행합니다. 기존 설치·활성화 상태는 보존합니다 (비활성 상태도 유지). 다른 source나 확인 불가능한 로컬 checkout이면 runner 설치 전 중단하며 등록/Plugin을 변경하지 않습니다. Codex 변경 전에 `$CODEX_HOME/backups/unreal-agent-install.*` (기본 `~/.codex`)에 config.toml(있으면)과 marketplace/Plugin inventory를 저장합니다. 실패 시 백업을 보존하지만 Codex CLI의 내부 변경을 자동 복구하지 않으므로 메시지와 백업을 확인하고 재실행하세요. `--runner-only`는 Codex 설치를 건너뜁니다. 다른 Plugin·인증을 제거하거나 갱신하지 않습니다.
+
 외부 `unreal-agent-runner`를 별도로 설치하고 사용할 provider의 인증·모델 접근을 준비해야 합니다. Plugin은 실행기 바이너리, 인증 정보, MCP 서버, app, hook을 설치하지 않으며 marketplace의 `ON_INSTALL`은 runner 인증을 제공한다는 뜻이 아닙니다. 원본의 `/Users/oozoofrog/.local/bin/unreal-agent-runner`는 한 Mac의 설치 예이고, `openai-codex` / `gpt-6-astra`는 과거 smoke run 관측값입니다. 현재 환경에서 runner 경로·옵션·모델 가용성을 확인하고 작업에 맞는 runner 모델·thinking level을 선택합니다. 사용자 지정 값은 보존하며, 현재 Codex 대화의 모델 설정은 바뀌지 않습니다. runner가 없으면 제한을 알리고 임의로 Codex 실행으로 대체하지 않습니다.
 
 [스킬 본문](../unreal-agent/SKILL.md)은 절대 workspace 경로, 안전한 JSON 요청, JSONL 이벤트·종료 상태 수집과 결과 검토를 안내합니다. 한 실행은 한 요청 후 종료하며, 이어서 작업하려면 같은 `session_id`와 세션 디렉터리를 재사용합니다. 지속적인 Codex 채팅으로 전환되는 것은 아닙니다. Git·외부 효과는 사용자가 허용한 범위만 수행합니다.
