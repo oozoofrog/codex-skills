@@ -43,7 +43,7 @@ Swift Intelligence는 macOS, Command Line Tools를 포함한 Xcode, Python 3가 
 
 ## Unreal Agent
 
-`unreal-agent`는 skills-only Plugin `0.1.1`입니다. 설치 후 새 작업에서 `$unreal-agent` 또는 `$unreal-agent:unreal-agent`로 명시적으로 호출합니다. 일반 코딩이나 Unreal Engine 작업이라는 이유만으로 자동 실행하지 않으며 Codex 실행 모드도 아닙니다. Standalone을 원하면 `unreal-agent/`를 skill-installer로 선택 설치하고 Plugin과 중복 설치하지 않습니다. 기존 전역 스킬이 있다면 덮어쓰지 말고 어느 설치본을 사용할지 먼저 확인하세요.
+`unreal-agent`는 skills-only Plugin `0.1.2`입니다. 설치 후 새 작업에서 `$unreal-agent` 또는 `$unreal-agent:unreal-agent`로 명시적으로 호출합니다. 일반 코딩이나 Unreal Engine 작업이라는 이유만으로 자동 실행하지 않으며 Codex 실행 모드도 아닙니다. Standalone을 원하면 `unreal-agent/`를 skill-installer로 선택 설치하고 Plugin과 중복 설치하지 않습니다. 기존 전역 스킬이 있다면 덮어쓰지 말고 어느 설치본을 사용할지 먼저 확인하세요.
 
 변경이 원격에 반영되기 전에는 위 원격 설치 명령만으로 새 Plugin을 받을 수 없습니다. 로컬에서 시험하려면 이 저장소 루트에서 `codex plugin marketplace add "$PWD"`로 checkout을 등록한 뒤 `codex plugin add unreal-agent@codex-skills`를 사용합니다. 같은 이름의 marketplace가 이미 있으면 먼저 source가 이 checkout인지 확인하세요. 저장소 파일 추가와 실제 설치·활성화·새 세션 노출은 별개입니다.
 
@@ -55,7 +55,7 @@ Swift Intelligence는 macOS, Command Line Tools를 포함한 Xcode, Python 3가 
 
 ## Local AI Studio
 
-`local-ai-studio`는 Local AI Studio를 사용한 이미지·음성·영상·음악·영어→한국어 번역 작업을 수행하는 skills-only Plugin `0.2.0`입니다. Local AI Studio 또는 온디바이스 모델 작업을 요청했는데 LocalAIHub나 필요한 모델 그룹이 없으면 현재 소스를 확인해 로컬에 설치한 뒤 결과를 검증·전달합니다. 일반 미디어 요청만으로 설치를 시작하지 않습니다. 새 작업에서 `$local-ai-studio` 또는 `$local-ai-studio:local-ai-studio`로 호출할 수 있으며 사용자가 선택한 도구·모델·출력 위치·형식을 우선합니다.
+`local-ai-studio`는 Local AI Studio를 사용한 이미지·음성·영상·음악·영어→한국어 번역 작업을 수행하는 skills-only Plugin `0.2.1`입니다. Local AI Studio 또는 온디바이스 모델 작업을 요청했는데 LocalAIHub나 필요한 모델 그룹이 없으면 현재 소스를 확인해 로컬에 설치한 뒤 결과를 검증·전달합니다. 일반 미디어 요청만으로 설치를 시작하지 않습니다. 새 작업에서 `$local-ai-studio` 또는 `$local-ai-studio:local-ai-studio`로 호출할 수 있으며 사용자가 선택한 도구·모델·출력 위치·형식을 우선합니다.
 
 아직 푸시하지 않은 checkout을 시험하려면 저장소 루트에서 `codex plugin marketplace add "$PWD"`로 등록한 뒤 `codex plugin add local-ai-studio@codex-skills`를 사용하세요. 기존 `codex-skills` marketplace가 있으면 source가 원격인지 해당 checkout인지 먼저 확인합니다. Standalone을 선택하면 `local-ai-studio/`를 skill-installer로 설치하되 Plugin과 중복 설치하지 않고 기존 전역 스킬을 임의로 덮어쓰지 않습니다.
 

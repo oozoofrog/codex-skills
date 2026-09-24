@@ -178,7 +178,7 @@ class PluginDistributionTests(unittest.TestCase):
                 self.assertFalse(path.is_symlink(), path)
         manifest = json.loads((plugin / ".codex-plugin" / "plugin.json").read_text())
         self.assertEqual(source.name, manifest["name"])
-        self.assertEqual("0.1.1", manifest["version"])
+        self.assertEqual("0.1.2", manifest["version"])
         self.assertEqual("./skills/", manifest["skills"])
         for key in ("mcpServers", "apps", "hooks"):
             self.assertNotIn(key, manifest)
@@ -233,7 +233,7 @@ class PluginDistributionTests(unittest.TestCase):
                 self.assertFalse(path.is_symlink(), path)
         manifest = json.loads((plugin / ".codex-plugin" / "plugin.json").read_text())
         self.assertEqual(source.name, manifest["name"])
-        self.assertEqual("0.2.0", manifest["version"].split("+")[0])
+        self.assertEqual("0.2.1", manifest["version"].split("+")[0])
         self.assertEqual("./skills/", manifest["skills"])
         for key in ("mcpServers", "apps", "hooks"):
             self.assertNotIn(key, manifest)

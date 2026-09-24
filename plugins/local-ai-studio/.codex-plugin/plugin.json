@@ -1,6 +1,6 @@
 {
   "name": "local-ai-studio",
-  "version": "0.2.0+codex.20260924131104",
+  "version": "0.2.1+codex.20260924132008",
   "description": "Set up Local AI Studio and the needed model group when requested, then use its local ai CLI for media or English-to-Korean translation and verify saved results.",
   "author": {
     "name": "oozoofrog",

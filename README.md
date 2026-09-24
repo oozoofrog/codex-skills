@@ -52,7 +52,7 @@ $ponytail-beck-tdd로 기존 동작을 보존하면서 테스트의 검증과 �
 $unreal-agent로 현재 저장소의 지정한 버그를 수정하고 결과를 검토해주세요. 커밋과 푸시는 하지 마세요.
 ```
 
-Standalone `unreal-agent/`와 byte-identical skills-only Plugin `0.1.1`을 제공합니다. runner 실행 파일·인증 정보·MCP·app·hook은 포함하지 않습니다. 별도 runner 설치와 해당 provider의 인증·모델 가용성이 필요하며, 없으면 한계를 알리고 Codex로 조용히 대체하지 않습니다. 스킬에 적힌 로컬 설치 경로와 과거 smoke run 모델은 이식 가능한 기본값이 아닙니다.
+Standalone `unreal-agent/`와 byte-identical skills-only Plugin `0.1.2`를 제공합니다. runner 실행 파일·인증 정보·MCP·app·hook은 포함하지 않습니다. 별도 runner 설치와 해당 provider의 인증·모델 가용성이 필요하며, 없으면 한계를 알리고 Codex로 조용히 대체하지 않습니다. 스킬에 적힌 로컬 설치 경로와 과거 smoke run 모델은 이식 가능한 기본값이 아닙니다.
 
 [스킬 본문](unreal-agent/SKILL.md)과 [설치 안내](docs/plugin-installation.md#unreal-agent)를 참고하세요. 배포 검사는 구조·메타데이터·미러 일치를 확인할 뿐 실제 runner 실행, 인증, 모델 응답이나 새 세션 노출을 보장하지 않습니다. 실행 시 runner의 작업과 Codex가 직접 확인한 검증을 구분해 보고합니다.
 
@@ -66,7 +66,7 @@ $local-ai-studio로 비상업적 평가용 찻주전자 이미지를 만들고 P
 $local-ai-studio로 이 영어 문서를 한국어로 번역해 지정한 TXT 파일로 저장해주세요.
 ```
 
-Standalone `local-ai-studio/`와 byte-identical skills-only Plugin `0.2.0`을 제공합니다. Plugin에 모델·런타임·생성 미디어·인증·실행기 바이너리는 포함하지 않습니다. 설치 시 현재 소스·CLI 기능, 선택한 저장 위치와 용량을 확인하고 필요한 모델만 받습니다. `/Volumes/eyedisk/AI`는 참조 Mac의 발견 후보일 뿐 보편적인 기본값이 아닙니다. Qwen Image 다운로드에는 사용자의 명시적 라이선스 동의가 필요합니다. 24 GB Mac에서는 대형 생성 모델을 한 번에 하나만 실행합니다.
+Standalone `local-ai-studio/`와 byte-identical skills-only Plugin `0.2.1`을 제공합니다. Plugin에 모델·런타임·생성 미디어·인증·실행기 바이너리는 포함하지 않습니다. 설치 시 현재 소스·CLI 기능, 선택한 저장 위치와 용량을 확인하고 필요한 모델만 받습니다. `/Volumes/eyedisk/AI`는 참조 Mac의 발견 후보일 뿐 보편적인 기본값이 아닙니다. Qwen Image 다운로드에는 사용자의 명시적 라이선스 동의가 필요합니다. 24 GB Mac에서는 대형 생성 모델을 한 번에 하나만 실행합니다.
 
 설치 후 `ai --help`로 지원 명령을 확인합니다. 공개 LocalAIHub 소스와 다른 로컬 체크아웃의 기능이 다를 수 있습니다. `READY`·종료 코드·`Output:` 로그만으로 결과 품질을 주장하지 않으며 실제 파일·형식·미리보기/재생/내용 확인 여부를 구분해 전달합니다. [스킬 본문](local-ai-studio/SKILL.md), [LocalAIHub 설치](local-ai-studio/references/setup.md), [명령·출력 규칙](local-ai-studio/references/cli-workflows.md), [Plugin 설치 안내](docs/plugin-installation.md#local-ai-studio)를 참고하세요.
 
