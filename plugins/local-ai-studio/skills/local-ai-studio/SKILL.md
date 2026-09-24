@@ -1,17 +1,17 @@
 ---
 name: local-ai-studio
-description: Use installed Local AI Studio models through the local ai CLI on Apple Silicon for image generation/editing, speech synthesis/transcription, video, music, and English-to-Korean translation; inspect and deliver the saved results. Use for local media or translation execution requests, not model installation, training, or general AI development. Respect any user-selected tool instead.
+description: Set up and use Local AI Studio on Apple Silicon when the user requests LocalAIHub or on-device model work for image, speech, video, music, or English-to-Korean translation. Install only the needed model group when absent and verify results. Do not install it for generic media requests or use it for unrelated AI development; respect a user-selected tool.
 ---
 
 # Local AI Studio
 
-Use the existing local installation to complete the requested media or translation task, not to set up an AI environment. User-selected tools, models, output locations, and formats take precedence; do not silently substitute this CLI, a cloud service, or another model.
+Complete the user's requested Local AI Studio or on-device model task. If LocalAIHub or the required model group is absent, install that prerequisite using [setup guidance](references/setup.md), then continue the same task. Do not start a large local installation for a generic media request. User-selected tools, models, output locations, and formats take precedence; do not silently substitute this CLI, a cloud service, or another model.
 
 ## Discover before running
 
 - Resolve the user's executable first, otherwise inspect `command -v ai`. Confirm it is Local AI Studio with `ai --help` before using it; an unrelated executable named `ai` is not sufficient. Read current top-level help for every new task; do not assume subcommand `--help` is supported.
-- Find the selected storage root from `AIHUB_ROOT`, the app's configuration, and `ai status`; then inspect `ai models`. On the reference Mac, `/Volumes/eyedisk/AI/bin/ai` and `/Volumes/eyedisk/AI/LocalAIHub/README.md` are discovery candidates only, not defaults for other machines. Mount/confirm the intended volume rather than creating a replacement root. Do not change persistent configuration to make a command work.
-- Prefer the installed CLI, matching LocalAIHub README and current code over the older parent AI README, especially for music and translation. Read [command/output details](references/cli-workflows.md) for the selected modality. If unavailable or incompatible, explain the blocker and ask before installation, downloads, or switching tools.
+- Find the selected storage root from `AIHUB_ROOT`, the app's configuration, and `ai status`; then inspect `ai models`. On the reference Mac, `/Volumes/eyedisk/AI/bin/ai` and `/Volumes/eyedisk/AI/LocalAIHub/README.md` are discovery candidates only, not defaults for other machines. If a configured volume is missing, preserve that choice rather than creating a replacement root.
+- Prefer the installed CLI, matching LocalAIHub README and current code over the older parent AI README, especially for music and translation. Read [command/output details](references/cli-workflows.md) for the selected modality. If LocalAIHub or the needed group is missing, follow [setup guidance](references/setup.md). If the fetched version lacks the requested command, report the version mismatch instead of claiming support.
 - `READY` checks required local files, not successful inference, output quality, or even every runtime dependency. Check the relevant group's readiness without running an extra generation as a probe.
 
 ## Execute the requested task

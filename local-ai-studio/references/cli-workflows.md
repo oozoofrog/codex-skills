@@ -4,7 +4,7 @@ Read only the task-relevant section. These examples reflect the reference LocalA
 
 ## Discovery and authority
 
-Start with the user's CLI/root, otherwise `command -v ai`, then the resolved executable's `--help`, `status`, and `models`. Keep that same executable and root for the run. If PATH has no matching CLI, inspect the selected root's `bin/ai`. On the reference Mac only, `/Volumes/eyedisk/AI/bin/ai` is another candidate.
+Start with the user's CLI/root, otherwise `command -v ai`, then the resolved executable's `--help`, `status`, and `models`. Keep that same executable and root for the run. If PATH has no matching CLI, inspect the selected root's `bin/ai`. On the reference Mac only, `/Volumes/eyedisk/AI/bin/ai` is another candidate. If LocalAIHub or the needed model group is absent, follow [setup guidance](setup.md) before this workflow.
 
 Current root resolution is `AIHUB_ROOT` → app-selected `rootPath` in `~/Library/Application Support/Local AI Studio/config.json` → implementation fallbacks. Read only the needed configuration; do not modify it. Confirm the effective root in `ai status`, especially with a global CLI. For an explicitly selected root, a per-command `AIHUB_ROOT="$ROOT" "$AI" status` (and the same environment for generation) avoids changing other sessions. Do not assume a `--root` flag exists.
 
@@ -75,7 +75,7 @@ Supply exactly one of `--text` or `--input`. The installed model is English-to-K
 
 ## Verify the result
 
-Use available local tools; no package installation is required by this skill. For a resolved absolute `$FILE`, `test -s "$FILE"` and `file "$FILE"` are useful first checks, not complete validation. Ensure it is a new regular file from this run, not a prior or partial result. The CLI prints its intended output before starting its child process.
+Use available local tools; do not install extra verification packages without a concrete need. For a resolved absolute `$FILE`, `test -s "$FILE"` and `file "$FILE"` are useful first checks, not complete validation. Ensure it is a new regular file from this run, not a prior or partial result. The CLI prints its intended output before starting its child process.
 
 - **Image:** `sips -g format -g pixelWidth -g pixelHeight "$FILE"` on macOS, plus an image-view tool. Check that requested edits appear and source content is retained where required.
 - **Audio/video:** if available, `ffprobe -v error -show_entries format=format_name,duration:stream=codec_type,codec_name,width,height,sample_rate,channels -of json "$FILE"`. Probe metadata does not prove full decodability or listening quality; decode/play an appropriate sample, inspect video frames, and note any unreviewed portion.

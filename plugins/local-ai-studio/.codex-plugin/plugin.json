@@ -1,7 +1,7 @@
 {
   "name": "local-ai-studio",
-  "version": "0.1.0",
-  "description": "Use installed Local AI Studio models via the local ai CLI for media and English-to-Korean translation; verify and deliver saved results. Not an installer or general AI development skill.",
+  "version": "0.2.0+codex.20260924131104",
+  "description": "Set up Local AI Studio and the needed model group when requested, then use its local ai CLI for media or English-to-Korean translation and verify saved results.",
   "author": {
     "name": "oozoofrog",
     "url": "https://github.com/oozoofrog"
@@ -9,8 +9,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Local AI Studio",
-    "shortDescription": "설치된 로컬 모델로 이미지·음성·영상·음악·번역 실행 및 결과 확인",
-    "longDescription": "Discover the installed Local AI Studio CLI on Apple Silicon for local image, speech, video, music and English-to-Korean translation requests. Respect user-selected tools and outputs, run one large generator at a time, and inspect saved results separately from readiness. No models, media, runtimes, credentials, MCP, apps or hooks are bundled.",
+    "shortDescription": "Local AI Studio \uc124\uce58\u00b7\ubaa8\ub378 \uc900\ube44\u00b7\ub85c\uceec \uc791\uc5c5 \uacb0\uacfc \ud655\uc778",
+    "longDescription": "For requested Local AI Studio or on-device model tasks on Apple Silicon, discover the existing CLI or set up LocalAIHub and only the required model group. Do not install for generic media requests. Respect user-selected tools and storage, obtain explicit Qwen license acceptance when needed, and verify actual output separately from readiness. No model weights, media, credentials, MCP, apps or hooks are bundled.",
     "developerName": "oozoofrog",
     "category": "Productivity",
     "capabilities": [
@@ -18,7 +18,7 @@
       "Write"
     ],
     "defaultPrompt": [
-      "$local-ai-studio로 설치된 로컬 모델을 찾아 요청한 미디어·번역 작업을 실행하고 결과 파일을 확인해주세요."
+      "$local-ai-studio\ub85c \ud544\uc694\ud55c \uacbd\uc6b0 Local AI Studio\uc640 \ubaa8\ub378\uc744 \uc124\uce58\ud558\uace0 \uc694\uccad\ud55c \uc791\uc5c5\uc758 \uacb0\uacfc\ub97c \ud655\uc778\ud574\uc8fc\uc138\uc694."
     ]
   },
   "repository": "https://github.com/oozoofrog/codex-skills"
