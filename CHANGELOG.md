@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+- `unreal-agent` Plugin을 `0.1.1`로 올리고 runner 요청마다 작업 복잡도에 맞는 Codex 모델·thinking level을 선택하도록 지침을 추가했습니다. 사용자 지정 값을 우선하고 지원 여부를 확인하며, 현재 Codex 대화의 모델과 runner 모델을 구분합니다.
+
 - 로컬 `unreal-agent/SKILL.md`를 내용 변경 없이 standalone 원본으로 추가하고 byte-identical skills-only Plugin `0.1.0`으로 등록했습니다. 명시적 호출 정책과 Codex의 결과 검토 경계를 유지하고 UI 메타데이터, marketplace 마지막 항목, 미러 동기화·배포 불변식 검사를 추가했습니다. 외부 runner·인증·모델 가용성이 필요하며 실행기 바이너리·인증 정보·MCP·app·hook은 번들하지 않습니다. 설치·호출 안내와 정적 배포 검사/실제 runner 실행·새 세션 노출의 검증 경계를 문서화했습니다. 전역 원본은 수정하지 않습니다.
 
 - 불완전한 `fast-jev-compaction` Plugin 골격과 marketplace 등록을 제거했습니다. 설치된 Plugin·캐시는 없었으며, 배포 예상 목록과 marketplace가 다시 일치하도록 확인했습니다.

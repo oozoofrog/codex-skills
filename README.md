@@ -46,13 +46,13 @@ $ponytail-beck-tdd로 기존 동작을 보존하면서 테스트의 검증과 �
 
 ## Unreal Agent
 
-`$unreal-agent`는 사용자가 Unreal Agent 사용을 명시적으로 요청할 때만 별도 로컬 `unreal-agent-runner`에 한정된 작업을 맡기고, Codex가 변경 사항과 결과를 직접 검토하는 스킬입니다. Codex 실행 모드가 아니며 일반 코딩이나 이름에 Unreal이 포함된 Unreal Engine 작업에 자동 적용하지 않습니다.
+`$unreal-agent`는 사용자가 Unreal Agent 사용을 명시적으로 요청할 때만 별도 로컬 `unreal-agent-runner`에 한정된 작업을 맡기고, Codex가 변경 사항과 결과를 직접 검토하는 스킬입니다. 실행할 때 작업의 범위·난이도에 맞춰 runner의 Codex 모델과 thinking level을 자동으로 고르며 사용자 지정 값은 유지합니다. 현재 Codex 대화의 모델 설정을 바꾸지는 않습니다. 일반 코딩이나 이름에 Unreal이 포함된 Unreal Engine 작업에 자동 적용하지 않습니다.
 
 ```text
 $unreal-agent로 현재 저장소의 지정한 버그를 수정하고 결과를 검토해주세요. 커밋과 푸시는 하지 마세요.
 ```
 
-Standalone `unreal-agent/`와 byte-identical skills-only Plugin `0.1.0`을 제공합니다. runner 실행 파일·인증 정보·MCP·app·hook은 포함하지 않습니다. 별도 runner 설치와 해당 provider의 인증·모델 가용성이 필요하며, 없으면 한계를 알리고 Codex로 조용히 대체하지 않습니다. 스킬에 적힌 로컬 설치 경로와 과거 smoke run 모델은 이식 가능한 기본값이 아닙니다.
+Standalone `unreal-agent/`와 byte-identical skills-only Plugin `0.1.1`을 제공합니다. runner 실행 파일·인증 정보·MCP·app·hook은 포함하지 않습니다. 별도 runner 설치와 해당 provider의 인증·모델 가용성이 필요하며, 없으면 한계를 알리고 Codex로 조용히 대체하지 않습니다. 스킬에 적힌 로컬 설치 경로와 과거 smoke run 모델은 이식 가능한 기본값이 아닙니다.
 
 [스킬 본문](unreal-agent/SKILL.md)과 [설치 안내](docs/plugin-installation.md#unreal-agent)를 참고하세요. 배포 검사는 구조·메타데이터·미러 일치를 확인할 뿐 실제 runner 실행, 인증, 모델 응답이나 새 세션 노출을 보장하지 않습니다. 실행 시 runner의 작업과 Codex가 직접 확인한 검증을 구분해 보고합니다.
 

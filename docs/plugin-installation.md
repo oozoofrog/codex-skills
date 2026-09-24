@@ -42,11 +42,11 @@ Swift Intelligence는 macOS, Command Line Tools를 포함한 Xcode, Python 3가 
 
 ## Unreal Agent
 
-`unreal-agent`는 skills-only Plugin `0.1.0`입니다. 설치 후 새 작업에서 `$unreal-agent` 또는 `$unreal-agent:unreal-agent`로 명시적으로 호출합니다. 일반 코딩이나 Unreal Engine 작업이라는 이유만으로 자동 실행하지 않으며 Codex 실행 모드도 아닙니다. Standalone을 원하면 `unreal-agent/`를 skill-installer로 선택 설치하고 Plugin과 중복 설치하지 않습니다. 기존 전역 스킬이 있다면 덮어쓰지 말고 어느 설치본을 사용할지 먼저 확인하세요.
+`unreal-agent`는 skills-only Plugin `0.1.1`입니다. 설치 후 새 작업에서 `$unreal-agent` 또는 `$unreal-agent:unreal-agent`로 명시적으로 호출합니다. 일반 코딩이나 Unreal Engine 작업이라는 이유만으로 자동 실행하지 않으며 Codex 실행 모드도 아닙니다. Standalone을 원하면 `unreal-agent/`를 skill-installer로 선택 설치하고 Plugin과 중복 설치하지 않습니다. 기존 전역 스킬이 있다면 덮어쓰지 말고 어느 설치본을 사용할지 먼저 확인하세요.
 
 변경이 원격에 반영되기 전에는 위 원격 설치 명령만으로 새 Plugin을 받을 수 없습니다. 로컬에서 시험하려면 이 저장소 루트에서 `codex plugin marketplace add "$PWD"`로 checkout을 등록한 뒤 `codex plugin add unreal-agent@codex-skills`를 사용합니다. 같은 이름의 marketplace가 이미 있으면 먼저 source가 이 checkout인지 확인하세요. 저장소 파일 추가와 실제 설치·활성화·새 세션 노출은 별개입니다.
 
-외부 `unreal-agent-runner`를 별도로 설치하고 사용할 provider의 인증·모델 접근을 준비해야 합니다. Plugin은 실행기 바이너리, 인증 정보, MCP 서버, app, hook을 설치하지 않으며 marketplace의 `ON_INSTALL`은 runner 인증을 제공한다는 뜻이 아닙니다. 원본의 `/Users/oozoofrog/.local/bin/unreal-agent-runner`는 한 Mac의 설치 예이고, `openai-codex` / `gpt-6-astra`는 과거 smoke run 관측값입니다. 현재 환경에서 runner 경로·옵션·모델 가용성을 확인하고 사용자 지정 모델·thinking level을 보존합니다. runner가 없으면 제한을 알리고 임의로 Codex 실행으로 대체하지 않습니다.
+외부 `unreal-agent-runner`를 별도로 설치하고 사용할 provider의 인증·모델 접근을 준비해야 합니다. Plugin은 실행기 바이너리, 인증 정보, MCP 서버, app, hook을 설치하지 않으며 marketplace의 `ON_INSTALL`은 runner 인증을 제공한다는 뜻이 아닙니다. 원본의 `/Users/oozoofrog/.local/bin/unreal-agent-runner`는 한 Mac의 설치 예이고, `openai-codex` / `gpt-6-astra`는 과거 smoke run 관측값입니다. 현재 환경에서 runner 경로·옵션·모델 가용성을 확인하고 작업에 맞는 runner 모델·thinking level을 선택합니다. 사용자 지정 값은 보존하며, 현재 Codex 대화의 모델 설정은 바뀌지 않습니다. runner가 없으면 제한을 알리고 임의로 Codex 실행으로 대체하지 않습니다.
 
 [스킬 본문](../unreal-agent/SKILL.md)은 절대 workspace 경로, 안전한 JSON 요청, JSONL 이벤트·종료 상태 수집과 결과 검토를 안내합니다. 한 실행은 한 요청 후 종료하며, 이어서 작업하려면 같은 `session_id`와 세션 디렉터리를 재사용합니다. 지속적인 Codex 채팅으로 전환되는 것은 아닙니다. Git·외부 효과는 사용자가 허용한 범위만 수행합니다.
 
