@@ -1,6 +1,6 @@
 {
   "name": "gptplease",
-  "version": "0.2.0+codex.20260911163819",
+  "version": "0.3.0",
   "description": "Send requests and files to ChatGPT Chat or Work with purpose-appropriate model and reasoning selection, then return the completed response.",
   "author": {
     "name": "oozoofrog",
@@ -19,8 +19,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "GPT Please",
-    "shortDescription": "\ubaa9\uc801\ubcc4 Chat\u00b7Work \ubaa8\ub378 \uc120\ud0dd, \ud30c\uc77c \ucca8\ubd80\uc640 \uc751\ub2f5 \ud68c\uc218",
-    "longDescription": "Use $gptplease for requested ChatGPT consultation. Select model and reasoning from live Chat or Work options based on purpose, complexity, consequences, and time/cost limits. Preserve explicit settings, including Chat Pro or Astra Pro. Work is the unspecified new-request surface default. Verify settings and attachments before one UI submission, wait for completion, and process the full response here. Requires supported browser control and login. Runs bundled consultation modules in the supported browser session, with session-scoped single submission and read-only recovery; no provider changes or local tool bridge.",
+    "shortDescription": "목적별 Chat·Work 모델 선택, 파일 첨부와 응답 회수",
+    "longDescription": "Use $gptplease for requested ChatGPT consultation. Select model and reasoning from live, surface-specific Chat or Work options based on purpose, complexity, consequences, and time/cost limits. Preserve explicit settings, including Chat Pro or Astra Pro; never change surfaces just to obtain a Work-only model. Work is the unspecified new-request surface default. Verify settings and attachments before one UI submission, wait for completion, and process the full response here. Requires supported browser control and login. Runs bundled consultation modules in the supported browser session, with session-scoped single submission and read-only recovery; no provider changes or local tool bridge.",
     "developerName": "oozoofrog",
     "category": "Productivity",
     "capabilities": [

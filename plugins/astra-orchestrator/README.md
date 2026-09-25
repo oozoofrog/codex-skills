@@ -17,6 +17,8 @@ codex plugin add astra-orchestrator@codex-skills
 
 ## 사용 조건과 호출
 
+기본은 기존 `astra-only`입니다. 사용자가 이번 작업에 `mixed-model`을 명시한 경우만 [혼합 모델 정책](skills/astra-orchestrator/references/model-routing.md)을 적용합니다. 정책 이름은 Codex 설정 키가 아니며 설치·편집·절약 요청만으로 자동 활성화하지 않습니다. 아래 역할별 effort 표는 Astra 역할의 기본값입니다.
+
 - 리더의 목표 설정은 `gpt-6-astra` / `xhigh`입니다. 스킬은 실행 중인 리더의 모델이나 추론 설정을 변경하지 않습니다.
 - 내부 병렬 과제에는 서브에이전트를 사용하고, 사용자가 새 독립 작업 생성을 명시한 장기 과제에는 Codex 작업을 선택할 수 있습니다. 모델·effort·Standard 속도 지원과 관측 한계는 [세션 도구 안내](skills/astra-orchestrator/references/session-tools.md)를 따릅니다.
 - 별도 MCP 서버, daemon, API key, 설치 hook은 없습니다. 모델이나 필요한 추론 수준을 사용할 수 없으면 해당 위임을 중단하고 이유를 보고합니다.
@@ -48,3 +50,13 @@ $astra-orchestrator:astra-orchestrator
 Plugin `0.1.0`은 2026-09-05 사용자 로컬 `astra-orchestrator`의 6개 파일을 내용 변경 없이 가져온 첫 저장소 배포본입니다. Skill 폴더의 기존 제작·실행 기록은 해당 환경의 과거 증거이며, 이 Plugin의 현재 설치나 실제 역할 실행을 증명하지 않습니다. 이 저장소에서는 `skills/astra-orchestrator/`를 수정하고 Plugin 버전·등록 정보·변경 기록을 함께 관리합니다. 사용자 로컬 설치본과 자동 동기화하지 않습니다.
 
 Plugin `0.1.1`은 루트를 라우터·완료 조건으로 축소하고, 역할 판단을 `references/roles.md`로 분리했습니다. 고정 보고 서식과 횟수 기반 세션 교체를 제거하고 기존 권한 재사용, 필요한 검증만 수행, 서브에이전트와 별도 작업의 선택 기준을 명시합니다.
+
+## 0.2.0: 선택형 혼합 모델과 작업 인계
+
+```text
+$astra-orchestrator로 이번 작업에 mixed-model 정책을 적용해주세요.
+현재 메인 모델과 컨텍스트는 유지하고, 좁은 조사와 명세가 확정된 구현만
+적합한 가용 모델에 맡기세요. 한 worktree의 writer는 하나로 유지하세요.
+```
+
+혼합 정책도 메인 설정·권한·Git 안전 경계를 바꾸지 않습니다. custom agent의 덮어쓰기와 실제 관측 설정을 확인하며 미관측 값을 추정하지 않습니다. session-continuity와 함께 쓸 때는 [작업 인계](skills/astra-orchestrator/references/orchestration-handoff.md)에 따라 전체 복구 지점을 하나로 유지합니다. 모델 성능·비용 절감과 사용자 환경의 설치·live 실행은 별도 검증 대상입니다.

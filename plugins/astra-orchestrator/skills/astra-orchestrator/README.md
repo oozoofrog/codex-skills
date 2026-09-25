@@ -1,6 +1,8 @@
 # Astra Orchestrator
 
-모든 참여 세션을 GPT-6 Astra로 유지하고 지속 리더가 필요한 Worker, Git Steward, 독립 Reviewer를 조정하는 Codex 스킬이다. 정책은 [SKILL.md](SKILL.md), 도구 호출은 [session-tools.md](references/session-tools.md), 전달/반환은 [packets.md](references/packets.md), Git 안전 규칙과 결과 형식은 [git-steward.md](references/git-steward.md)에 있다.
+기본 Astra-only 정책에서 모든 참여 세션을 GPT-6 Astra로 유지하고 지속 리더가 필요한 Worker, Git Steward, 독립 Reviewer를 조정하는 Codex 스킬이다. 정책은 [SKILL.md](SKILL.md), 도구 호출은 [session-tools.md](references/session-tools.md), 전달/반환은 [packets.md](references/packets.md), Git 안전 규칙과 결과 형식은 [git-steward.md](references/git-steward.md)에 있다.
+
+아래 표와 기존 예시는 Astra-only 기준이다. 사용자가 이번 작업에 `mixed-model`을 명시하면 [혼합 모델 정책](references/model-routing.md)을 적용한다. 모델 선택만 달라지며 역할·Git·완료 규칙과 메인 설정은 유지한다.
 
 | 역할 | 설정 |
 | --- | --- |
@@ -26,7 +28,7 @@ else
 fi
 ```
 
-Codex는 스킬 변경을 자동 감지한다. 새 작업의 스킬 선택기에서 Astra Orchestrator 또는 `$astra-orchestrator`를 확인한다. 표시되지 않으면 Codex를 재시작하고 경로·비활성화 설정·목록 예산 제한을 확인한다. 파일 검증과 로더 발견, 실제 모델 실행은 서로 다른 검증 단계다.
+설치 경로와 클라이언트의 갱신 동작을 확인한다. 새 작업의 스킬 선택기에서 Astra Orchestrator 또는 `$astra-orchestrator`를 확인한다. 표시되지 않으면 Codex를 재시작하고 경로·비활성화 설정·목록 예산 제한을 확인한다. 파일 검증과 로더 발견, 실제 모델 실행은 서로 다른 검증 단계다.
 
 2026-09-05 제작 환경에서는 CLI 0.149.1의 실제 스킬 로더가 `.codex/skills/astra-orchestrator/SKILL.md`를 user/enabled로 발견했다. 같은 CLI의 model/list에는 Astra가 없었고, 데스크톱 서브에이전트 도구는 Astra/max 지정 요청을 수락했다. 아래 CLI 예시는 인자 형식이며 이 CLI에서 Astra 모델 실행까지 검증했다는 뜻은 아니다.
 
@@ -93,8 +95,18 @@ $astra-orchestrator
 
 Instructions-only 스킬이다. 별도 daemon, API key, 외부 서비스, 자동 설치 hook이 필요하지 않다. 실행 결정은 Codex가 내리며 파일만으로 모델·권한을 강제하는 runtime은 아니다. 지정값이 거부되면 실패를 알리고 조용히 fallback하지 않는다.
 
-독립성은 새 세션, 제한된 원본 맥락, 직접 검증으로 확보한다. 같은 Astra 모델 간 검토이므로 다른 모델의 다양성을 보장하지 않는다. read-mostly도 실제 sandbox가 확인되지 않으면 행동 지침이다.
+독립성은 새 세션, 제한된 원본 맥락, 직접 검증으로 확보한다. Astra-only의 같은 모델 간 검토는 다른 모델의 다양성을 보장하지 않는다. 혼합 모델 배정 자체도 독립 검증을 대신하지 않는다. read-mostly도 실제 sandbox가 확인되지 않으면 행동 지침이다.
 
 번들 skill-creator의 scripts/quick_validate.py에 이 폴더 경로를 전달하면 frontmatter·명명·미완성 scaffold를 검사할 수 있다. YAML parsing과 상대 링크 확인을 추가하고 실제 역할 선택·도구 호출 검증은 별도로 수행한다. 정책 문장 존재만으로 동작을 증명하지 않는다.
 
 형식·설치 근거는 [OpenAI Build skills](https://learn.chatgpt.com/docs/build-skills), 모델·추론 상속은 [OpenAI Subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents), Astra 지원 수준은 [모델 문서](https://developers.openai.com/api/docs/models/gpt-6-astra)를 사용했다. 구체적인 역할 배분은 사용자가 정한 정책이다.
+
+## 선택형 혼합 모델과 장기 작업
+
+```text
+$astra-orchestrator로 이번 작업에 mixed-model을 적용하세요.
+메인 Astra 세션과 컨텍스트 설정은 유지하고 좁은 조사와 확정된 구현만
+적합한 가용 모델에 맡기세요. 중요한 계약 판단은 메인이 담당하세요.
+```
+
+정책명은 Codex 설정 키가 아니다. 비용 절약 요청이나 문서 편집으로 자동 활성화하지 않는다. [세션 도구](references/session-tools.md)에서 custom agent 덮어쓰기·호스트별 상속·요청/관측 차이를 확인한다. session-continuity와 함께 쓰거나 기존 task state가 있는 경우만 [작업 인계](references/orchestration-handoff.md)를 읽는다. 전체 상태를 복제하거나 일반 단일 세션에 새 필수 필드를 추가하지 않는다. 0.2.0의 정책·문서 검사는 과거 제작 환경의 실제 실행 기록과 별개다.

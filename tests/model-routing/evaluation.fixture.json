@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "origin": "fixture",
+  "runs": [
+    {
+      "run_id": "synthetic-0",
+      "case_id": "bounded-change",
+      "trial_id": "1",
+      "arm": "single-astra",
+      "snapshot_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "inputs_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "criteria_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "shared_context_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "environment_id": "synthetic-linux",
+      "policy_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "workspace_id": "isolated-0",
+      "session_id": "session-0",
+      "execution_path": "codex",
+      "config_preserved": true,
+      "writer_isolation": true,
+      "explicit_mixed_authorization": false,
+      "usage_scope": "entire-run",
+      "models": [
+        {
+          "role": "leader",
+          "requested": {
+            "model": "gpt-6-astra",
+            "effort": "high"
+          },
+          "observed": {
+            "model": "gpt-6-astra",
+            "effort": "high"
+          },
+          "evidence_ref": "fixture://settings"
+        }
+      ],
+      "verification": {
+        "status": "PASS",
+        "evidence_ref": "fixture://test-result"
+      },
+      "metrics": {
+        "wall_seconds": 10,
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "credits": null,
+        "retries": 0,
+        "leader_rework_minutes": null
+      }
+    },
+    {
+      "run_id": "synthetic-1",
+      "case_id": "bounded-change",
+      "trial_id": "1",
+      "arm": "astra-only",
+      "snapshot_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "inputs_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "criteria_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "shared_context_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "environment_id": "synthetic-linux",
+      "policy_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "workspace_id": "isolated-1",
+      "session_id": "session-1",
+      "execution_path": "codex",
+      "config_preserved": true,
+      "writer_isolation": true,
+      "explicit_mixed_authorization": false,
+      "usage_scope": "entire-run",
+      "models": [
+        {
+          "role": "leader",
+          "requested": {
+            "model": "gpt-6-astra",
+            "effort": "high"
+          },
+          "observed": {
+            "model": "gpt-6-astra",
+            "effort": "high"
+          },
+          "evidence_ref": "fixture://settings"
+        },
+        {
+          "role": "worker",
+          "requested": {
+            "model": "gpt-6-astra",
+            "effort": "high"
+          },
+          "observed": {
+            "model": "gpt-6-astra",
+            "effort": "high"
+          },
+          "evidence_ref": "fixture://settings"
+        }
+      ],
+      "verification": {
+        "status": "PASS",
+        "evidence_ref": "fixture://test-result"
+      },
+      "metrics": {
+        "wall_seconds": 11,
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "credits": null,
+        "retries": 0,
+        "leader_rework_minutes": null
+      }
+    },
+    {
+      "run_id": "synthetic-2",
+      "case_id": "bounded-change",
+      "trial_id": "1",
+      "arm": "mixed-model",
+      "snapshot_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "inputs_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "criteria_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "shared_context_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "environment_id": "synthetic-linux",
+      "policy_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "workspace_id": "isolated-2",
+      "session_id": "session-2",
+      "execution_path": "codex",
+      "config_preserved": true,
+      "writer_isolation": true,
+      "explicit_mixed_authorization": true,
+      "usage_scope": "entire-run",
+      "models": [
+        {
+          "role": "leader",
+          "requested": {
+            "model": "gpt-6-astra",
+            "effort": "high"
+          },
+          "observed": {
+            "model": "gpt-6-astra",
+            "effort": "high"
+          },
+          "evidence_ref": "fixture://settings"
+        },
+        {
+          "role": "worker",
+          "requested": {
+            "model": "gpt-6-sol",
+            "effort": "high"
+          },
+          "observed": {
+            "model": "gpt-6-sol",
+            "effort": "high"
+          },
+          "evidence_ref": "fixture://settings"
+        }
+      ],
+      "verification": {
+        "status": "PASS",
+        "evidence_ref": "fixture://test-result"
+      },
+      "metrics": {
+        "wall_seconds": 12,
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "credits": null,
+        "retries": 0,
+        "leader_rework_minutes": null
+      }
+    }
+  ]
+}

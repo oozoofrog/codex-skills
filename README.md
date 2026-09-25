@@ -11,7 +11,7 @@ $gptplease Chat Pro로 선택한 파일을 검토하고 완료 응답을 여기�
 $gptplease Work에서 Astra로 이 기획안을 검토하고 답변을 가져와 주세요.
 ```
 
-- Chat·Work의 실제 선택기에서 목적·복잡도·시간 및 비용 제한에 맞는 모델과 사고 수준을 고릅니다. 명확한 추출은 Luna Light, 일반 작업은 Terra Medium, 깊은 분석은 Sol High, 어려운 다단계 작업은 Astra High/Extra High를 시작점으로 삼습니다.
+- Chat·Work의 실제 선택기에서 목적·복잡도·시간 및 비용 제한에 맞는 모델과 사고 수준을 고릅니다. Work는 실제 제공되는 GPT-6 Luna High·Sol Medium/High·Astra High/Extra High를 작업에 맞춰 선택하고, Chat은 실제 Chat 후보만 사용합니다. 화면별 모델·effort를 일괄 치환하지 않습니다.
 - 모델·사고 수준을 명시하면 그대로 지키고 나머지만 자동 선택합니다. `Chat Pro`는 Pro를, `Chat Astra Pro`는 모델까지 요구합니다. 명시한 조합이 없으면 전송을 보류합니다.
 - 모드를 생략한 새 요청은 Work를 사용합니다. 자동 선택은 같은 모드의 가용 후보 안에서 조정하며 Ultra·Fast/priority를 자동 활성화하지 않습니다.
 - 승인된 파일은 실제 업로드하며, 같은 입력창에서 모드·설정·첨부를 확인한 뒤 한 번 전송합니다.
@@ -52,7 +52,7 @@ $ponytail-beck-tdd로 기존 동작을 보존하면서 테스트의 검증과 �
 $unreal-agent로 현재 저장소의 지정한 버그를 수정하고 결과를 검토해주세요. 커밋과 푸시는 하지 마세요.
 ```
 
-Standalone `unreal-agent/`와 byte-identical skills-only Plugin `0.1.2`를 제공합니다. runner 실행 파일·인증 정보·MCP·app·hook은 포함하지 않습니다. 별도 runner 설치와 해당 provider의 인증·모델 가용성이 필요하며, 없으면 한계를 알리고 Codex로 조용히 대체하지 않습니다. 스킬에 적힌 로컬 설치 경로와 과거 smoke run 모델은 이식 가능한 기본값이 아닙니다.
+Standalone `unreal-agent/`와 byte-identical skills-only Plugin `0.1.3`를 제공합니다. runner 실행 파일·인증 정보·MCP·app·hook은 포함하지 않습니다. 별도 runner 설치와 해당 provider의 인증·모델 가용성이 필요하며, 없으면 한계를 알리고 Codex로 조용히 대체하지 않습니다. 스킬에 적힌 로컬 설치 경로와 과거 smoke run 모델은 이식 가능한 기본값이 아닙니다.
 
 Go 1.27+, Git, Python 3.9+, Codex CLI가 있으면 다음 한 명령으로 upstream runner와 Codex Plugin을 설치할 수 있습니다.
 
@@ -98,7 +98,7 @@ Jev 모음은 Plugin marketplace 항목이 아닌 standalone 스킬입니다. [�
 
 `swift-intelligence`는 Xcode의 SourceKit-LSP로 Swift 정의, 참조, 구현, 타입, 심볼 및 진단을 읽기 전용으로 조회합니다. MCP 서버가 필요한 Plugin이므로 `plugins/swift-intelligence/`에만 제공합니다. Python 3 외의 Python 패키지나 외부 MCP 바이너리를 추가로 설치하지 않습니다.
 
-`astra-orchestrator`는 Astra 리더·워커·Git 전용 워커로 작업 조정을 요청할 때 사용하는 스킬입니다. 작은 작업은 현재 리더가 직접 완료하고 병렬화가 유리할 때만 위임합니다. 스킬 자체의 설명·편집이나 일반 단일 작업에는 자동 적용하지 않습니다. 내부 병렬 과제는 서브에이전트, 사용자가 새 작업 생성을 명시한 장기 과제는 별도 Codex 작업을 선택할 수 있습니다. [Astra Orchestrator 설치와 사용](plugins/astra-orchestrator/README.md)을 참고하세요.
+`astra-orchestrator`는 Astra 리더·워커·Git 전용 워커로 작업 조정을 요청할 때 사용하는 스킬입니다. 작은 작업은 현재 리더가 직접 완료하고 병렬화가 유리할 때만 위임합니다. 스킬 자체의 설명·편집이나 일반 단일 작업에는 자동 적용하지 않습니다. 내부 병렬 과제는 서브에이전트, 사용자가 새 작업 생성을 명시한 장기 과제는 별도 Codex 작업을 선택할 수 있습니다. 기본 `astra-only`를 유지하며, 이번 작업에 `mixed-model`을 명시한 경우만 제한된 Luna/Sol 위임을 선택합니다. 메인 모델·컨텍스트 설정과 한 worktree 한 writer 원칙을 보존합니다. [Astra Orchestrator 설치와 사용](plugins/astra-orchestrator/README.md)을 참고하세요.
 
 `figma-computer-use`는 Figma MCP 대신 computer-use로 Figma 데스크톱·브라우저 UI를 조작합니다. 디자인 생성·편집·검증과 매뉴얼·호환성 기준 갱신을 지원합니다.
 
@@ -116,6 +116,14 @@ $figma-computer-use 매뉴얼을 최신 Figma에 맞춰 갱신하고 버전업�
 [버전 관리 절차](figma-computer-use/references/maintenance.md)는 스킬 `0.1.1`, 로컬 Figma `126.8.18`, 웹 제품 릴리스, computer-use API를 따로 추적합니다. 새 세션에서 로컬 버전과 검토 날짜를 확인하고, 필요한 공식 릴리스·매뉴얼만 갱신합니다. 영구 갱신 요청에는 원본·호환성 기록·Plugin 버전·미러·CHANGELOG·검증을 함께 처리합니다. 이는 사용 시 확인/요청 시 갱신하는 절차이며 백그라운드 감시나 앱 자동 업데이트를 설치하지 않습니다.
 
 Figma `126.8.18` 네이티브 앱에서 프레임·한글 텍스트·Auto layout·컴포넌트/variant/instance·색상 변수·텍스트 스타일, 프로토타입 이동/뒤로 가기, PNG 내보내기/가져오기를 실제 검증했습니다. 필드 포커스와 값 커밋, 숫자 입력, 붙여넣기 타임아웃 및 연결 복구 지침을 `0.1.1`에 반영했습니다. 브라우저 편집은 로그인/연결 오류로 차단됐고 클라우드 저장·이름 있는 버전 저장과 고급 기능은 미확인입니다. 자세한 범위와 증거는 [기능 검증 보고서](docs/figma-computer-use-validation.md)를 참고하세요. 배포는 `figma-computer-use/` standalone과 byte-identical Plugin 미러를 제공하며 Plugin 설치 경로를 사용합니다. 설치 방법은 [Plugin 설치](docs/plugin-installation.md)를 참고하세요.
+
+## 모델 역할 분담과 평가
+
+[이번 릴리스 변경 기록](docs/model-routing-changelog.md)을 별도로 정리했으며 기존 CHANGELOG 이력은 보존합니다.
+
+[원문 확인 범위·적용 설계·사용 예시](docs/model-routing-review.md)에 Chat/Work 후보, 선택형 혼합 모델, 외부 runner 경계와 task state 연결을 정리했습니다. 새 운영 스킬이나 Jev 모델 라우터를 추가하지 않습니다. 일반 단일 세션은 그대로 사용합니다.
+
+`scripts/model_routing_eval.py`는 세 정책의 **기록된 결과를 오프라인으로 검사·집계**합니다. 합성 fixture 통과를 실제 모델 품질이나 비용 절감으로 보고하지 않습니다. [검증 기록과 미실행 항목](docs/model-routing-validation.md)을 구분해 확인하세요.
 
 ## 설치
 
