@@ -82,9 +82,9 @@ $session-continuity로 현재 task를 체크포인트해주세요.
 
 `single-astra`(리더 단독), `astra-only`(Astra 위임), `mixed-model`(실제 Luna/Sol 위임)을 비교해 병렬화 효과와 모델 선택 효과를 분리한다. 평가 실행은 추가 사용량을 만들 수 있으므로 별도로 요청된 실험에서만 한다. 기본 작업에서 세 arm을 자동 실행하지 않는다.
 
-동일한 시작 커밋·입력·공통 프로젝트 지시/초기 맥락·완료 기준·환경을 유지한다. arm별 정책문은 달라야 하므로 별도 해시로 기록한다. 서로 다른 새 세션과 격리 workspace에서 같은 case/trial의 세 arm을 수행하고, 순서를 바꾸거나 반복해 초기화·캐시·숙련 효과를 살핀다. 새 세션이 맥락을 자동 공유하거나 Git worktree가 미커밋 파일을 포함한다고 가정하지 않는다. 실제 스킬 버전·client·tool·memory 구성을 기록하고 동일성이 확인되지 않으면 비교를 보류한다.
+동일한 시작 커밋·입력·공통 프로젝트 지시/초기 맥락·완료 기준·환경을 유지한다. arm별 정책문은 달라야 하므로 별도 해시로 기록한다. 서로 다른 새 세션과 격리 workspace에서 같은 case/trial의 세 arm을 수행하고, 순서를 바꾸거나 반복해 초기화·캐시·숙련 효과를 살핀다. 한 입력 문서 안에서 session/workspace ID를 재사용하면 관련 비교를 제외한다. 같은 `case_id`에서 같은 arm의 정책 해시가 반복 간 달라지면 정책 버전을 섞지 않도록 해당 case 비교를 제외한다. 세 arm의 관측된 리더 모델과 effort도 일치해야 한다. 새 세션이 맥락을 자동 공유하거나 Git worktree가 미커밋 파일을 포함한다고 가정하지 않는다. 실제 스킬 버전·client·tool·memory 구성을 기록하고 동일성이 확인되지 않으면 비교를 보류한다.
 
-도구 [model_routing_eval.py](../scripts/model_routing_eval.py)는 **이미 기록한 JSON을 검사·집계**한다. 에이전트 실행·설정 변경·증거 파일 열기·명령 실행·가격 조회·승자 선택을 하지 않는다. 요청과 관측 설정 불일치, 누락 arm, 다른 시작 조건, workspace/session 재사용, 승인되지 않은 혼합, 전역 설정/쓰기 격리 위반, 부분 사용량은 비교 대상에서 제외하고 이유를 남긴다. 기록의 진실성·런타임을 독립 인증하는 보안 도구는 아니다.
+도구 [model_routing_eval.py](../scripts/model_routing_eval.py)는 **이미 기록한 JSON을 검사·집계**한다. 에이전트 실행·설정 변경·증거 파일 열기·명령 실행·가격 조회·승자 선택을 하지 않는다. 요청과 관측 설정 불일치, 누락 arm, 다른 시작 조건, 실험 전체의 workspace/session 재사용, 같은 case 안의 arm별 정책 버전 혼합, arm 간 리더 설정 차이, 승인되지 않은 혼합, 전역 설정/쓰기 격리 위반, 부분 사용량은 비교 대상에서 제외하고 이유를 남긴다. 출력의 `arms.<arm>.matched_comparison`은 비교에 포함된 기록만 요약하며, `arms.<arm>.all_attempts`에는 비교에서 제외된 기록을 포함한 전체 시도 수와 PASS/FAIL/BLOCKED/NOT_RUN/INCOMPLETE 건수를 남긴다. 비용·시간·토큰 지표는 matched comparison에서만 집계하고, 관측되지 않은 값은 null로 유지한다. 기록의 진실성·런타임을 독립 인증하는 보안 도구는 아니다.
 
 ```bash
 python3 scripts/model_routing_eval.py tests/model-routing/evaluation.fixture.json
@@ -94,7 +94,7 @@ python3 -m unittest discover -s scripts/tests -p 'test_model_policy_contracts.py
 python3 scripts/model_routing_eval.py /absolute/path/to/reported-runs.json
 ```
 
-`schema_version: 1`, `origin: fixture|reported-live`, `runs`를 사용한다. [합성 fixture](../tests/model-routing/evaluation.fixture.json)가 입력 모양의 예제다. 실제 기록은 식별자·해시·설정·관측 증거 참조를 모두 실제 값으로 바꿔야 한다. `reported-live`는 작성자의 관측 기록임을 뜻하며 도구의 독립 인증을 뜻하지 않는다. 누락 지표는 `null`로 둔다. `PASS`/`FAIL`에는 검증 증거 참조가 필요하며 `BLOCKED`, `NOT_RUN`, `INCOMPLETE`도 보존한다.
+입력은 `schema_version: 1`, `origin: fixture|reported-live`, `runs`를 사용한다. [합성 fixture](../tests/model-routing/evaluation.fixture.json)가 입력 모양의 예제다. 한 입력 문서는 하나의 실험 경계이며 그 안에서 각 `workspace_id`와 `session_id`는 고유해야 한다. 같은 `case_id`의 같은 arm은 모든 trial에서 같은 `policy_sha256`을 사용한다. 정책을 바꾸는 후속 평가는 새 `case_id`로 분리한다. 실제 기록은 식별자·해시·설정·관측 증거 참조를 모두 실제 값으로 바꿔야 한다. `reported-live`는 작성자의 관측 기록임을 뜻하며 도구의 독립 인증을 뜻하지 않는다. 누락 지표는 `null`로 둔다. `PASS`/`FAIL`에는 검증 증거 참조가 필요하며 `BLOCKED`, `NOT_RUN`, `INCOMPLETE`도 보존한다. 출력 보고서의 `schema_version`은 2다.
 
 `usage_scope: entire-run`은 리더·모든 워커·재시도·통합의 총합을 같은 기준으로 집계했음을 뜻한다. 토큰·credits를 자의적으로 환산하지 않는다. 비용을 모르면 null로 유지한다. wall time은 동시에 실행한 worker 시간의 합이 아니라 전체 시작부터 최종 검증까지의 경과 시간이다. 재시도·메인 수정 시간·전체 완료 비율을 함께 보며 첫 응답 시간만으로 성공을 판정하지 않는다. 부분 지표나 제외된 batch를 성공 사례로 숨기지 않는다.
 

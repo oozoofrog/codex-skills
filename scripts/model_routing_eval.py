@@ -144,11 +144,41 @@ def setting_issues(run: dict[str, Any]) -> list[str]:
     return issues
 
 
+def summarize_attempts(selected: list[dict[str, Any]]) -> dict[str, Any]:
+    counts = Counter(r["verification"]["status"] for r in selected)
+    return {
+        "attempts": len(selected),
+        "verification_counts": {s: counts[s] for s in sorted(STATUSES)},
+        "pass_fraction_of_attempts": counts["PASS"] / len(selected) if selected else None,
+    }
+
+
+def summarize_metrics(selected: list[dict[str, Any]]) -> dict[str, Any]:
+    metrics = {}
+    for name in METRICS:
+        values = [r["metrics"][name] for r in selected]
+        complete = bool(values) and all(v is not None for v in values)
+        metrics[name] = {
+            "observed_runs": sum(v is not None for v in values),
+            "total": sum(values) if complete else None,
+            "mean": sum(values) / len(values) if complete else None,
+        }
+    return metrics
+
+
 def summarize(document: Any) -> dict[str, Any]:
     runs = validate(document)
     groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    identifier_groups: dict[str, dict[str, set[tuple[str, str]]]] = {
+        field: defaultdict(set) for field in ("workspace_id", "session_id")
+    }
+    policy_versions: dict[tuple[str, str], set[str]] = defaultdict(set)
     for run in runs:
-        groups[(run["case_id"], run["trial_id"])].append(run)
+        group_key = (run["case_id"], run["trial_id"])
+        groups[group_key].append(run)
+        for field in identifier_groups:
+            identifier_groups[field][run[field]].add(group_key)
+        policy_versions[(run["case_id"], run["arm"])].add(run["policy_sha256"])
     matched = []
     exclusions = []
     for (case, trial), group in sorted(groups.items()):
@@ -160,33 +190,37 @@ def summarize(document: Any) -> dict[str, Any]:
         for field in ("workspace_id", "session_id"):
             if len({r[field] for r in group}) != len(group):
                 reasons.append(field + "_reused")
+            if any(len(identifier_groups[field][r[field]]) > 1 for r in group):
+                reasons.append(field + "_reused_across_experiment")
         for run in group:
             reasons.extend(run["arm"] + ":" + issue for issue in setting_issues(run))
+            if len(policy_versions[(case, run["arm"])]) > 1:
+                reasons.append(run["arm"] + ":policy_version_changed_across_trials")
+        leader_settings = [
+            (model["observed"]["model"], model["observed"]["effort"])
+            for run in group
+            for model in run["models"]
+            if model["role"] == "leader" and model["observed"] is not None
+        ]
+        if len(set(leader_settings)) > 1:
+            reasons.append("different_leader_settings")
         if reasons:
             exclusions.append({"case_id": case, "trial_id": trial, "reasons": sorted(set(reasons))})
         else:
             matched.extend(group)
     summaries = {}
     for arm in ARMS:
-        selected = [r for r in matched if r["arm"] == arm]
-        counts = Counter(r["verification"]["status"] for r in selected)
-        metrics = {}
-        for name in METRICS:
-            values = [r["metrics"][name] for r in selected]
-            complete = bool(values) and all(v is not None for v in values)
-            metrics[name] = {
-                "observed_runs": sum(v is not None for v in values),
-                "total": sum(values) if complete else None,
-                "mean": sum(values) / len(values) if complete else None,
-            }
+        matched_runs = [r for r in matched if r["arm"] == arm]
+        all_runs = [r for r in runs if r["arm"] == arm]
         summaries[arm] = {
-            "attempts": len(selected),
-            "verification_counts": {s: counts[s] for s in sorted(STATUSES)},
-            "pass_fraction_of_attempts": counts["PASS"] / len(selected) if selected else None,
-            "metrics": metrics,
+            "matched_comparison": {
+                **summarize_attempts(matched_runs),
+                "metrics": summarize_metrics(matched_runs),
+            },
+            "all_attempts": summarize_attempts(all_runs),
         }
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "origin": document["origin"],
         "evidence_level": "operator_records_not_independently_verified",
         "live_model_quality_verified": False,
