@@ -49,7 +49,7 @@ Codex가 개발과 검증의 주체이며 기존 Astra 메인 세션과 긴 맥�
 
 ### 변경하지 않은 경계
 
-Jev의 `skill-route`는 모델 라우터로 바꾸지 않았다. Jev·Swift Intelligence·TDD·Figma·Local AI Studio의 기존 목적과 실행 권한은 그대로다. Codex 내부 위임 실패를 이유로 Chat/Work, Unreal runner 또는 Jev를 자동 호출하지 않는다. marketplace 항목은 추가·삭제하지 않는다.
+Codex 내부 위임 실패를 이유로 Chat/Work나 Unreal runner를 자동 호출하지 않는다. marketplace 항목은 추가·삭제하지 않는다.
 
 ## 5. 호출 예시
 

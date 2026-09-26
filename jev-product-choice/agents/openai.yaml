@@ -1,6 +1,0 @@
-interface:
-  display_name: "Jev 제품 가치 선택"
-  short_description: "명시한 사용자 기준으로 좁은 문구·UX 후보 선택"
-  default_prompt: "$jev-product-choice 명시한 사용자 목표와 선호 기준을 확인하고, 좁은 문구·UX 후보를 비교해주세요."
-policy:
-  allow_implicit_invocation: false

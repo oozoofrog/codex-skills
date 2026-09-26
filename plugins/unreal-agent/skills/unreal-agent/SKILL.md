@@ -29,4 +29,4 @@ The prior `low` example was a narrow-task policy, not a measured speed/quality g
 
 Use `low` as an automatic policy only after an explicitly authorized comparison establishes the relevant task class: same initial files and acceptance checks, separate fresh sessions/workspaces, observed settings, full completion quality, retries, Codex repair time and total usage. Keep unknown costs unknown. Record failed and blocked attempts; do not repeatedly rerun until a cheaper-looking sample appears. This skill update does not launch the experiment or claim it passed.
 
-Do not invoke this runner as an automatic fallback for unavailable Codex subagents, Chat/Work consultation or Jev decisions. Its explicit invocation and external-effect boundaries remain unchanged.
+Do not invoke this runner as an automatic fallback for unavailable Codex subagents or Chat/Work consultation. Its explicit invocation and external-effect boundaries remain unchanged.

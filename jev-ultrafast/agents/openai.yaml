@@ -1,6 +1,0 @@
-interface:
-  display_name: "Jev Ultrafast"
-  short_description: "Jev browser actions with Codex Luna text generation"
-  default_prompt: "Use $jev-ultrafast to carry out a bounded browser task and verify the result."
-policy:
-  allow_implicit_invocation: false

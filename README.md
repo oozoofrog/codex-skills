@@ -1,6 +1,6 @@
 # codex-skills
 
-ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위한 `$gptplease`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 작업 조정을 위한 `astra-orchestrator`, Figma UI 작업용 `figma-computer-use`, 일반 Codex 세션의 작업 인계용 `session-continuity`, 켄트 벡의 글을 바탕으로 한 개발 절차 `ponytail-beck-tdd`, 명시적 외부 runner 호출용 `unreal-agent`, Local AI Studio 설치·모델 실행용 `local-ai-studio`, Jev 판단 스킬 7개와 데스크톱·브라우저 조작 스킬 2개를 제공합니다.
+ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위한 `$gptplease`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 작업 조정을 위한 `astra-orchestrator`, Figma UI 작업용 `figma-computer-use`, 일반 Codex 세션의 작업 인계용 `session-continuity`, 켄트 벡의 글을 바탕으로 한 개발 절차 `ponytail-beck-tdd`, 명시적 외부 runner 호출용 `unreal-agent`, Local AI Studio 설치·모델 실행용 `local-ai-studio`를 제공합니다.
 
 ## GPT Please
 
@@ -78,22 +78,6 @@ Standalone `local-ai-studio/`와 byte-identical skills-only Plugin `0.2.1`을 �
 
 설치 후 `ai --help`로 지원 명령을 확인합니다. 공개 LocalAIHub 소스와 다른 로컬 체크아웃의 기능이 다를 수 있습니다. `READY`·종료 코드·`Output:` 로그만으로 결과 품질을 주장하지 않으며 실제 파일·형식·미리보기/재생/내용 확인 여부를 구분해 전달합니다. [스킬 본문](local-ai-studio/SKILL.md), [LocalAIHub 설치](local-ai-studio/references/setup.md), [명령·출력 규칙](local-ai-studio/references/cli-workflows.md), [Plugin 설치 안내](docs/plugin-installation.md#local-ai-studio)를 참고하세요.
 
-## Jev 스킬
-
-`$jev-workbench`는 공통 실행기와 12개 판단 절차를 제공합니다. 목적에 따라 `$jev-decision`, `$jev-context`, `$jev-triage`, `$jev-review-evidence`, `$jev-product-choice`, `$jev-calibrate`를 명시적으로 호출합니다. 위임된 선택·검토 보조·평가를 구분하며 실제 빌드·테스트와 사용자 권한을 대신하지 않습니다.
-
-Jev는 후보와 기준이 정해진 좁은 텍스트 판단에 사용합니다. 프로젝트의 필수 제약과 사용자 가치의 우선순위를 먼저 확인하고, 넓은 설계·제품 결정은 분리된 보조 판단으로 다룹니다. [프로젝트 적합성 안내](jev-workbench/references/project-fit.md)에 사용 대상과 한국어·확신도 평가 기준을 정리했습니다.
-
-```text
-$jev-decision 프로젝트 제약과 선호 기준을 확인하고, 제가 위임한 좁은 후보 중에서만 Jev로 선택해주세요.
-$jev-review-evidence 완료 보고를 실제 테스트 실행 기록과 대조해주세요.
-$jev-calibrate 저장한 판정의 후보 순서·한국어 표현 민감도를 평가해주세요.
-```
-
-Jev 모음은 Plugin marketplace 항목이 아닌 standalone 스킬입니다. [설치 안내](docs/jev/README.md), [실행 계약](jev-workbench/references/runtime.md), [평가 절차](jev-workbench/references/contract-calibration.md), [검증 범위](docs/jev/TEST_REPORT.md)를 참고하세요. 실제 API에는 승인된 입력과 `TYPESAFE_API_KEY`가 필요하며 오프라인 fixture 성공은 모델 정확도 측정이 아닙니다.
-
-추가로 전역 설치에서 가져온 [Jev Computer Use](jev-computer-use/SKILL.md)는 OCR·접근성 정보를 이용한 macOS 화면 조작을, [Jev Ultrafast](jev-ultrafast/SKILL.md)는 Jev의 브라우저 행동 선택과 Codex Luna의 텍스트 입력을 지원합니다. 두 스킬은 별도 로컬 실행 환경에 연결하는 어댑터이며, 실행 환경·인증 정보는 저장소에 포함하지 않습니다. 현재 런처의 경로와 설치 범위는 [Jev 설치 안내](docs/jev/README.md#데스크톱브라우저-조작-스킬)를 확인하세요.
-
 ## 다른 Plugin
 
 `swift-intelligence`는 Xcode의 SourceKit-LSP로 Swift 정의, 참조, 구현, 타입, 심볼 및 진단을 읽기 전용으로 조회합니다. MCP 서버가 필요한 Plugin이므로 `plugins/swift-intelligence/`에만 제공합니다. Python 3 외의 Python 패키지나 외부 MCP 바이너리를 추가로 설치하지 않습니다.
@@ -121,7 +105,7 @@ Figma `126.8.18` 네이티브 앱에서 프레임·한글 텍스트·Auto layout
 
 [이번 릴리스 변경 기록](docs/model-routing-changelog.md)을 별도로 정리했으며 기존 CHANGELOG 이력은 보존합니다.
 
-[원문 확인 범위·적용 설계·사용 예시](docs/model-routing-review.md)에 Chat/Work 후보, 선택형 혼합 모델, 외부 runner 경계와 task state 연결을 정리했습니다. 새 운영 스킬이나 Jev 모델 라우터를 추가하지 않습니다. 일반 단일 세션은 그대로 사용합니다.
+[원문 확인 범위·적용 설계·사용 예시](docs/model-routing-review.md)에 Chat/Work 후보, 선택형 혼합 모델, 외부 runner 경계와 task state 연결을 정리했습니다. 새 운영 스킬은 추가하지 않습니다. 일반 단일 세션은 그대로 사용합니다.
 
 `scripts/model_routing_eval.py`는 세 정책의 **기록된 결과를 오프라인으로 검사·집계**합니다. 합성 fixture 통과를 실제 모델 품질이나 비용 절감으로 보고하지 않습니다. [검증 기록과 미실행 항목](docs/model-routing-validation.md)을 구분해 확인하세요.
 
@@ -143,7 +127,6 @@ codex plugin add local-ai-studio@codex-skills
 
 ```bash
 python3 -m unittest discover -s scripts/tests -v
-python3 -m unittest discover -s tests/jev -v
 python3 scripts/sync_skill_mirrors.py --package gptplease
 node --test gptplease/tests/*.test.mjs
 python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py gptplease

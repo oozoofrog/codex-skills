@@ -1,4 +1,0 @@
-interface:
-  display_name: "Jev Computer Use"
-  short_description: "Control macOS with Jev and Codex Luna"
-  default_prompt: "Use $jev-computer-use for a bounded Mac task and verify the final screen."

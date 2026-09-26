@@ -1,6 +1,0 @@
-interface:
-  display_name: "Jev 판정 평가"
-  short_description: "저장된 판정의 정확도와 한국어·표현·후보 순서 민감도 평가"
-  default_prompt: "$jev-calibrate 저장된 판정과 사전 정답을 비교하고, 한국어·영어 표현과 후보 순서 변화에 따른 정확도·민감도를 평가해주세요."
-policy:
-  allow_implicit_invocation: false

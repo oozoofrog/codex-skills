@@ -35,7 +35,7 @@
 
 ## 경로 경계와 평가
 
-Codex 내부 위임을 `gptplease`의 Chat/Work 상담, Unreal Agent runner, Jev 모델 판단 호출로 자동 대체하지 않는다. 별도 sidebar 작업도 사용자의 새 작업 생성 요청이 필요하다. 현재 호출한 스킬의 trigger/권한을 다른 스킬에 전파하지 않는다.
+Codex 내부 위임을 `gptplease`의 Chat/Work 상담이나 Unreal Agent runner로 자동 대체하지 않는다. 별도 sidebar 작업도 사용자의 새 작업 생성 요청이 필요하다. 현재 호출한 스킬의 trigger/권한을 다른 스킬에 전파하지 않는다.
 
 효과는 Astra 단일 실행, Astra-only 위임, mixed-model 위임을 같은 시작 상태·완료 조건으로 비교한다. 메인과 모든 워커·재시도·통합까지 포함해 시간·사용량·품질을 기록하며 미관측 수치를 0으로 채우지 않는다. 저장소의 `docs/model-routing-review.md`와 `scripts/model_routing_eval.py`는 선택적 평가 자료다. 설치된 스킬만으로 저장소 평가 도구가 존재한다고 가정하지 않는다.
 

@@ -1,6 +1,0 @@
-interface:
-  display_name: "Jev 자료·값 선택"
-  short_description: "읽을 자료의 우선순위를 정하고 원문에서 값·경로 선택"
-  default_prompt: "$jev-context 필수 문서는 유지하면서 자료 후보의 우선순위를 정하고, 필요한 값·경로는 제시된 원문 후보에서 선택해주세요."
-policy:
-  allow_implicit_invocation: false

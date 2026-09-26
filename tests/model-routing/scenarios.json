@@ -120,13 +120,13 @@
       "id": "no-route-fallback",
       "scope": "orchestrator",
       "request": "mixed-model로 현재 작업을 진행하세요.",
-      "setup": "현재 내부 서브에이전트가 없다. 외부 runner/Chat/Work/Jev 호출은 요청하지 않았다.",
+      "setup": "현재 내부 서브에이전트가 없다. 외부 runner/Chat/Work 호출은 요청하지 않았다.",
       "expected_evidence": [
         "제한을 보고하고 가능한 리더 작업을 계속한다."
       ],
       "forbidden": [
         "codex exec 자동 우회",
-        "Unreal/Chat/Work/Jev 자동 호출",
+        "Unreal/Chat/Work 자동 호출",
         "sidebar 작업 자동 생성"
       ],
       "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/references/session-tools.md"

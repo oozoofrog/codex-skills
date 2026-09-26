@@ -1,6 +1,0 @@
-interface:
-  display_name: "Jev 버그 분류"
-  short_description: "버그 제보를 기능 영역·사용자 영향·발생 조건으로 분류"
-  default_prompt: "$jev-triage 버그 제보를 기능 영역·보고된 영향·발생 조건으로 분류하고, 확인된 원인과 미확인 가설을 구분해주세요."
-policy:
-  allow_implicit_invocation: false

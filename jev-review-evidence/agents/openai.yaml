@@ -1,6 +1,0 @@
-interface:
-  display_name: "Jev 리뷰·검증 보조"
-  short_description: "코드 검토 신호·완료 주장의 근거·추가 테스트 순서 평가"
-  default_prompt: "$jev-review-evidence 변경 내용과 완료 주장을 실제 검증 기록에 대조하고, 추가로 검토할 부분과 테스트 우선순위를 정리해주세요."
-policy:
-  allow_implicit_invocation: false
