@@ -10,7 +10,7 @@ ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위�
 $jev-start 이 저장소의 스킬 호출 조건을 검토하고 필요한 개선을 해주세요.
 ```
 
-[스킬 본문](.agents/skills/jev-start/SKILL.md)과 UI 메타데이터만 있는 저장소 범위 스킬입니다. 이 저장소의 `.agents/skills`에서 발견되며 marketplace Plugin이나 전역 설치는 추가하지 않습니다. 실제 Jev 호출에는 `typesafe-ai`와 사용 가능한 API 인증이 필요합니다. 사용 가능 여부와 실제 호출 결과를 구분하며, 별도 실행기·매 턴 호출·현재 모델/effort 변경을 제공하지 않습니다.
+[스킬 본문](plugins/jev-start/skills/jev-start/SKILL.md)과 UI 메타데이터를 담은 skills-only Plugin `0.1.0`입니다. marketplace를 갱신한 뒤 `codex plugin add jev-start@codex-skills`로 설치하고 새 작업에서 `$jev-start` 또는 `$jev-start:jev-start`로 호출합니다. 저장소 전용 `.agents/skills/jev-start`는 Plugin 안으로 옮겨 중복 노출을 피합니다. 실제 Jev 호출에는 별도 `typesafe-ai` 스킬과 사용 가능한 API 인증이 필요합니다. 사용 가능 여부와 실제 호출 결과를 구분하며, 별도 실행기·매 턴 호출·현재 모델/effort 변경을 제공하지 않습니다. [설치 안내](docs/plugin-installation.md#jev-start)를 참고하세요.
 
 ## GPT Please
 

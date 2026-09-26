@@ -1,6 +1,6 @@
 # Plugin installation
 
-Repository marketplace에는 `gptplease`, `swift-intelligence`, `astra-team-building`, `figma-computer-use`, `session-continuity`, `ponytail-beck-tdd`, `unreal-agent`, `local-ai-studio`가 있습니다. 필요한 Plugin만 선택합니다. 아래 명령은 해당 변경이 원격에 반영된 뒤 사용합니다.
+Repository marketplace에는 `gptplease`, `swift-intelligence`, `astra-team-building`, `figma-computer-use`, `session-continuity`, `ponytail-beck-tdd`, `unreal-agent`, `local-ai-studio`, `jev-start`가 있습니다. 필요한 Plugin만 선택합니다. 아래 명령은 해당 변경이 원격에 반영된 뒤 사용합니다.
 
 ```bash
 codex plugin marketplace add oozoofrog/codex-skills --ref main
@@ -12,6 +12,7 @@ codex plugin add session-continuity@codex-skills
 codex plugin add ponytail-beck-tdd@codex-skills
 codex plugin add unreal-agent@codex-skills
 codex plugin add local-ai-studio@codex-skills
+codex plugin add jev-start@codex-skills
 ```
 
 이미 등록한 원격 marketplace는 `codex plugin marketplace upgrade codex-skills`로 snapshot을 갱신한 뒤 설치합니다. 로컬 checkout marketplace를 사용하는 경우에는 그 source를 확인한 뒤 같은 이름으로 재설치합니다.
@@ -40,6 +41,17 @@ Astra Team Building은 모델·추론 수준을 지정할 수 있는 Codex 서�
 Swift Intelligence는 macOS, Command Line Tools를 포함한 Xcode, Python 3가 필요합니다. Xcode에 포함된 `sourcekit-lsp`를 실행하며 외부 MCP 바이너리나 Python 패키지를 설치하지 않습니다. Swift Intelligence 설치 후 Codex를 다시 시작하고 새 작업을 열어 Skill과 MCP 도구를 로드하십시오. 자세한 내용은 [Swift Intelligence 설치 및 사용](../plugins/swift-intelligence/docs/installation-and-usage.md)을 참고하세요.
 
 `session-continuity`는 일반 Codex 세션의 작업 상태 초기화·재개·checkpoint·완료 정리를 지원합니다. 리더/워커나 MCP 서버가 필요하지 않으며, 선택적 보조 스크립트는 Python 3.9+와 Git을 사용합니다. 설치 후 새 작업에서 `$session-continuity:session-continuity`로 호출합니다. 저장소 초기화는 호출 후 요청 범위에서 수행하고, `.gitignore` 수정은 선택 사항입니다. [설치와 사용 안내](../session-continuity/README.md), [실행한 검증과 한계](../session-continuity/VALIDATION.md)를 참고하세요.
+
+## Jev Start
+
+`jev-start`는 작업 시작 시 Jev/TypeSafe를 개발 보조로 선택적으로 활용하는 짧은 지침입니다. 원격 marketplace 갱신은 카탈로그를 갱신하는 작업이며 Plugin 설치는 별도로 수행합니다.
+
+```bash
+codex plugin marketplace upgrade codex-skills
+codex plugin add jev-start@codex-skills
+```
+
+설치 후 새 작업에서 `$jev-start` 또는 `$jev-start:jev-start`와 실제 작업 요청을 함께 사용하세요. [스킬 본문](../plugins/jev-start/skills/jev-start/SKILL.md)은 필요한 경우 기존 `typesafe-ai` 스킬을 읽도록 안내합니다. TypeSafe 스킬·SDK·인증·실행기는 번들하지 않습니다. 이전 저장소 전용 스킬은 Plugin 안으로 이동했으므로 별도 복사본을 중복 설치하지 않습니다. marketplace 목록, 설치/활성화, 새 로더에서 읽는 실제 경로, Jev API 호출은 따로 확인합니다.
 
 ## 모델 정책 업데이트
 

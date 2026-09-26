@@ -1,0 +1,31 @@
+{
+  "name": "jev-start",
+  "version": "0.1.0",
+  "description": "작업 시작 시 Jev/TypeSafe를 필요에 따라 개발 보조로 활용하도록 하는 짧은 지침",
+  "author": {
+    "name": "oozoofrog",
+    "url": "https://github.com/oozoofrog"
+  },
+  "homepage": "https://github.com/oozoofrog/codex-skills/tree/main/plugins/jev-start",
+  "repository": "https://github.com/oozoofrog/codex-skills",
+  "keywords": [
+    "codex",
+    "jev",
+    "typesafe",
+    "development"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Jev Start",
+    "shortDescription": "작업 시작 시 Jev를 개발 보조로 선택적으로 활용하는 짧은 지침",
+    "longDescription": "작업 시작 시 Jev/TypeSafe를 필요에 따라 개발 보조로 활용해 달라는 요청에 적용합니다. GPT가 현재 작업에서 사용 여부를 선택하고 실제 호출이 필요할 때 기존 typesafe-ai 스킬을 읽습니다. 지침과 UI 메타데이터만 포함하며 실제 API 사용에는 별도 typesafe-ai 스킬과 인증이 필요합니다.",
+    "developerName": "oozoofrog",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "$jev-start 현재 작업을 수행하면서 도움이 되는 좁은 의미 판단에 Jev를 선택적으로 활용해주세요."
+    ]
+  }
+}

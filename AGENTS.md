@@ -6,6 +6,7 @@
 - Keep trigger language aligned across the standalone Skill, Plugin mirror, UI metadata, and `README.md`.
 - Prefer `references/` for long guidance and keep top-level instructions lean.
 - Keep `gptplease/` and `plugins/gptplease/skills/gptplease/` byte-identical.
+- Skills intended for marketplace delivery need a Plugin manifest and marketplace entry; placing a skill in `.agents/skills/` only makes it repository-scoped. Verify the published catalog and installed skill path before reporting marketplace availability.
 
 ## Output Contract
 - List changed files or directories.
