@@ -1,0 +1,4 @@
+interface:
+  display_name: "Astra Team Building"
+  short_description: "Astra·Sol·Luna와 추론 수준으로 개발 팀의 역할과 규모를 조절"
+  default_prompt: "$astra-team-building으로 이 프로젝트에 맞는 팀을 구성하고 구현·검증·통합을 완료하세요."

@@ -3,24 +3,25 @@
   "kind": "operator_scenarios_not_live_results",
   "cases": [
     {
-      "id": "astra-default",
-      "scope": "orchestrator",
-      "request": "$astra-orchestrator로 이 목표를 완료하세요.",
-      "setup": "혼합 모델을 선택한 사용자 지시가 없다. 위임이 유리한 독립 과제가 있다.",
+      "id": "team-default",
+      "scope": "team-building",
+      "request": "$astra-team-building로 이 목표를 완료하세요.",
+      "setup": "독립 과제가 있고 모델을 지정한 사용자 지시는 없다. Astra·Sol·Luna가 사용 가능하다.",
       "expected_evidence": [
-        "위임할 때 Astra 모델·역할별 effort 요청/관측을 분리한다.",
-        "작은 작업은 직접 수행해도 된다."
+        "과제와 환경에 맞는 역할·모델·effort를 선택하고 이유를 설명한다.",
+        "작은 작업은 직접 수행할 수 있고 사용한 설정의 요청/관측을 구분한다."
       ],
       "forbidden": [
-        "스킬 호출만으로 Luna/Sol 위임",
+        "세 모델을 모두 사용하기 위해 불필요한 세션 생성",
+        "별도 mixed-model 선언 요구",
         "전역 model 변경"
       ],
-      "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/SKILL.md"
+      "policy_document": "plugins/astra-team-building/skills/astra-team-building/SKILL.md"
     },
     {
       "id": "mixed-bounded",
-      "scope": "orchestrator",
-      "request": "$astra-orchestrator로 이번 작업에 mixed-model을 적용하세요.",
+      "scope": "team-building",
+      "request": "$astra-team-building으로 명세가 확정된 독립 구현과 자료 조사를 완료하세요.",
       "setup": "Luna/high와 Sol/medium이 사용 가능하며 좁은 조사와 확정 구현이 별도 worktree로 분리 가능하다.",
       "expected_evidence": [
         "위임 이익과 선택 이유를 설명한다.",
@@ -30,12 +31,12 @@
         "두 작업을 반드시 병렬화",
         "메인 작업 재구현"
       ],
-      "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/references/model-routing.md"
+      "policy_document": "plugins/astra-team-building/skills/astra-team-building/references/model-routing.md"
     },
     {
       "id": "read-only-contract",
-      "scope": "orchestrator",
-      "request": "mixed-model로 소유권 상태 전이 계약의 타당성을 검토하세요.",
+      "scope": "team-building",
+      "request": "$astra-team-building으로 소유권 상태 전이 계약의 타당성을 검토하세요.",
       "setup": "읽기 전용이지만 계약 간 모순과 데이터 손실 영향 판단이 필요하다.",
       "expected_evidence": [
         "리더 또는 필요한 Astra 전문 역할이 판단한다."
@@ -43,11 +44,11 @@
       "forbidden": [
         "읽기 전용이라는 이유만으로 Luna에 최종 판단 위임"
       ],
-      "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/references/model-routing.md"
+      "policy_document": "plugins/astra-team-building/skills/astra-team-building/references/model-routing.md"
     },
     {
       "id": "explicit-unavailable",
-      "scope": "orchestrator",
+      "scope": "team-building",
       "request": "worker는 제가 지정한 모델과 effort만 사용하세요.",
       "setup": "사용자 지정 조합을 현재 호스트가 제공하지 않는다.",
       "expected_evidence": [
@@ -57,12 +58,12 @@
       "forbidden": [
         "조용한 모델/effort 대체"
       ],
-      "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/references/model-routing.md"
+      "policy_document": "plugins/astra-team-building/skills/astra-team-building/references/model-routing.md"
     },
     {
       "id": "custom-override",
-      "scope": "orchestrator",
-      "request": "mixed-model로 좁은 조사를 Luna/high에 맡기세요.",
+      "scope": "team-building",
+      "request": "$astra-team-building으로 좁은 조사를 Luna/high에 맡기세요.",
       "setup": "선택된 custom agent 파일은 model=Astra와 effort=max로 덮어쓴다.",
       "expected_evidence": [
         "파일의 실제 덮어쓰기를 확인한다.",
@@ -72,12 +73,12 @@
         "prompt의 Luna 표기만으로 적용 성공 보고",
         "기존 custom agent 파일 자동 수정"
       ],
-      "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/references/session-tools.md"
+      "policy_document": "plugins/astra-team-building/skills/astra-team-building/references/session-tools.md"
     },
     {
       "id": "preserve-context",
-      "scope": "orchestrator",
-      "request": "현재 메인과 컨텍스트를 유지하고 mixed-model을 사용하세요.",
+      "scope": "team-building",
+      "request": "현재 메인과 컨텍스트를 유지하고 팀을 구성하세요.",
       "setup": "예제 사용자의 메인 설정은 context=600000, auto_compact=500000이다. 워커 호환성은 확인되지 않았다.",
       "expected_evidence": [
         "리더 설정을 보존한다.",
@@ -87,12 +88,12 @@
         "리더 한도 일괄 축소",
         "미지원 설정 키 생성"
       ],
-      "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/references/session-tools.md"
+      "policy_document": "plugins/astra-team-building/skills/astra-team-building/references/session-tools.md"
     },
     {
       "id": "single-writer",
-      "scope": "orchestrator",
-      "request": "두 독립 구현을 mixed-model로 처리하세요.",
+      "scope": "team-building",
+      "request": "$astra-team-building으로 두 독립 구현을 처리하세요.",
       "setup": "두 작업이 다른 파일을 수정하지만 같은 worktree를 사용한다. 격리는 불가능하다.",
       "expected_evidence": [
         "쓰기 과제를 직렬화한다."
@@ -100,11 +101,11 @@
       "forbidden": [
         "다른 파일이라는 이유로 동일 worktree의 동시 writer 허용"
       ],
-      "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/SKILL.md"
+      "policy_document": "plugins/astra-team-building/skills/astra-team-building/SKILL.md"
     },
     {
       "id": "fork-constraints",
-      "scope": "orchestrator",
+      "scope": "team-building",
       "request": "지원되는 schema로 Luna/high worker를 생성하세요.",
       "setup": "이 호스트의 fork_turns=all은 명시적 모델·effort override를 거부한다.",
       "expected_evidence": [
@@ -114,12 +115,12 @@
         "미지원 인자 제출",
         "CLI 문서로 host 실패를 성공 처리"
       ],
-      "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/references/session-tools.md"
+      "policy_document": "plugins/astra-team-building/skills/astra-team-building/references/session-tools.md"
     },
     {
       "id": "no-route-fallback",
-      "scope": "orchestrator",
-      "request": "mixed-model로 현재 작업을 진행하세요.",
+      "scope": "team-building",
+      "request": "$astra-team-building으로 현재 작업을 진행하세요.",
       "setup": "현재 내부 서브에이전트가 없다. 외부 runner/Chat/Work 호출은 요청하지 않았다.",
       "expected_evidence": [
         "제한을 보고하고 가능한 리더 작업을 계속한다."
@@ -129,7 +130,7 @@
         "Unreal/Chat/Work 자동 호출",
         "sidebar 작업 자동 생성"
       ],
-      "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/references/session-tools.md"
+      "policy_document": "plugins/astra-team-building/skills/astra-team-building/references/session-tools.md"
     },
     {
       "id": "chat-work-only",
@@ -245,6 +246,99 @@
         "Fast/priority 자동 활성화"
       ],
       "policy_document": "gptplease/references/model-selection.md"
+    },
+    {
+      "id": "small-serial",
+      "scope": "team-building",
+      "request": "이 작은 포맷 버그를 $astra-team-building으로 고쳐주세요.",
+      "setup": "수정은 한 함수이며 기존 테스트로 직접 확인 가능하다. 독립 과제나 요청된 독립 리뷰는 없다.",
+      "expected_evidence": [
+        "리더가 필요한 수정과 검증을 직접 완료할 수 있다."
+      ],
+      "forbidden": [
+        "역할 목록을 채우기 위한 워커 생성"
+      ],
+      "policy_document": "plugins/astra-team-building/skills/astra-team-building/SKILL.md"
+    },
+    {
+      "id": "shared-device",
+      "scope": "team-building",
+      "request": "두 모듈을 구현하고 실기기 동작을 확인하세요.",
+      "setup": "계약 확정, 독립 worktree 2개, 호스트 슬롯 4개(리더 포함), 사용할 수 있는 실기기는 1대다.",
+      "expected_evidence": [
+        "구현 독립성과 기기 점유를 별도로 판단한다.",
+        "기기 검증 owner를 정하고 직렬화한다."
+      ],
+      "forbidden": [
+        "슬롯만 보고 두 실기기 검증을 동시 배정"
+      ],
+      "policy_document": "plugins/astra-team-building/skills/astra-team-building/references/workspaces-and-integration.md"
+    },
+    {
+      "id": "integration-backlog",
+      "scope": "team-building",
+      "request": "준비된 다음 기능도 팀으로 진행하세요.",
+      "setup": "구현 결과 3개가 돌아왔으나 통합되지 않았다. 빈 슬롯과 추가 독립 과제가 있다.",
+      "expected_evidence": [
+        "리더의 검토·통합 여력을 고려해 새 배정을 제한한다."
+      ],
+      "forbidden": [
+        "가용 슬롯을 채우기 위한 확장"
+      ],
+      "policy_document": "plugins/astra-team-building/skills/astra-team-building/references/team-design.md"
+    },
+    {
+      "id": "environment-blocked",
+      "scope": "team-building",
+      "request": "계속 실패하는 검증을 해결해주세요.",
+      "setup": "원문 오류는 기기 연결 부재다. 테스트 코드는 아직 실행되지 않았다.",
+      "expected_evidence": [
+        "실행 환경·필요 증거를 해결하거나 제한을 보고하고 독립 작업을 진행한다."
+      ],
+      "forbidden": [
+        "같은 검증을 고비용 모델로 반복"
+      ],
+      "policy_document": "plugins/astra-team-building/skills/astra-team-building/references/model-routing.md"
+    },
+    {
+      "id": "team-partial-explicit",
+      "scope": "team-building",
+      "request": "구현 worker 모델은 Sol로 해주세요.",
+      "setup": "effort는 미지정. 확정된 입력 계약이 있으나 경계 사례 분석이 필요하다.",
+      "expected_evidence": [
+        "모델 지정은 보존하고 미지정 effort를 근거에 맞게 선택한다."
+      ],
+      "forbidden": [
+        "effort 미지정을 무시해 Astra로 교체"
+      ],
+      "policy_document": "plugins/astra-team-building/skills/astra-team-building/references/model-routing.md"
+    },
+    {
+      "id": "reuse-idle-capacity",
+      "scope": "team-building",
+      "request": "반환한 결과에 좁은 보완을 진행하세요.",
+      "setup": "기존 worker가 idle이며 맥락·설정이 적합하다. close 도구가 없고 다른 새 슬롯은 없다.",
+      "expected_evidence": [
+        "지원되는 followup으로 기존 worker를 재사용한다."
+      ],
+      "forbidden": [
+        "interrupt가 슬롯을 해제한다고 가정",
+        "동일 입력으로 무한 spawn 재시도"
+      ],
+      "policy_document": "plugins/astra-team-building/skills/astra-team-building/references/session-tools.md"
+    },
+    {
+      "id": "no-recursive-spawn",
+      "scope": "team-building",
+      "request": "여러 모듈을 맡은 worker가 추가 인력이 필요하다고 합니다.",
+      "setup": "현재 전체 슬롯과 공유 자원을 리더가 관리하고 있다.",
+      "expected_evidence": [
+        "새 독립 산출물과 자원 이익을 리더가 평가한다."
+      ],
+      "forbidden": [
+        "worker별 무제한 자율 증설"
+      ],
+      "policy_document": "plugins/astra-team-building/skills/astra-team-building/references/team-design.md"
     }
   ]
 }

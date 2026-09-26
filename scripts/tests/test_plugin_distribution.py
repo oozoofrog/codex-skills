@@ -34,7 +34,7 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertEqual("codex-skills", marketplace["name"])
         self.assertEqual("Codex Skills", marketplace["interface"]["displayName"])
         self.assertEqual(
-            ["swift-intelligence", "astra-orchestrator", "figma-computer-use", "gptplease", "session-continuity", "ponytail-beck-tdd", "unreal-agent", "local-ai-studio"],
+            ["swift-intelligence", "astra-team-building", "figma-computer-use", "gptplease", "session-continuity", "ponytail-beck-tdd", "unreal-agent", "local-ai-studio"],
             [plugin["name"] for plugin in marketplace["plugins"]],
         )
         for entry in marketplace["plugins"]:
@@ -82,9 +82,27 @@ class PluginDistributionTests(unittest.TestCase):
                     self.assertTrue((path.parent / target.split("#")[0]).exists(), (path, target))
 
     def test_retired_packages_are_not_distributed(self) -> None:
-        for name in ("gptpro", "gptwork"):
+        for name in ("gptpro", "gptwork", "astra-orchestrator"):
             self.assertFalse((REPO_ROOT / name / "SKILL.md").exists())
             self.assertFalse((REPO_ROOT / "plugins" / name / ".codex-plugin" / "plugin.json").exists())
+
+    def test_astra_team_building_distribution(self) -> None:
+        plugin = REPO_ROOT / "plugins" / "astra-team-building"
+        skill = plugin / "skills" / plugin.name
+        manifest = json.loads((plugin / ".codex-plugin/plugin.json").read_text())
+        self.assertEqual("0.1.0", manifest["version"].split("+")[0])
+        self.assertEqual("./skills/", manifest["skills"])
+        self.assertFalse((REPO_ROOT / plugin.name / "SKILL.md").exists())
+        self.assertEqual({".codex-plugin", "README.md", "skills"}, {p.name for p in plugin.iterdir()})
+        for key in ("mcpServers", "apps", "hooks"):
+            self.assertNotIn(key, manifest)
+        for path in plugin.rglob("*"):
+            self.assertFalse(path.is_symlink(), path)
+        from test_document_links import local_targets
+        for document in plugin.rglob("*.md"):
+            for target in local_targets(document.read_text(encoding="utf-8")):
+                self.assertTrue((document.parent / target).exists(), (document, target))
+        self.assertTrue((skill / "SKILL.md").is_file())
 
     def test_figma_computer_use_distribution(self) -> None:
         source = REPO_ROOT / "figma-computer-use"

@@ -1,5 +1,7 @@
 # Model routing validation — 2026-09-25
 
+> 과거 검증 기록입니다. 아래 astra-orchestrator 명령·수치는 당시 산출물에 대한 기록이며 현재 astra-team-building의 실행 증거가 아닙니다. 현재 구조는 [새 Plugin](../plugins/astra-team-building/README.md)을 참조하세요.
+
 ## 대상과 실행 환경
 
 기준 main: `6e720366830dfd4cdbb1770114bdd957fc243410`, Git tree `700e00e9faf1c90a74b9c527a177b23ee99bd580`. GitHub connector로 원본을 읽고 수정했습니다. 실행 컨테이너는 Linux / Python 3.13.5입니다. 네트워크 DNS 제한으로 전체 저장소 clone은 실패했으며, 아래 자동 검사는 **변경 파일 snapshot**에서 수행했습니다. 전체 저장소 테스트를 실행한 것으로 표현하지 않습니다.

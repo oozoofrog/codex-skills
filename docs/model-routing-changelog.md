@@ -1,5 +1,7 @@
 # Model routing release notes — 2026-09-25
 
+> 2026-09-26: `astra-orchestrator` 0.2.0 배포 항목을 `astra-team-building` 0.1.0으로 교체했습니다. 현재 정책은 [새 Plugin](../plugins/astra-team-building/README.md)을 따릅니다. 아래 표는 2026-09-25 변경 이력입니다.
+
 이 변경의 릴리스 기록입니다. [기존 변경 이력](../CHANGELOG.md)은 변경하지 않고 보존합니다. 원문 확인 범위와 설계는 [검토 문서](model-routing-review.md), 실행한 검사와 남은 검증은 [검증 문서](model-routing-validation.md)에 있습니다.
 
 | Plugin | 이전 | 변경 |

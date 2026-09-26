@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-ASTRA = ROOT / 'plugins/astra-orchestrator/skills/astra-orchestrator'
-VERSIONS = {'gptplease': '0.3.0', 'astra-orchestrator': '0.2.0',
+ASTRA = ROOT / 'plugins/astra-team-building/skills/astra-team-building'
+VERSIONS = {'gptplease': '0.3.0', 'astra-team-building': '0.1.0',
             'session-continuity': '0.1.1', 'unreal-agent': '0.1.3'}
 PAIRS = {'gptplease': ('README.md', 'references/model-selection.md'),
          'session-continuity': ('SKILL.md', 'references/orchestration.md'),
@@ -58,16 +58,12 @@ class ModelPolicyContracts(unittest.TestCase):
         self.assertEqual(ui['display_name'], interface['displayName'])
         self.assertEqual(ui['short_description'], interface['shortDescription'])
         self.assertIn(ui['default_prompt'], interface['defaultPrompt'])
-        self.assertIn('astra-only', ui['default_prompt'].lower())
 
-    def test_policy_entry_points_and_references(self):
-        text = (ASTRA / 'SKILL.md').read_text()
-        for reference in ('model-routing.md', 'session-tools.md', 'orchestration-handoff.md'):
-            self.assertIn(f'(references/{reference})', text)
-            self.assertTrue((ASTRA / 'references' / reference).is_file())
-        self.assertIn('기본 `astra-only`', text)
-        self.assertIn('한 worktree에는 한 시점에 한 writer', text)
-        self.assertIn('명시한 작업만', text)
+    def test_policy_references_resolve(self):
+        from test_document_links import local_targets
+        for document in ASTRA.rglob('*.md'):
+            for target in local_targets(document.read_text()):
+                self.assertTrue((document.parent / target).is_file(), (document, target))
         self.assertIn('(references/orchestration.md)', (ROOT / 'session-continuity/SKILL.md').read_text())
 
     def test_changed_skill_frontmatter_names_and_descriptions(self):
@@ -83,11 +79,13 @@ class ModelPolicyContracts(unittest.TestCase):
         scenario = json.loads((ROOT / 'tests/model-routing/scenarios.json').read_text())
         self.assertEqual(scenario['schema_version'], 1)
         self.assertEqual(scenario['kind'], 'operator_scenarios_not_live_results')
-        required = {'astra-default', 'mixed-bounded', 'read-only-contract', 'explicit-unavailable',
+        required = {'team-default', 'mixed-bounded', 'read-only-contract', 'explicit-unavailable',
                     'custom-override', 'preserve-context', 'single-writer', 'fork-constraints',
                     'no-route-fallback', 'chat-work-only', 'work-current', 'partial-explicit',
                     'keep-and-recommend', 'pro-and-unknown-send', 'resume-unknown-worker',
-                    'runner-low-explicit', 'budget-conflict'}
+                    'runner-low-explicit', 'budget-conflict', 'small-serial', 'shared-device',
+                    'integration-backlog', 'environment-blocked', 'team-partial-explicit',
+                    'reuse-idle-capacity', 'no-recursive-spawn'}
         self.assertEqual(required, {case['id'] for case in scenario['cases']})
         self.assertEqual(len(required), len(scenario['cases']))
         for case in scenario['cases']:

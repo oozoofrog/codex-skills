@@ -1,6 +1,6 @@
 # codex-skills
 
-ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위한 `$gptplease`, Swift 의미론 탐색용 `swift-intelligence`, 역할별 작업 조정을 위한 `astra-orchestrator`, Figma UI 작업용 `figma-computer-use`, 일반 Codex 세션의 작업 인계용 `session-continuity`, 켄트 벡의 글을 바탕으로 한 개발 절차 `ponytail-beck-tdd`, 명시적 외부 runner 호출용 `unreal-agent`, Local AI Studio 설치·모델 실행용 `local-ai-studio`를 제공합니다.
+ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위한 `$gptplease`, Swift 의미론 탐색용 `swift-intelligence`, 개발 팀 구성과 협업을 위한 `astra-team-building`, Figma UI 작업용 `figma-computer-use`, 일반 Codex 세션의 작업 인계용 `session-continuity`, 켄트 벡의 글을 바탕으로 한 개발 절차 `ponytail-beck-tdd`, 명시적 외부 runner 호출용 `unreal-agent`, Local AI Studio 설치·모델 실행용 `local-ai-studio`를 제공합니다.
 
 ## GPT Please
 
@@ -82,7 +82,7 @@ Standalone `local-ai-studio/`와 byte-identical skills-only Plugin `0.2.1`을 �
 
 `swift-intelligence`는 Xcode의 SourceKit-LSP로 Swift 정의, 참조, 구현, 타입, 심볼 및 진단을 읽기 전용으로 조회합니다. MCP 서버가 필요한 Plugin이므로 `plugins/swift-intelligence/`에만 제공합니다. Python 3 외의 Python 패키지나 외부 MCP 바이너리를 추가로 설치하지 않습니다.
 
-`astra-orchestrator`는 Astra 리더·워커·Git 전용 워커로 작업 조정을 요청할 때 사용하는 스킬입니다. 작은 작업은 현재 리더가 직접 완료하고 병렬화가 유리할 때만 위임합니다. 스킬 자체의 설명·편집이나 일반 단일 작업에는 자동 적용하지 않습니다. 내부 병렬 과제는 서브에이전트, 사용자가 새 작업 생성을 명시한 장기 과제는 별도 Codex 작업을 선택할 수 있습니다. 기본 `astra-only`를 유지하며, 이번 작업에 `mixed-model`을 명시한 경우만 제한된 Luna/Sol 위임을 선택합니다. 메인 모델·컨텍스트 설정과 한 worktree 한 writer 원칙을 보존합니다. [Astra Orchestrator 설치와 사용](plugins/astra-orchestrator/README.md)을 참고하세요.
+`astra-team-building`은 프로젝트 개발을 위한 팀 구성·위임·재편을 요청할 때 사용하는 스킬입니다. Astra·Sol·Luna와 thinking level을 난도·불확실성·검증 가능성에 맞춰 배정하고, 독립 과제·실제 슬롯·격리 환경·공유 자원·통합 여력에 따라 팀 규모를 조절합니다. 작은 작업은 리더 단독으로 완료할 수 있으며 역할마다 세션을 만들거나 세 모델을 모두 쓸 의무는 없습니다. 현재 리더의 설정과 한 worktree 한 writer 원칙을 보존합니다. 스킬 자체의 설명·편집이나 일반 단일 작업에는 자동 적용하지 않습니다. [Astra Team Building 설치와 사용](plugins/astra-team-building/README.md)을 참고하세요. [교체 검증 기록](docs/astra-team-building-validation.md)에 로컬 설치·로더·독립 예제의 확인 범위를 정리했습니다.
 
 `figma-computer-use`는 Figma MCP 대신 computer-use로 Figma 데스크톱·브라우저 UI를 조작합니다. 디자인 생성·편집·검증과 매뉴얼·호환성 기준 갱신을 지원합니다.
 

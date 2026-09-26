@@ -2,6 +2,8 @@
 
 작성·공식 문서 확인: 2026-09-25. 검토 기준: `oozoofrog/codex-skills` main `6e720366830dfd4cdbb1770114bdd957fc243410` (2026-09-24 22:28:39 KST). 이 문서는 기존 검토 요청을 구현 가능한 설계와 사용 안내로 정리한 자체 작성 문서다. 외부 글 전문이나 공식 모델 런타임 사양을 대신하지 않는다.
 
+> 2026-09-26 갱신: 팀 구성은 [Astra Team Building](../plugins/astra-team-building/README.md)으로 대체했습니다. 아래 원문 조사와 비교 평가 도구 설명의 2026-09-25 기록은 보존합니다.
+
 ## 1. 원문과 확인 범위
 
 사용자가 제시한 원문은 [Rahul의 X 게시물](https://x.com/sairahul1/status/2102694818485096803)이다. 검색에서 확인된 제목은 **“How To Code Almost Forever for $20/Month With Codex + …”**이다. 검색 발췌는 Plus와 Codex의 Luna/Sol 이용을 다룬다는 점까지 뒷받침한다. 직접 열기는 403/접근 제한으로 실패했다. 게시물 전체, 첨부 파일, 정확한 설치 명령, 배포 저장소, 모든 모델 분류 규칙은 이번 작업에서 확인하지 못했다.
@@ -18,7 +20,7 @@
 
 Codex가 개발과 검증의 주체이며 기존 Astra 메인 세션과 긴 맥락을 유지한다. 스킬이 메인 모델·provider·로그인·권한·컨텍스트 설정을 바꾸지 않는다. 특히 기존 큰 context window와 auto-compaction 임계값을 일괄 축소하지 않는다. 새 기능이 다른 코딩 에이전트, 프록시, daemon, 전역 custom agent 설치를 필요로 하지 않게 한다.
 
-기존 스킬을 재사용한다. 새 독립 운영 라우터는 추가하지 않는다. 단일 작업은 직접 처리하고 위임은 이익이 있을 때만 한다. 기존 Astra-only 기본값, Git Steward 역할, 한 worktree 한 writer, 완료 증거 기준을 보존한다. 비용보다 정확한 완료가 우선이며 좁은 조사와 확정된 구현만 선택적으로 분리한다.
+다음은 2026-09-25 요청의 기록이며, 2026-09-26 팀 교체 요청은 위 갱신과 새 스킬을 따른다. 당시에는 기존 스킬을 재사용하고 새 독립 운영 라우터를 추가하지 않았다. 단일 작업은 직접 처리하고 위임은 이익이 있을 때만 한다. 기존 Astra-only 기본값, Git Steward 역할, 한 worktree 한 writer, 완료 증거 기준을 보존한다. 비용보다 정확한 완료가 우선이며 좁은 조사와 확정된 구현만 선택적으로 분리한다.
 
 ## 4. 반영한 개선
 
@@ -26,18 +28,11 @@ Codex가 개발과 검증의 주체이며 기존 Astra 메인 세션과 긴 맥�
 
 [모델 선택 원본](../gptplease/references/model-selection.md)을 Chat/Work 열로 나누었다. 실제 화면에 있는 모델·effort만 적용하고, 명시 조합이 없으면 보내지 않는다. Work 후보에 최신 Luna/Sol을 포함하되 Chat을 Work로 바꾸지 않는다. keep-current·recommend-only·명시 Pro·부분 명시·Standard·단일 Send와 전송 불명 상태의 읽기 복구는 유지한다. 상담 대상의 모델을 호출한 Codex의 모델로 혼동하지 않는다.
 
-### astra-orchestrator: 선택형 혼합 모델
+### astra-team-building: 작업에 맞춘 팀 구성
 
-[스킬 원본](../plugins/astra-orchestrator/skills/astra-orchestrator/SKILL.md)의 기본은 `astra-only`다. 명시적으로 선택한 `mixed-model`만 [혼합 정책](../plugins/astra-orchestrator/skills/astra-orchestrator/references/model-routing.md)을 적용한다. 정책 이름은 Codex 설정 키가 아니다. 읽기 작업이라는 이유만으로 단순 모델에 배정하지 않으며, 모호성·오류 영향·검증 가능성을 함께 판단한다.
+[스킬 원본](../plugins/astra-team-building/skills/astra-team-building/SKILL.md)은 Astra·Sol·Luna의 적합한 혼합 배정을 제공하며 별도 mixed-model 선언을 요구하지 않는다. [모델 정책](../plugins/astra-team-building/skills/astra-team-building/references/model-routing.md)은 공식 출발점과 역할별 조정 기준을 구별한다. 읽기 전용이라는 이유만으로 단순 모델에 어려운 판단을 맡기지 않는다.
 
-| 작업 | 적용 |
-| --- | --- |
-| 좁은 위치·심볼·근거 추출 | 가용한 Luna/high 후보 |
-| 명세·범위가 확정된 구현과 테스트 | 가용한 Sol/medium 후보 |
-| 상태 계약·동시성·설계·중요한 판단 | 현재 리더 또는 필요한 Astra 전문 역할 |
-| Git 통합·중요한 최종 독립 검토 | 기존 Astra 역할과 안전 경계 |
-
-[실행 설정](../plugins/astra-orchestrator/skills/astra-orchestrator/references/session-tools.md)은 custom agent의 덮어쓰기, 호스트별 fork 제약과 관측 한계를 구분한다. old callable 예제는 9월 6일 기록이며 이번 변경에서 live 재검증한 값이 아니다. 전역 설정이나 미지원 설정 키를 추가하지 않는다.
+[팀 설계](../plugins/astra-team-building/skills/astra-team-building/references/team-design.md)는 역할과 세션을 분리한다. 리더 단독부터 시작할 수 있고, 준비된 독립 과제·슬롯·격리 환경·공유 자원·통합 여력에 따라 확장·축소한다. 실제 설정은 [세션 도구](../plugins/astra-team-building/skills/astra-team-building/references/session-tools.md)로 지정하고 요청값과 관측값을 구분한다. 기존 리더의 모델·컨텍스트·권한은 보존한다.
 
 ### unreal-agent: 이미 있는 라우팅 보완
 
@@ -49,19 +44,19 @@ Codex가 개발과 검증의 주체이며 기존 Astra 메인 세션과 긴 맥�
 
 ### 변경하지 않은 경계
 
-Codex 내부 위임 실패를 이유로 Chat/Work나 Unreal runner를 자동 호출하지 않는다. marketplace 항목은 추가·삭제하지 않는다.
+Codex 내부 위임 실패를 이유로 Chat/Work나 Unreal runner를 자동 호출하지 않는다. 2026-09-25 변경에서는 marketplace 항목을 추가·삭제하지 않았다. 2026-09-26에는 팀 스킬 항목을 교체했다.
 
 ## 5. 호출 예시
 
 설치된 버전이 이 변경을 포함하는지 먼저 확인한다. PR 생성은 사용자의 로컬 설치 업데이트가 아니다.
 
 ```text
-$astra-orchestrator로 이 작업을 진행해주세요.
-기존 Astra-only 정책을 유지하고 작은 작업은 직접 처리하세요.
+$astra-team-building으로 이 작업에 맞는 팀을 구성하고 완료해주세요.
+작은 작업은 직접 처리하고 독립 과제가 준비되면 필요한 역할만 배정하세요.
 ```
 
 ```text
-$astra-orchestrator로 이번 작업에 mixed-model 정책을 적용해주세요.
+$astra-team-building으로 이번 작업의 모델·추론 수준·환경을 배정해주세요.
 메인 Astra 세션과 컨텍스트 설정은 유지하세요.
 좁은 코드 위치 조사는 Luna에, 명세가 확정된 구현은 Sol에 맡기되
 상태 계약과 최종 판단은 메인이 담당하세요. 커밋과 푸시는 하지 마세요.
@@ -104,9 +99,9 @@ python3 scripts/model_routing_eval.py /absolute/path/to/reported-runs.json
 
 [이번 릴리스 기록](model-routing-changelog.md)에 버전별 변경을 모았고 기존 CHANGELOG 이력은 수정하지 않았다.
 
-Plugin 버전: astra-orchestrator 0.2.0, gptplease 0.3.0, unreal-agent 0.1.3, session-continuity 0.1.1. 각 standalone 수정은 Plugin 미러와 동일하게 배포한다. astra-orchestrator는 Plugin 내부가 원본이며 존재하지 않는 루트 원본을 새로 만들지 않는다. 사용자 config·인증·이미 설치된 cache는 변경하지 않는다.
+2026-09-25 Plugin 버전 기록: astra-orchestrator 0.2.0, gptplease 0.3.0, unreal-agent 0.1.3, session-continuity 0.1.1. 각 standalone 수정은 Plugin 미러와 동일하게 배포한다. 현재 astra-team-building은 Plugin 내부가 원본이다. 2026-09-25 검토에서는 사용자 config·인증·설치 cache를 변경하지 않았다.
 
-기능을 사용하지 않으려면 Astra-only를 유지하면 된다. 저장소 변경의 전체 복구는 이 PR의 commit을 통상적인 review/revert 절차로 되돌린다. 로컬 스킬·Plugin 갱신과 재시작은 별도 작업이며, 이 PR로 과거 task state나 사용자의 전역 환경을 자동 변경하지 않는다.
+현재 팀 스킬에서 모든 역할을 Astra로 제한하려면 해당 작업에 모델 제약을 명시한다. 저장소 변경의 전체 복구는 이 PR의 commit을 통상적인 review/revert 절차로 되돌린다. 로컬 스킬·Plugin 갱신과 재시작은 별도 작업이며, 이 PR로 과거 task state나 사용자의 전역 환경을 자동 변경하지 않는다.
 
 ## 출처
 

@@ -17,10 +17,10 @@
       "category": "Productivity"
     },
     {
-      "name": "astra-orchestrator",
+      "name": "astra-team-building",
       "source": {
         "source": "local",
-        "path": "./plugins/astra-orchestrator"
+        "path": "./plugins/astra-team-building"
       },
       "policy": {
         "installation": "AVAILABLE",

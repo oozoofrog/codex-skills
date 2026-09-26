@@ -1,12 +1,12 @@
 # Plugin installation
 
-Repository marketplace에는 `gptplease`, `swift-intelligence`, `astra-orchestrator`, `figma-computer-use`, `session-continuity`, `ponytail-beck-tdd`, `unreal-agent`, `local-ai-studio`가 있습니다. 필요한 Plugin만 선택합니다. 아래 명령은 해당 변경이 원격에 반영된 뒤 사용합니다.
+Repository marketplace에는 `gptplease`, `swift-intelligence`, `astra-team-building`, `figma-computer-use`, `session-continuity`, `ponytail-beck-tdd`, `unreal-agent`, `local-ai-studio`가 있습니다. 필요한 Plugin만 선택합니다. 아래 명령은 해당 변경이 원격에 반영된 뒤 사용합니다.
 
 ```bash
 codex plugin marketplace add oozoofrog/codex-skills --ref main
 codex plugin add gptplease@codex-skills
 codex plugin add swift-intelligence@codex-skills
-codex plugin add astra-orchestrator@codex-skills
+codex plugin add astra-team-building@codex-skills
 codex plugin add figma-computer-use@codex-skills
 codex plugin add session-continuity@codex-skills
 codex plugin add ponytail-beck-tdd@codex-skills
@@ -35,7 +35,7 @@ Standalone이 필요하면 `gptplease/`를 skill-installer로 선택 설치합�
 
 `figma-computer-use`는 Figma MCP 대신 호스트의 `mcp__cua_repl.js` computer-use를 사용합니다. 이 Plugin 자체에는 MCP 서버나 Figma connector가 없으므로 computer-use가 제공되는 환경과 Figma 접근 권한이 필요합니다. 설치 후 새 작업에서 `$figma-computer-use:figma-computer-use`로 호출합니다. [내부 매뉴얼](../figma-computer-use/references/figma-manual.md)과 [호환성·버전 관리](../figma-computer-use/references/maintenance.md)를 포함합니다. 원본 수정은 설치나 현재 작업의 새 스킬 노출을 의미하지 않습니다.
 
-Astra Orchestrator는 모델·추론 수준을 지정할 수 있는 Codex 서브에이전트 환경이 필요합니다. 리더 설정은 `gpt-6-astra` / `xhigh`이며 스킬 자체가 실행 중인 설정을 바꾸지는 않습니다. 별도 MCP 서버나 설치 hook은 없습니다. 새 작업에서 `$astra-orchestrator:astra-orchestrator`로 호출합니다. 기존 사용자 로컬 `astra-orchestrator`와 함께 설치하면 중복 표시될 수 있습니다. 자세한 내용은 [Astra Orchestrator 설치와 사용](../plugins/astra-orchestrator/README.md)을 참고하세요.
+Astra Team Building은 모델·추론 수준을 지정할 수 있는 Codex 서브에이전트 환경에서 역할과 규모를 조절합니다. 현재 리더의 실행 설정을 보존하고 내부 과제는 서브에이전트로 진행합니다. 새 작업에서 `$astra-team-building:astra-team-building`으로 호출합니다. 기존 `astra-orchestrator`를 대체하며 중복 설치를 피합니다. 자세한 내용은 [설치와 사용](../plugins/astra-team-building/README.md)을 참고하세요.
 
 Swift Intelligence는 macOS, Command Line Tools를 포함한 Xcode, Python 3가 필요합니다. Xcode에 포함된 `sourcekit-lsp`를 실행하며 외부 MCP 바이너리나 Python 패키지를 설치하지 않습니다. Swift Intelligence 설치 후 Codex를 다시 시작하고 새 작업을 열어 Skill과 MCP 도구를 로드하십시오. 자세한 내용은 [Swift Intelligence 설치 및 사용](../plugins/swift-intelligence/docs/installation-and-usage.md)을 참고하세요.
 
@@ -43,7 +43,7 @@ Swift Intelligence는 macOS, Command Line Tools를 포함한 Xcode, Python 3가 
 
 ## 모델 정책 업데이트
 
-`gptplease` 0.3.0은 Chat/Work 후보를 분리하고, `astra-orchestrator` 0.2.0은 기존 `astra-only` 기본값에 명시적 `mixed-model` 선택을 추가합니다. `unreal-agent` 0.1.3은 runner 모델·effort와 관측값을 구별하며, `session-continuity` 0.1.1은 오케스트레이터와 함께 쓸 때 상태 중복을 방지합니다. [원문 검토·설계·사용법](model-routing-review.md)과 [검증 범위](model-routing-validation.md)를 참고하세요.
+`gptplease` 0.3.0의 Chat/Work 분리, `unreal-agent` 0.1.3의 실행 설정 관측, `session-continuity` 0.1.1의 단일 복구 지점은 유지합니다. `astra-team-building` 0.1.0은 이전 Astra-only/선택형 mixed-model 정책을 대체하며 작업에 맞는 혼합 배정과 동적 팀 구성을 제공합니다. [모델 역할 분담 문서](model-routing-review.md)와 [기존 검증 기록](model-routing-validation.md)의 과거 실행 범위를 구별하세요.
 
 혼합 모델은 설치만으로 활성화되지 않습니다. 메인 Codex 모델·컨텍스트·provider·인증·권한을 변경하지 않으며 전역 custom agent나 daemon을 설치하지 않습니다. PR 브랜치의 변경은 merge 전 `main` 설치에 포함되지 않습니다. 이미 사용하는 source와 버전을 확인하고 명시한 설치 경로만 갱신하세요. 과거 실행 기록을 새 버전의 live 검증으로 해석하지 않습니다.
 

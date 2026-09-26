@@ -1,4 +1,0 @@
-interface:
-  display_name: "Astra Orchestrator"
-  short_description: "Astra 기본 조정: 선택형 혼합 모델과 안전한 Git 역할 분리"
-  default_prompt: "$astra-orchestrator로 현재 목표를 완료해 주세요. 기본 Astra-only를 유지하고 위임이 유리할 때만 분리하세요."

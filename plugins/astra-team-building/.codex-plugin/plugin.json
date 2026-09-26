@@ -1,0 +1,33 @@
+{
+  "name": "astra-team-building",
+  "version": "0.1.0",
+  "description": "Astra·Sol·Luna와 thinking level, 역할·환경·팀 규모를 프로젝트 개발에 맞춰 조절하는 Codex 협업 스킬",
+  "author": {
+    "name": "oozoofrog",
+    "url": "https://github.com/oozoofrog"
+  },
+  "homepage": "https://github.com/oozoofrog/codex-skills/tree/main/plugins/astra-team-building",
+  "repository": "https://github.com/oozoofrog/codex-skills",
+  "keywords": [
+    "codex",
+    "astra",
+    "sol",
+    "luna",
+    "team-building",
+    "orchestration"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Astra Team Building",
+    "shortDescription": "Astra·Sol·Luna와 추론 수준으로 개발 팀의 역할과 규모를 조절",
+    "longDescription": "프로젝트 개발을 위한 팀 구성·위임·재편을 요청할 때 사용합니다. 작업의 난도·불확실성·검증 가능성에 따라 Astra·Sol·Luna와 thinking level을 선택합니다. 고정 인원 없이 독립 과제·슬롯·격리 환경·공유 자원·통합 여력에 맞춰 조절하며 리더 단독도 가능합니다. 현재 리더의 설정·기존 권한을 보존하고 구현·검증·통합까지 조정합니다. 스킬 설명·편집이나 일반 단일 작업에는 자동 적용하지 않습니다.",
+    "developerName": "oozoofrog",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "$astra-team-building으로 이 프로젝트에 맞는 팀을 구성하고 구현·검증·통합을 완료하세요."
+    ]
+  }
+}
