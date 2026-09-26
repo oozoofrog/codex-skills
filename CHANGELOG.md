@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+- `.agents/skills/jev-start`에 작업 시작용 Jev 지침을 추가했습니다. GPT가 개발 보조에 유용한 좁은 의미 판단을 선택하고, 실제 호출 시 기존 `typesafe-ai`를 참조합니다. 본문과 UI 메타데이터만 제공하며 전용 실행기·Plugin·전역 설정은 추가하지 않습니다.
+
 - `astra-orchestrator` Plugin을 제거하고 `astra-team-building` 0.1.0으로 대체했습니다. Astra·Sol·Luna와 thinking level을 난도·불확실성·검증 가능성에 따라 선택하며 고정 인원 대신 독립 과제·슬롯·격리 환경·공유 자원·통합 여력으로 팀을 조절합니다. 역할과 세션의 분리, 선택적 독립 검토, 모델/effort 재배정, 단일 복구 지점과 관측 증거를 정의했습니다. marketplace·설치 안내·배포 검사·행동 시나리오를 갱신하며 과거 작업 기록은 보존합니다.
 
 - Jev standalone 스킬 9개와 저장소 내 설치기·운영 문서·전용 테스트를 제거했습니다. `~/.codex/skills`의 Jev 스킬 8개와 오래된 Jev 설치 백업·marketplace 스테이징 스냅샷도 정리했습니다.

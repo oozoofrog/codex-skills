@@ -2,6 +2,16 @@
 
 ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위한 `$gptplease`, Swift 의미론 탐색용 `swift-intelligence`, 개발 팀 구성과 협업을 위한 `astra-team-building`, Figma UI 작업용 `figma-computer-use`, 일반 Codex 세션의 작업 인계용 `session-continuity`, 켄트 벡의 글을 바탕으로 한 개발 절차 `ponytail-beck-tdd`, 명시적 외부 runner 호출용 `unreal-agent`, Local AI Studio 설치·모델 실행용 `local-ai-studio`를 제공합니다.
 
+## Jev Start
+
+`$jev-start`는 작업 시작 시 Jev/TypeSafe를 개발 보조로 선택적으로 활용하도록 하는 짧은 지침입니다. GPT가 현재 작업에서 이득이 있는 좁은 의미 판단을 골라 맡기고, 실제 호출이 필요할 때 기존 `typesafe-ai` 스킬을 읽습니다.
+
+```text
+$jev-start 이 저장소의 스킬 호출 조건을 검토하고 필요한 개선을 해주세요.
+```
+
+[스킬 본문](.agents/skills/jev-start/SKILL.md)과 UI 메타데이터만 있는 저장소 범위 스킬입니다. 이 저장소의 `.agents/skills`에서 발견되며 marketplace Plugin이나 전역 설치는 추가하지 않습니다. 실제 Jev 호출에는 `typesafe-ai`와 사용 가능한 API 인증이 필요합니다. 사용 가능 여부와 실제 호출 결과를 구분하며, 별도 실행기·매 턴 호출·현재 모델/effort 변경을 제공하지 않습니다.
+
 ## GPT Please
 
 `gptwork`를 **gptplease**로 이름 변경하고 Chat·Chat Pro 상담과 목적·복잡도에 따른 모델·사고 수준 선택을 통합했습니다. 기존 `gptpro` Skill·Plugin·전용 Runner/전송 런타임 및 전용 설치 도구는 제거했습니다. 과거 상담 패키지·로그인 프로필을 삭제하거나 새 스킬로 이관하지 않습니다.

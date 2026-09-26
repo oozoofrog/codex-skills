@@ -1,0 +1,4 @@
+interface:
+  display_name: "Jev Start"
+  short_description: "작업 시작 시 Jev를 개발 보조로 선택적으로 활용하는 짧은 지침"
+  default_prompt: "$jev-start 현재 작업을 수행하면서 도움이 되는 좁은 의미 판단에 Jev를 선택적으로 활용해주세요."
