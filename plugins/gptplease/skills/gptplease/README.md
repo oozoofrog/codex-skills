@@ -20,7 +20,7 @@ $gptplease Work에서 Astra High로 이 기획안을 분석하고 완료 결과�
 | 현재 설정 유지 / 추천만 요청 | 관측 설정 보존 / 설정 변경·전송 없이 추천 |
 | 로컬 스킬 설명·편집 또는 초안만 요청 | 외부 전송 없음 |
 
-기본 후보는 명확한 추출·변환 **Luna Light**, 일반 작업 **Terra Medium**, 본격적인 분석·검토 **Sol High**, 여러 단계·도구가 얽힌 어려운 작업 **Astra High 또는 Extra High**입니다. 모델과 사고 수준을 따로 판단하며 시간·비용 제한과 실제 선택기의 지원 조합을 우선합니다. 단순 후속 요청은 명시한 Astra에 Light를 적용할 수도 있습니다. 중요한 최종 판단에만 Max·Chat Pro를 선택적으로 고려하며, Ultra와 Fast/priority는 자동으로 켜지 않습니다. [모델·사고 수준 선택](references/model-selection.md)에 판단 기준과 한계를 정리했습니다.
+모델 후보는 Chat과 Work를 구분합니다. 2026-09-25 정책에서 Work의 좁은 추출·변환은 실제 제공되는 **GPT-6 Luna High**, 일반 작업은 **GPT-6 Sol Medium**, 깊은 검토는 **Sol High**, 어려운 다단계 작업은 **Astra High 또는 Extra High**를 출발점으로 삼습니다. Chat에서는 실제 Chat 선택기에 있는 후보만 사용하며 Work 모델을 얻으려고 화면을 바꾸지 않습니다. 모델과 사고 수준을 따로 판단하며 시간·비용 제한과 실제 선택기의 지원 조합을 우선합니다. 단순 후속 요청은 명시한 Astra에 Light를 적용할 수도 있습니다. 중요한 최종 판단에만 Max·Chat Pro를 선택적으로 고려하며, Ultra와 Fast/priority는 자동으로 켜지 않습니다. [모델·사고 수준 선택](references/model-selection.md)에 판단 기준과 한계를 정리했습니다.
 
 자동 선택 후보가 없으면 같은 모드의 적합한 대안을 고르고 이유를 알립니다. **사용자가 명시한 조합이 없으면 전송을 보류**합니다. Chat의 Pro와 계정 배지, Work의 Max/Ultra는 구분합니다. Chat Astra Pro의 실제 가용성은 매번 확인하며, 2026-09-07 관측에서는 Chat 선택기에 Astra가 없어 해당 명시 조합은 보내지 않았습니다. [입력창 설정](references/composer-settings.md)을 참고하세요.
 
@@ -52,3 +52,5 @@ $gptplease Work에서 Astra High로 이 기획안을 분석하고 완료 결과�
 ## 설치
 
 Plugin은 `gptplease@codex-skills`, standalone은 `gptplease/`를 선택합니다. 설치 후 새 대화에서 `$gptplease`를 호출하세요. 이전 이름의 플러그인·스킬을 제거해 중복 노출을 피하고, 과거 상담 패키지와 로그인 프로필은 별도로 보존합니다. [저장소 설치 안내](https://github.com/oozoofrog/codex-skills/blob/main/docs/plugin-installation.md)를 참고하세요.
+
+0.3.0의 화면별 정책 변경은 모델 선택 지침과 배포 갱신입니다. 위의 9월 7일·12일 관측은 과거 증거이며 새 모델 조합의 live UI 검증을 의미하지 않습니다.

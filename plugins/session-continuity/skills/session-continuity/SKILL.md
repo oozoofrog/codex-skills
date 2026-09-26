@@ -7,6 +7,8 @@ description: Bootstrap and use repository-local Codex session continuity for lon
 
 일반 Codex 세션이 저장소와 짧은 task state만으로 작업을 이어가게 한다. 핵심 산출물은 `AGENTS.md`의 지속 규칙과 `.codex/work/<task-id>.md`의 현재 복구 지점이다. 설치와 호출 예시는 [README.md](README.md)에 있다.
 
+기존 오케스트레이터 상태를 함께 사용하는 장기 작업에서만 [작업 상태 연결](references/orchestration.md)을 읽는다. 일반 단일 세션에는 추가 설정이나 새 필수 필드가 필요 없다.
+
 ## 범위와 사실 기준
 
 - 사용자 요청에 해당하는 작업만 수행한다: 초기화, 새 작업, 재개, checkpoint 또는 완료 정리. 단순히 스킬을 읽었다고 저장소를 초기화하지 않는다. 기존 권한을 재사용하고 되돌릴 수 있는 범위 내 작업에 불필요한 재승인을 요구하지 않는다.

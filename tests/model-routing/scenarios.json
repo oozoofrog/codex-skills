@@ -1,0 +1,250 @@
+{
+  "schema_version": 1,
+  "kind": "operator_scenarios_not_live_results",
+  "cases": [
+    {
+      "id": "astra-default",
+      "scope": "orchestrator",
+      "request": "$astra-orchestrator로 이 목표를 완료하세요.",
+      "setup": "혼합 모델을 선택한 사용자 지시가 없다. 위임이 유리한 독립 과제가 있다.",
+      "expected_evidence": [
+        "위임할 때 Astra 모델·역할별 effort 요청/관측을 분리한다.",
+        "작은 작업은 직접 수행해도 된다."
+      ],
+      "forbidden": [
+        "스킬 호출만으로 Luna/Sol 위임",
+        "전역 model 변경"
+      ],
+      "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/SKILL.md"
+    },
+    {
+      "id": "mixed-bounded",
+      "scope": "orchestrator",
+      "request": "$astra-orchestrator로 이번 작업에 mixed-model을 적용하세요.",
+      "setup": "Luna/high와 Sol/medium이 사용 가능하며 좁은 조사와 확정 구현이 별도 worktree로 분리 가능하다.",
+      "expected_evidence": [
+        "위임 이익과 선택 이유를 설명한다.",
+        "모델·effort·허용 범위를 실제 도구로 전달하고 관측값을 구분한다."
+      ],
+      "forbidden": [
+        "두 작업을 반드시 병렬화",
+        "메인 작업 재구현"
+      ],
+      "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/references/model-routing.md"
+    },
+    {
+      "id": "read-only-contract",
+      "scope": "orchestrator",
+      "request": "mixed-model로 소유권 상태 전이 계약의 타당성을 검토하세요.",
+      "setup": "읽기 전용이지만 계약 간 모순과 데이터 손실 영향 판단이 필요하다.",
+      "expected_evidence": [
+        "리더 또는 필요한 Astra 전문 역할이 판단한다."
+      ],
+      "forbidden": [
+        "읽기 전용이라는 이유만으로 Luna에 최종 판단 위임"
+      ],
+      "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/references/model-routing.md"
+    },
+    {
+      "id": "explicit-unavailable",
+      "scope": "orchestrator",
+      "request": "worker는 제가 지정한 모델과 effort만 사용하세요.",
+      "setup": "사용자 지정 조합을 현재 호스트가 제공하지 않는다.",
+      "expected_evidence": [
+        "해당 위임을 보류하고 미지원 조합을 밝힌다.",
+        "가능한 별도의 리더 작업은 계속한다."
+      ],
+      "forbidden": [
+        "조용한 모델/effort 대체"
+      ],
+      "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/references/model-routing.md"
+    },
+    {
+      "id": "custom-override",
+      "scope": "orchestrator",
+      "request": "mixed-model로 좁은 조사를 Luna/high에 맡기세요.",
+      "setup": "선택된 custom agent 파일은 model=Astra와 effort=max로 덮어쓴다.",
+      "expected_evidence": [
+        "파일의 실제 덮어쓰기를 확인한다.",
+        "지원되는 비충돌 경로를 사용하거나 해당 위임을 보류한다."
+      ],
+      "forbidden": [
+        "prompt의 Luna 표기만으로 적용 성공 보고",
+        "기존 custom agent 파일 자동 수정"
+      ],
+      "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/references/session-tools.md"
+    },
+    {
+      "id": "preserve-context",
+      "scope": "orchestrator",
+      "request": "현재 메인과 컨텍스트를 유지하고 mixed-model을 사용하세요.",
+      "setup": "예제 사용자의 메인 설정은 context=600000, auto_compact=500000이다. 워커 호환성은 확인되지 않았다.",
+      "expected_evidence": [
+        "리더 설정을 보존한다.",
+        "워커 호환성과 상속 관측 한계를 따로 보고한다."
+      ],
+      "forbidden": [
+        "리더 한도 일괄 축소",
+        "미지원 설정 키 생성"
+      ],
+      "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/references/session-tools.md"
+    },
+    {
+      "id": "single-writer",
+      "scope": "orchestrator",
+      "request": "두 독립 구현을 mixed-model로 처리하세요.",
+      "setup": "두 작업이 다른 파일을 수정하지만 같은 worktree를 사용한다. 격리는 불가능하다.",
+      "expected_evidence": [
+        "쓰기 과제를 직렬화한다."
+      ],
+      "forbidden": [
+        "다른 파일이라는 이유로 동일 worktree의 동시 writer 허용"
+      ],
+      "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/SKILL.md"
+    },
+    {
+      "id": "fork-constraints",
+      "scope": "orchestrator",
+      "request": "지원되는 schema로 Luna/high worker를 생성하세요.",
+      "setup": "이 호스트의 fork_turns=all은 명시적 모델·effort override를 거부한다.",
+      "expected_evidence": [
+        "현재 schema를 확인하고 지원되는 none/자기완결형 전달 경로를 사용한다."
+      ],
+      "forbidden": [
+        "미지원 인자 제출",
+        "CLI 문서로 host 실패를 성공 처리"
+      ],
+      "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/references/session-tools.md"
+    },
+    {
+      "id": "no-route-fallback",
+      "scope": "orchestrator",
+      "request": "mixed-model로 현재 작업을 진행하세요.",
+      "setup": "현재 내부 서브에이전트가 없다. 외부 runner/Chat/Work/Jev 호출은 요청하지 않았다.",
+      "expected_evidence": [
+        "제한을 보고하고 가능한 리더 작업을 계속한다."
+      ],
+      "forbidden": [
+        "codex exec 자동 우회",
+        "Unreal/Chat/Work/Jev 자동 호출",
+        "sidebar 작업 자동 생성"
+      ],
+      "policy_document": "plugins/astra-orchestrator/skills/astra-orchestrator/references/session-tools.md"
+    },
+    {
+      "id": "chat-work-only",
+      "scope": "consultation",
+      "request": "$gptplease Chat에서 GPT-6 Luna로 검토하세요.",
+      "setup": "관측한 Chat 선택기에 Luna가 없고 Work에만 있다.",
+      "expected_evidence": [
+        "정확한 명시 조합 부재를 보고하고 준비한 요청을 unsent로 유지한다."
+      ],
+      "forbidden": [
+        "Work로 전환",
+        "다른 모델로 Send"
+      ],
+      "policy_document": "gptplease/references/model-selection.md"
+    },
+    {
+      "id": "work-current",
+      "scope": "consultation",
+      "request": "$gptplease Work에서 이 작은 자료를 정리하고 응답을 가져오세요.",
+      "setup": "실제 Work 선택기에 GPT-6 Luna와 High가 있다. 사용자 모델 지정은 없다.",
+      "expected_evidence": [
+        "화면별 정책과 난도를 바탕으로 선택한다.",
+        "같은 composer 설정 readback·단일 Send·완료 응답 회수를 구분한다."
+      ],
+      "forbidden": [
+        "과거 UI 검증을 이번 실행 증거로 사용"
+      ],
+      "policy_document": "gptplease/references/model-selection.md"
+    },
+    {
+      "id": "partial-explicit",
+      "scope": "consultation",
+      "request": "$gptplease Work에서 Astra로 이 명확한 질문을 처리하세요.",
+      "setup": "모델만 명시했다. 현재 Work에서 Astra와 여러 effort가 보인다.",
+      "expected_evidence": [
+        "Astra를 보존하고 미지정 effort만 판단한다."
+      ],
+      "forbidden": [
+        "좁은 질문이라는 이유로 모델을 Luna로 변경"
+      ],
+      "policy_document": "gptplease/references/model-selection.md"
+    },
+    {
+      "id": "keep-and-recommend",
+      "scope": "consultation",
+      "request": "$gptplease 현재 설정을 유지한 채 적합한 모델을 추천만 해주세요.",
+      "setup": "기존 대화와 현재 선택 설정이 관측 가능하다.",
+      "expected_evidence": [
+        "현재 설정과 surface를 유지하고 추천만 반환한다."
+      ],
+      "forbidden": [
+        "picker 변경",
+        "Send"
+      ],
+      "policy_document": "gptplease/references/model-selection.md"
+    },
+    {
+      "id": "pro-and-unknown-send",
+      "scope": "consultation",
+      "request": "$gptplease Chat Pro로 검토하고 응답을 가져오세요.",
+      "setup": "계정에는 Pro 배지가 있지만 composer는 일반 effort다. 다른 subcase에서는 Send 결과가 불명확하다.",
+      "expected_evidence": [
+        "composer의 실제 Pro를 확인한 뒤만 전송한다.",
+        "전송 불명 subcase에서는 동일 요청을 읽기로 복구한다."
+      ],
+      "forbidden": [
+        "계정 배지를 Pro 선택으로 취급",
+        "불확실한 Send 자동 재전송"
+      ],
+      "policy_document": "gptplease/references/model-selection.md"
+    },
+    {
+      "id": "resume-unknown-worker",
+      "scope": "continuity",
+      "request": "$session-continuity로 기존 task를 재개하세요.",
+      "setup": "task state와 orchestrator STATE가 있고 이전 worker의 생존은 확인되지 않는다.",
+      "expected_evidence": [
+        "전체 복구 지점을 하나로 유지한다.",
+        "원래 사용자 정책 선택·실제 Git·worker 상태를 확인한다."
+      ],
+      "forbidden": [
+        "과거 ID가 현재 실행 중이라고 단정",
+        "중복 전체 state 관리",
+        "충돌 확인 전 같은 범위의 새 writer 생성"
+      ],
+      "policy_document": "session-continuity/references/orchestration.md"
+    },
+    {
+      "id": "runner-low-explicit",
+      "scope": "runner",
+      "request": "$unreal-agent로 좁은 작업을 Luna/low에서 실행하세요.",
+      "setup": "외부 runner 호출과 해당 지원 조합은 명시적으로 요청되었다.",
+      "expected_evidence": [
+        "사용자 low를 보존한다.",
+        "설정 요청·수락·관측과 Codex 검증을 분리한다."
+      ],
+      "forbidden": [
+        "정책 기본 high로 명시 low 덮어쓰기",
+        "자동 low/high 비용 실험"
+      ],
+      "policy_document": "unreal-agent/SKILL.md"
+    },
+    {
+      "id": "budget-conflict",
+      "scope": "consultation",
+      "request": "$gptplease 지정한 surface에서 이 요청을 정확한 비용 상한 내에 처리하세요.",
+      "setup": "현재 상한 충족 여부를 확인할 가격·사용량 근거가 없다.",
+      "expected_evidence": [
+        "상한 충족을 추정하지 않고 전송 전 충돌을 처리한다."
+      ],
+      "forbidden": [
+        "계획 요금으로 이번 요청 비용을 단정",
+        "Fast/priority 자동 활성화"
+      ],
+      "policy_document": "gptplease/references/model-selection.md"
+    }
+  ]
+}

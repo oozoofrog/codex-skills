@@ -41,9 +41,15 @@ Swift Intelligence는 macOS, Command Line Tools를 포함한 Xcode, Python 3가 
 
 `session-continuity`는 일반 Codex 세션의 작업 상태 초기화·재개·checkpoint·완료 정리를 지원합니다. 리더/워커나 MCP 서버가 필요하지 않으며, 선택적 보조 스크립트는 Python 3.9+와 Git을 사용합니다. 설치 후 새 작업에서 `$session-continuity:session-continuity`로 호출합니다. 저장소 초기화는 호출 후 요청 범위에서 수행하고, `.gitignore` 수정은 선택 사항입니다. [설치와 사용 안내](../session-continuity/README.md), [실행한 검증과 한계](../session-continuity/VALIDATION.md)를 참고하세요.
 
+## 모델 정책 업데이트
+
+`gptplease` 0.3.0은 Chat/Work 후보를 분리하고, `astra-orchestrator` 0.2.0은 기존 `astra-only` 기본값에 명시적 `mixed-model` 선택을 추가합니다. `unreal-agent` 0.1.3은 runner 모델·effort와 관측값을 구별하며, `session-continuity` 0.1.1은 오케스트레이터와 함께 쓸 때 상태 중복을 방지합니다. [원문 검토·설계·사용법](model-routing-review.md)과 [검증 범위](model-routing-validation.md)를 참고하세요.
+
+혼합 모델은 설치만으로 활성화되지 않습니다. 메인 Codex 모델·컨텍스트·provider·인증·권한을 변경하지 않으며 전역 custom agent나 daemon을 설치하지 않습니다. PR 브랜치의 변경은 merge 전 `main` 설치에 포함되지 않습니다. 이미 사용하는 source와 버전을 확인하고 명시한 설치 경로만 갱신하세요. 과거 실행 기록을 새 버전의 live 검증으로 해석하지 않습니다.
+
 ## Unreal Agent
 
-`unreal-agent`는 skills-only Plugin `0.1.2`입니다. 설치 후 새 작업에서 `$unreal-agent` 또는 `$unreal-agent:unreal-agent`로 명시적으로 호출합니다. 일반 코딩이나 Unreal Engine 작업이라는 이유만으로 자동 실행하지 않으며 Codex 실행 모드도 아닙니다. Standalone을 원하면 `unreal-agent/`를 skill-installer로 선택 설치하고 Plugin과 중복 설치하지 않습니다. 기존 전역 스킬이 있다면 덮어쓰지 말고 어느 설치본을 사용할지 먼저 확인하세요.
+`unreal-agent`는 skills-only Plugin `0.1.3`입니다. 설치 후 새 작업에서 `$unreal-agent` 또는 `$unreal-agent:unreal-agent`로 명시적으로 호출합니다. 일반 코딩이나 Unreal Engine 작업이라는 이유만으로 자동 실행하지 않으며 Codex 실행 모드도 아닙니다. Standalone을 원하면 `unreal-agent/`를 skill-installer로 선택 설치하고 Plugin과 중복 설치하지 않습니다. 기존 전역 스킬이 있다면 덮어쓰지 말고 어느 설치본을 사용할지 먼저 확인하세요.
 
 변경이 원격에 반영되기 전에는 위 원격 설치 명령만으로 새 Plugin을 받을 수 없습니다. 로컬에서 시험하려면 이 저장소 루트에서 `codex plugin marketplace add "$PWD"`로 checkout을 등록한 뒤 `codex plugin add unreal-agent@codex-skills`를 사용합니다. 같은 이름의 marketplace가 이미 있으면 먼저 source가 이 checkout인지 확인하세요. 저장소 파일 추가와 실제 설치·활성화·새 세션 노출은 별개입니다.
 

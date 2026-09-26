@@ -59,7 +59,7 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertEqual(tree_files(STANDALONE_SKILL), tree_files(PLUGIN_SKILL))
         manifest = json.loads((PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text())
         self.assertEqual("gptplease", manifest["name"])
-        self.assertEqual("0.2.0", manifest["version"].split("+")[0])
+        self.assertEqual("0.3.0", manifest["version"].split("+")[0])
         for relative in ("runtime/consult.mjs", "runtime/cua-chatgpt.mjs", "tests/consult.test.mjs", "tests/adapter.test.mjs", "references/transport-contract.md", "references/transport-recovery.md"):
             self.assertTrue((STANDALONE_SKILL / relative).is_file())
         for extension in ("json", "md", "swift"):
@@ -119,7 +119,7 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertEqual(tree_files(source), tree_files(plugin / "skills" / source.name))
         manifest = json.loads((plugin / ".codex-plugin" / "plugin.json").read_text())
         self.assertEqual(source.name, manifest["name"])
-        self.assertEqual("0.1.0", manifest["version"])
+        self.assertEqual("0.1.1", manifest["version"])
         self.assertEqual("./skills/", manifest["skills"])
         self.assertNotIn("mcpServers", manifest)
         self.assertNotIn("apps", manifest)
@@ -178,7 +178,7 @@ class PluginDistributionTests(unittest.TestCase):
                 self.assertFalse(path.is_symlink(), path)
         manifest = json.loads((plugin / ".codex-plugin" / "plugin.json").read_text())
         self.assertEqual(source.name, manifest["name"])
-        self.assertEqual("0.1.2", manifest["version"])
+        self.assertEqual("0.1.3", manifest["version"])
         self.assertEqual("./skills/", manifest["skills"])
         for key in ("mcpServers", "apps", "hooks"):
             self.assertNotIn(key, manifest)
