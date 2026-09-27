@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-PACKAGES = ("gptplease", "figma-computer-use", "session-continuity", "ponytail-beck-tdd", "unreal-agent", "local-ai-studio")
+PACKAGES = ("gptplease", "figma-computer-use", "session-continuity", "ponytail-beck-tdd", "unreal-agent", "local-ai-studio", "jev-blender-use")
 IGNORED_NAMES = {".DS_Store", "__pycache__"}
 IGNORED_SUFFIXES = {".pyc", ".pyo"}
 

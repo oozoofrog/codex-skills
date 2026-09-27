@@ -34,7 +34,7 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertEqual("codex-skills", marketplace["name"])
         self.assertEqual("Codex Skills", marketplace["interface"]["displayName"])
         self.assertEqual(
-            ["swift-intelligence", "astra-team-building", "figma-computer-use", "gptplease", "session-continuity", "ponytail-beck-tdd", "unreal-agent", "local-ai-studio", "jev-start"],
+            ["swift-intelligence", "astra-team-building", "figma-computer-use", "gptplease", "session-continuity", "ponytail-beck-tdd", "unreal-agent", "local-ai-studio", "jev-start", "jev-blender-use"],
             [plugin["name"] for plugin in marketplace["plugins"]],
         )
         for entry in marketplace["plugins"]:
@@ -108,10 +108,10 @@ class PluginDistributionTests(unittest.TestCase):
         plugin = REPO_ROOT / "plugins" / "jev-start"
         manifest = json.loads((plugin / ".codex-plugin/plugin.json").read_text())
         self.assertEqual("jev-start", manifest["name"])
-        self.assertEqual("0.1.0", manifest["version"])
+        self.assertEqual("0.2.0", manifest["version"])
         skill = plugin / manifest["skills"] / manifest["name"]
         self.assertEqual(
-            {".codex-plugin/plugin.json", "skills/jev-start/SKILL.md", "skills/jev-start/agents/openai.yaml"},
+            {".codex-plugin/plugin.json", "skills/jev-start/SKILL.md", "skills/jev-start/agents/openai.yaml", "skills/jev-start/references/decision-delegation.md"},
             set(tree_files(plugin)),
         )
         self.assertTrue((skill / "SKILL.md").is_file())

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "task_id": "mesh-optimization",
+  "category": "mesh_simplification",
+  "initial_scene": "generated local fixture",
+  "criteria": [
+    "reduce polygons >=30%",
+    "preserve Head",
+    "preserve silhouette"
+  ]
+}

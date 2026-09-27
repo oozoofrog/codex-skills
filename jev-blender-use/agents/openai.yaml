@@ -1,0 +1,4 @@
+interface:
+  display_name: "Jev Blender Use"
+  short_description: "Blender 실행·검증·관찰과 선택적 Jev 결정 루프"
+  default_prompt: "$jev-blender-use로 작업 규모에 맞는 방법을 선택해 Blender 작업과 필요한 결과 확인을 완료해주세요."

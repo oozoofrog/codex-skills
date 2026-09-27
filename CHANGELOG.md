@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+- `jev-blender-use`를 `0.2.1`로 개선했습니다. Codex가 작업 규모에 맞는 절차를 선택하도록 하고 health·전체 예제·독립 검토·환경별 사전 시험을 매 작업의 필수 조건에서 제외했습니다. 기존 원본/후보 보호를 유지하며 완료 evidence와 명시적 Codex 판단을 조립하는 `completion-state`/`verdict`, plan 범위에 맞춘 MCP `inspect --plan`, 선택적 protected 목록 처리와 사용 중 schema/context 복구 지침을 추가했습니다.
+
+- `jev-blender-use`를 `0.2.0`의 closed-loop Blender agent skill로 확장했습니다. CLI/bpy와 선택적 stdio MCP, plan·checkpoint·수치 validator·Vision receipt·기존 Jev 전송을 재사용한 strategy/risk/completion·scoped retry·benchmark 기록과 5개 실행 예제를 추가했습니다. 후보/최종 저장 분리, 보호 signature, 판정 freshness, mock/live 구분, 설치/복구/외부 통합 조사를 포함합니다.
+
+- `jev-start`를 `0.2.0`으로 확장했습니다. 선택적 작업 맥락 진입점으로 역할을 명확히 하고, PR·위험·정책·테스트·release·구현 비교의 결정 위임 예시를 추가했습니다. 수치 임계값 비교·필수 조건·실행은 코드에 두고 Jev에는 근거와 기준이 있는 의미 판단을 맡깁니다. 매 세션·매 턴 강제 사용을 요구하지 않으며 API 지침과 앱별 실행 기능의 역할을 구분합니다.
+
+- `jev-blender-use`에 신규 캡슐 로봇의 리그·두 걸음·상자 점프·착지·Cloth 망토·120프레임 렌더를 생성하는 전용 recipe를 추가했습니다. 재열기 후 evaluated 좌표로 발 접지 오류를 발견·수정했으며, background API 실행과 GUI 확인을 구분합니다.
+
+- `jev-blender-use` Skill과 Plugin `0.1.0`을 추가했습니다. 저장된 Blender 장면 조사·정적 메시 미리보기·GLB 묶음 출력을 Python 실행기로 제공하고, 선택적 Jev 후보 판단을 별도 HTTP 단계로 분리했습니다. 원본 fingerprint·새 출력 디렉터리·미지원 상태 반환·Codex 확장 절차와 배포 카탈로그를 포함합니다.
+
 - `jev-start`를 skills-only Plugin `0.1.0`으로 등록했습니다. 저장소 전용 스킬만 추가해 marketplace 업데이트에서 보이지 않던 배포 누락을 수정하고, 동일한 스킬·UI 파일을 Plugin 안으로 옮겨 중복 노출을 피했습니다. marketplace inventory·설치 안내·배포 검사와 저장소 배포 지침을 갱신했습니다.
 
 - `.agents/skills/jev-start`에 작업 시작용 Jev 지침을 추가했습니다. GPT가 개발 보조에 유용한 좁은 의미 판단을 선택하고, 실제 호출 시 기존 `typesafe-ai`를 참조합니다. 본문과 UI 메타데이터만 제공하며 전용 실행기·Plugin·전역 설정은 추가하지 않습니다.

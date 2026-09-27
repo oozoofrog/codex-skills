@@ -1,6 +1,6 @@
 # Plugin installation
 
-Repository marketplace에는 `gptplease`, `swift-intelligence`, `astra-team-building`, `figma-computer-use`, `session-continuity`, `ponytail-beck-tdd`, `unreal-agent`, `local-ai-studio`, `jev-start`가 있습니다. 필요한 Plugin만 선택합니다. 아래 명령은 해당 변경이 원격에 반영된 뒤 사용합니다.
+Repository marketplace에는 `gptplease`, `swift-intelligence`, `astra-team-building`, `figma-computer-use`, `session-continuity`, `ponytail-beck-tdd`, `unreal-agent`, `local-ai-studio`, `jev-start`, `jev-blender-use`가 있습니다. 필요한 Plugin만 선택합니다. 아래 명령은 해당 변경이 원격에 반영된 뒤 사용합니다.
 
 ```bash
 codex plugin marketplace add oozoofrog/codex-skills --ref main
@@ -13,6 +13,7 @@ codex plugin add ponytail-beck-tdd@codex-skills
 codex plugin add unreal-agent@codex-skills
 codex plugin add local-ai-studio@codex-skills
 codex plugin add jev-start@codex-skills
+codex plugin add jev-blender-use@codex-skills
 ```
 
 이미 등록한 원격 marketplace는 `codex plugin marketplace upgrade codex-skills`로 snapshot을 갱신한 뒤 설치합니다. 로컬 checkout marketplace를 사용하는 경우에는 그 source를 확인한 뒤 같은 이름으로 재설치합니다.
@@ -44,14 +45,16 @@ Swift Intelligence는 macOS, Command Line Tools를 포함한 Xcode, Python 3가 
 
 ## Jev Start
 
-`jev-start`는 작업 시작 시 Jev/TypeSafe를 개발 보조로 선택적으로 활용하는 짧은 지침입니다. 원격 marketplace 갱신은 카탈로그를 갱신하는 작업이며 Plugin 설치는 별도로 수행합니다.
+`jev-start` `0.2.0`은 작업 중 Jev/TypeSafe를 결정 보조로 활용하도록 맥락과 위임 기준을 설정하는 선택적 지침입니다. Jev 활용을 요청하거나 Codex와 Jev의 판단 분담을 정할 때 사용합니다. 해당 버전이 원격에 반영된 뒤 아래 명령으로 카탈로그를 갱신하고 Plugin을 설치합니다.
 
 ```bash
 codex plugin marketplace upgrade codex-skills
 codex plugin add jev-start@codex-skills
 ```
 
-설치 후 새 작업에서 `$jev-start` 또는 `$jev-start:jev-start`와 실제 작업 요청을 함께 사용하세요. [스킬 본문](../plugins/jev-start/skills/jev-start/SKILL.md)은 필요한 경우 기존 `typesafe-ai` 스킬을 읽도록 안내합니다. TypeSafe 스킬·SDK·인증·실행기는 번들하지 않습니다. 이전 저장소 전용 스킬은 Plugin 안으로 이동했으므로 별도 복사본을 중복 설치하지 않습니다. marketplace 목록, 설치/활성화, 새 로더에서 읽는 실제 경로, Jev API 호출은 따로 확인합니다.
+설치 후 필요한 작업에서 `$jev-start` 또는 `$jev-start:jev-start`와 실제 목표를 함께 사용합니다. [스킬 본문](../plugins/jev-start/skills/jev-start/SKILL.md)은 맥락 전달·선택적 위임·결과 적용을, [결정 위임 예시](../plugins/jev-start/skills/jev-start/references/decision-delegation.md)는 PR·위험·정책·테스트·release 판단과 세션 적용을 설명합니다. API 사용법은 가능한 경우 `typesafe-ai`를 읽고, 없으면 공식 문서를 참조합니다. TypeSafe 스킬·SDK·인증·실행기를 번들하지 않습니다.
+
+매 세션에 본문을 복사하거나 매 턴 호출할 필요는 없습니다. 이미 작업 기능에 필요한 결정 계약이 있으면 직접 사용합니다. 독립된 새 세션에도 같은 적용을 확실히 원하면 명시 호출이나 해당 범위의 조건부 지침이 필요하며, 자동 선택을 보장하지 않습니다. 설치만으로 전역 사용자 지침·프로젝트 AGENTS.md·hook을 추가하지 않습니다. marketplace 목록, 설치/활성화, 새 세션 로더 경로, 실제 API 호출은 각각 확인합니다.
 
 ## 모델 정책 업데이트
 
@@ -92,3 +95,18 @@ Plugin 설치 자체는 LocalAIHub나 모델을 설치하지 않습니다. 스�
 Qwen Image 2.1 설치 플래그는 사용자의 명시적 라이선스 동의 후에만 사용합니다. 24 GB Mac에서는 다른 app/UI 작업도 포함해 대형 생성 모델을 직렬로 실행합니다. TTS 출력 디렉터리·전사 stem·그 외 파일 경로의 차이와 `music --prompt`/bare `music`의 동작을 [명령 참고](../local-ai-studio/references/cli-workflows.md)에 정리했습니다.
 
 Plugin 설치 성공, 새 세션에서 읽은 스킬 경로, 모델 readiness, 실제 추론 완료, 결과의 파일·형식·품질 확인은 별도 단계입니다. 배포 검사만으로 실제 생성·재생 품질이나 설치 후 노출을 주장하지 않습니다.
+
+## Jev Blender Use
+
+`jev-blender-use`는 Blender의 열린 장면은 MCP로, 재현 가능한 작업은 CLI/bpy로 조작하고 수치 검증·시각 관찰·선택적 Jev 판단으로 결과를 확인하는 Skill/Plugin `0.2.1`입니다. 작업 규모에 따라 필요한 절차를 선택하며 사전 환경 시험을 필수 조건으로 두지 않습니다. 현재 checkout에 추가된 소스를 원격에 반영한 뒤 marketplace를 갱신하고 설치합니다.
+
+```bash
+codex plugin marketplace upgrade codex-skills
+codex plugin add jev-blender-use@codex-skills
+```
+
+설치 후 새 작업에서 `$jev-blender-use` 또는 `$jev-blender-use:jev-blender-use`로 호출합니다. Python 3.10+와 Blender가 필요하며 실행 파일은 `--blender` 또는 `BLENDER_BIN`으로 지정할 수 있습니다. 실행기는 Python 표준 라이브러리만 사용하고 기본 Blender 작업은 Jev 인증 없이 동작합니다. 선택적 Jev 전송에만 `TYPESAFE_API_KEY`가 필요합니다. Blender·SDK·인증·MCP 서버를 설치하거나 번들하지 않습니다.
+
+[스킬 본문](../jev-blender-use/SKILL.md), [실행 계약](../jev-blender-use/references/workflows.md), [검증 기록](../jev-blender-use/references/validation.md)을 참고하세요. Standalone과 Plugin을 중복 설치하지 않습니다. 로컬 소스·원격 카탈로그·설치/활성화·새 세션에서 로드된 경로·실제 Blender/Jev 호출은 각각 확인합니다.
+
+Blender 설정·health·첫 장면·interactive/background 예제·Jev 판단·문제 해결은 [시작 안내](../jev-blender-use/references/getting-started.md)를 따릅니다. MCP server는 선택 사항이며 설치된 서버의 실제 tool schema와 연결을 확인합니다. 공식 Blender Lab과 community bridge의 출처·버전은 [MCP 조사/연결](../jev-blender-use/references/blender-mcp.md)에 구분합니다.

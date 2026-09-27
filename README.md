@@ -4,13 +4,34 @@ ChatGPT Chat·Work의 목적별 모델 선택과 상담과 응답 회수를 위�
 
 ## Jev Start
 
-`$jev-start`는 작업 시작 시 Jev/TypeSafe를 개발 보조로 선택적으로 활용하도록 하는 짧은 지침입니다. GPT가 현재 작업에서 이득이 있는 좁은 의미 판단을 골라 맡기고, 실제 호출이 필요할 때 기존 `typesafe-ai` 스킬을 읽습니다.
+`$jev-start`는 작업 중 Jev/TypeSafe를 결정 보조로 활용하도록 맥락과 위임 기준을 설정합니다. Jev 활용을 요청하거나 Codex와 Jev의 판단 분담을 정할 때 사용합니다. Codex는 구현·조사·원인 분석을, Jev는 제공된 증거와 기준에 따른 의미 판단을, 코드는 수치 비교·필수 조건·실행을 맡습니다.
 
 ```text
-$jev-start 이 저장소의 스킬 호출 조건을 검토하고 필요한 개선을 해주세요.
+$jev-start 이 변경을 구현하면서 위험 평가와 요구사항 비교에 도움이 될 때 Jev를 활용해주세요.
 ```
 
-[스킬 본문](plugins/jev-start/skills/jev-start/SKILL.md)과 UI 메타데이터를 담은 skills-only Plugin `0.1.0`입니다. marketplace를 갱신한 뒤 `codex plugin add jev-start@codex-skills`로 설치하고 새 작업에서 `$jev-start` 또는 `$jev-start:jev-start`로 호출합니다. 저장소 전용 `.agents/skills/jev-start`는 Plugin 안으로 옮겨 중복 노출을 피합니다. 실제 Jev 호출에는 별도 `typesafe-ai` 스킬과 사용 가능한 API 인증이 필요합니다. 사용 가능 여부와 실제 호출 결과를 구분하며, 별도 실행기·매 턴 호출·현재 모델/effort 변경을 제공하지 않습니다. [설치 안내](docs/plugin-installation.md#jev-start)를 참고하세요.
+[스킬 본문](plugins/jev-start/skills/jev-start/SKILL.md), [PR·위험·정책·테스트·release 판단 예시](plugins/jev-start/skills/jev-start/references/decision-delegation.md), UI 메타데이터를 담은 skills-only Plugin `0.2.0`입니다. `jev-start`는 선택적 맥락 진입점이며 매 세션·매 턴 필수가 아닙니다. API와 질문 설계는 `typesafe-ai` 또는 공식 문서를, 실제 앱 실행은 `jev-blender-use` 같은 작업 기능을 사용합니다. 실제 Jev 호출에는 인증이 필요하며 이 스킬은 실행기·자동 승인·현재 모델/effort 변경을 제공하지 않습니다.
+
+이 버전이 원격에 반영된 뒤 marketplace를 갱신하고 `codex plugin add jev-start@codex-skills`로 설치합니다. 새 작업에서 `$jev-start` 또는 `$jev-start:jev-start`로 선택해 사용할 수 있습니다. 설치/활성화, 새 세션에서 로드한 경로, 실제 API 호출은 각각 확인합니다. [설치 안내](docs/plugin-installation.md#jev-start)를 참고하세요.
+
+## Jev Blender Use
+
+`$jev-blender-use`는 Blender의 열린 장면은 MCP로, 재현 가능한 작업은 CLI/bpy로 조작하고 수치 검증·시각 관찰·선택적 Jev 판단으로 결과를 확인합니다. 모델링, 재질, Geometry Nodes, 리깅 조사, 렌더와 반복 수정에 사용합니다.
+
+**Codex = 계획·제작 / Blender = 실행·측정 / Vision = 관찰 / Jev = 판단 / Code = 정확한 검증**
+
+```text
+$jev-blender-use Body의 polygon을 30% 이상 줄이고 Head와 실루엣을 보존해주세요. 먼저 조사하고 검증 가능한 계획으로 진행해주세요.
+```
+
+Plugin `0.2.1`은 작업 규모에 맞춰 Codex가 조사·수정·결과 확인을 진행합니다. 필요할 때 plan·checkpoint·수치 검증·Vision·Jev 판단을 연결하며, 기존 환경의 사전 시험이나 독립 검토를 매 작업의 조건으로 요구하지 않습니다. Jev·MCP가 없어도 CLI/bpy가 동작하며 원본을 보존한 후보와 최종 저장을 분리합니다. Jev는 strategy/risk/completion의 fuzzy decision에만 선택적으로 개입하고 exact checks를 뒤집지 못합니다. 기존 정적 GLB와 캡슐 로봇 데모는 유지합니다. `completion-state`/`verdict` 명령으로 evidence JSON 조립을 줄이고, MCP `inspect --plan`으로 대상·보호 범위를 실행 단계와 맞춥니다.
+
+- [설치·설정·health·첫 장면·문제 해결](jev-blender-use/references/getting-started.md)
+- [Skill](jev-blender-use/SKILL.md) · [구조/plan](jev-blender-use/references/architecture.md) · [MCP](jev-blender-use/references/blender-mcp.md) · [CLI/bpy](jev-blender-use/references/bpy.md)
+- [Jev 결정](jev-blender-use/references/jev-integration.md) · [수치 검증/Vision](jev-blender-use/references/validation-contract.md) · [안전/복구](jev-blender-use/references/safety.md)
+- [5개 실행 예제](jev-blender-use/references/examples.md) · [retry/benchmark](jev-blender-use/references/benchmark.md) · [실제 검증 범위](jev-blender-use/references/validation.md)
+
+Python 3.10+와 Blender가 필요합니다. `--trusted-script`는 검토된 임의 Python 실행이며 sandbox가 아닙니다. 실제 TypeSafe 전송에는 별도 인증과 `--send`가 필요합니다. 로컬 소스·원격 catalog·설치/활성화·새 세션 노출·실제 MCP/Jev 연결은 별도로 확인합니다.
 
 ## GPT Please
 

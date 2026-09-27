@@ -1,0 +1,32 @@
+{
+  "name": "jev-blender-use",
+  "version": "0.2.1",
+  "description": "Blender MCP·CLI/bpy 작업을 수치 검증·Vision 관찰·선택적 Jev 판단으로 반복 실행",
+  "author": {
+    "name": "oozoofrog",
+    "url": "https://github.com/oozoofrog"
+  },
+  "homepage": "https://github.com/oozoofrog/codex-skills/tree/main/plugins/jev-blender-use",
+  "repository": "https://github.com/oozoofrog/codex-skills",
+  "keywords": [
+    "codex",
+    "blender",
+    "jev",
+    "typesafe",
+    "automation"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Jev Blender Use",
+    "shortDescription": "Blender 실행·검증·관찰과 선택적 Jev 결정 루프",
+    "longDescription": "열린 Blender 장면은 MCP로, 재현 가능한 작업은 CLI/bpy로 조작합니다. 작업 규모에 맞춰 Codex가 조사·수정·결과 확인을 진행하며, 필요할 때 plan·checkpoint·수치 검증·Vision·Jev 판단과 retry 기록을 사용합니다. 기존 실행기의 원본 보존과 최종 저장 조건을 유지하고 completion-state/verdict 생성 및 plan 범위의 MCP 조사를 제공합니다.",
+    "developerName": "oozoofrog",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "$jev-blender-use로 작업 규모에 맞는 방법을 선택해 Blender 작업과 필요한 결과 확인을 완료해주세요."
+    ]
+  }
+}

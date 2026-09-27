@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "task_id": "forest-visual-retry",
+  "goal": "Keep 20,000 procedural tree instances and existing materials. Make individual conical trees and forest depth readable in the preview by changing spacing, tree height, ground size and framing/lighting only.",
+  "target_objects": [
+    "Forest",
+    "TreePrototype",
+    "Ground",
+    "Camera",
+    "Key"
+  ],
+  "protected_objects": [],
+  "operations": [
+    {
+      "type": "set_modifier",
+      "target": "Forest"
+    },
+    {
+      "type": "edit_mesh",
+      "target": "TreePrototype"
+    },
+    {
+      "type": "scale",
+      "target": "Ground"
+    },
+    {
+      "type": "set_camera",
+      "target": "Camera"
+    },
+    {
+      "type": "move",
+      "target": "Key"
+    }
+  ],
+  "validation": [
+    {
+      "kind": "instance_count",
+      "object": "Forest",
+      "count": 20000
+    },
+    {
+      "kind": "modifier_exists",
+      "object": "Forest",
+      "modifier": "NODES"
+    },
+    {
+      "kind": "unchanged",
+      "object": "Forest",
+      "aspect": "materials"
+    },
+    {
+      "kind": "unchanged",
+      "object": "TreePrototype",
+      "aspect": "materials"
+    },
+    {
+      "kind": "unchanged",
+      "object": "Ground",
+      "aspect": "materials"
+    }
+  ],
+  "visual_requirements": [
+    "Individual conical trees and forest depth are readable, rather than a flat turf-like slab."
+  ]
+}

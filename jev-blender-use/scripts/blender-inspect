@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""Thin entry point; use --help for the explicit contract."""
+import sys
+from blender_cli import main
+sys.argv.insert(1, 'inspect')
+raise SystemExit(main())

@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "task_id": "geometry-nodes",
+  "goal": "geometry nodes",
+  "target_objects": [
+    "Forest",
+    "TreePrototype",
+    "Ground",
+    "Camera",
+    "Key"
+  ],
+  "protected_objects": [],
+  "operations": [
+    {
+      "type": "create",
+      "target": "Forest",
+      "instances": 20000
+    }
+  ],
+  "validation": [
+    {
+      "kind": "modifier_exists",
+      "object": "Forest",
+      "modifier": "NODES"
+    },
+    {
+      "kind": "exists",
+      "object": "TreePrototype"
+    },
+    {
+      "kind": "instance_count",
+      "object": "Forest",
+      "count": 20000
+    }
+  ],
+  "visual_requirements": []
+}
