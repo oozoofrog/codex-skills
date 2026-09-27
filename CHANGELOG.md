@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+- Jev 스킬·Plugin 전체(`jev-start`, `jev-blender-use`, `jev-computer-use`)와 전용 CLI를 제거했습니다. Marketplace·미러 동기화·설치 안내·배포 검사에서 해당 패키지를 제외했습니다. 아래 Jev 항목은 제거 이전의 변경 이력입니다.
+
 - `jev-blender-use`를 `0.2.1`로 개선했습니다. Codex가 작업 규모에 맞는 절차를 선택하도록 하고 health·전체 예제·독립 검토·환경별 사전 시험을 매 작업의 필수 조건에서 제외했습니다. 기존 원본/후보 보호를 유지하며 완료 evidence와 명시적 Codex 판단을 조립하는 `completion-state`/`verdict`, plan 범위에 맞춘 MCP `inspect --plan`, 선택적 protected 목록 처리와 사용 중 schema/context 복구 지침을 추가했습니다.
 
 - `jev-blender-use`를 `0.2.0`의 closed-loop Blender agent skill로 확장했습니다. CLI/bpy와 선택적 stdio MCP, plan·checkpoint·수치 validator·Vision receipt·기존 Jev 전송을 재사용한 strategy/risk/completion·scoped retry·benchmark 기록과 5개 실행 예제를 추가했습니다. 후보/최종 저장 분리, 보호 signature, 판정 freshness, mock/live 구분, 설치/복구/외부 통합 조사를 포함합니다.

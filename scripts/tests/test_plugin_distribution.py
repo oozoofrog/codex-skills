@@ -34,7 +34,7 @@ class PluginDistributionTests(unittest.TestCase):
         self.assertEqual("codex-skills", marketplace["name"])
         self.assertEqual("Codex Skills", marketplace["interface"]["displayName"])
         self.assertEqual(
-            ["swift-intelligence", "astra-team-building", "figma-computer-use", "gptplease", "session-continuity", "ponytail-beck-tdd", "unreal-agent", "local-ai-studio", "jev-start", "jev-blender-use"],
+            ["swift-intelligence", "astra-team-building", "figma-computer-use", "gptplease", "session-continuity", "ponytail-beck-tdd", "unreal-agent", "local-ai-studio"],
             [plugin["name"] for plugin in marketplace["plugins"]],
         )
         for entry in marketplace["plugins"]:
@@ -82,7 +82,7 @@ class PluginDistributionTests(unittest.TestCase):
                     self.assertTrue((path.parent / target.split("#")[0]).exists(), (path, target))
 
     def test_retired_packages_are_not_distributed(self) -> None:
-        for name in ("gptpro", "gptwork", "astra-orchestrator"):
+        for name in ("gptpro", "gptwork", "astra-orchestrator", "jev-start", "jev-blender-use", "jev-computer-use"):
             self.assertFalse((REPO_ROOT / name / "SKILL.md").exists())
             self.assertFalse((REPO_ROOT / "plugins" / name / ".codex-plugin" / "plugin.json").exists())
 
@@ -103,23 +103,6 @@ class PluginDistributionTests(unittest.TestCase):
             for target in local_targets(document.read_text(encoding="utf-8")):
                 self.assertTrue((document.parent / target).exists(), (document, target))
         self.assertTrue((skill / "SKILL.md").is_file())
-
-    def test_jev_start_distribution(self) -> None:
-        plugin = REPO_ROOT / "plugins" / "jev-start"
-        manifest = json.loads((plugin / ".codex-plugin/plugin.json").read_text())
-        self.assertEqual("jev-start", manifest["name"])
-        self.assertEqual("0.2.0", manifest["version"])
-        skill = plugin / manifest["skills"] / manifest["name"]
-        self.assertEqual(
-            {".codex-plugin/plugin.json", "skills/jev-start/SKILL.md", "skills/jev-start/agents/openai.yaml", "skills/jev-start/references/decision-delegation.md"},
-            set(tree_files(plugin)),
-        )
-        self.assertTrue((skill / "SKILL.md").is_file())
-        self.assertFalse((REPO_ROOT / ".agents/skills/jev-start/SKILL.md").exists())
-        for key in ("mcpServers", "apps", "hooks"):
-            self.assertNotIn(key, manifest)
-        for path in plugin.rglob("*"):
-            self.assertFalse(path.is_symlink(), path)
 
     def test_figma_computer_use_distribution(self) -> None:
         source = REPO_ROOT / "figma-computer-use"

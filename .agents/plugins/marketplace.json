@@ -99,30 +99,6 @@
         "authentication": "ON_INSTALL"
       },
       "category": "Productivity"
-    },
-    {
-      "name": "jev-start",
-      "source": {
-        "source": "local",
-        "path": "./plugins/jev-start"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "category": "Productivity"
-    },
-    {
-      "name": "jev-blender-use",
-      "source": {
-        "source": "local",
-        "path": "./plugins/jev-blender-use"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "category": "Productivity"
     }
   ]
 }
